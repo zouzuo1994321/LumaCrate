@@ -1,12 +1,30 @@
 # 流明盒 (LumaCrate)
 
-> 一个**不依赖浏览器、不依赖网页**的本地影视管理桌面软件。借鉴 Emby 的海报墙与演员管理模式，借鉴 tinyMediaManager 的本地管理思路，并重点强化了**片名 / 类型 / 演员的关联搜索**。影片刮削功能已阉割：仅读取已被 Emby / tinyMediaManager / Kodi 刮削好的 `.nfo`；演员信息独立保存，并可选通过 `www.minnano-av.com` / `IMDB` 单独补齐（v1.7.0）。
+> **所有流明 · 尽收盒中** —— *Every lumen, in one crate.*
 
-> **Slogan：所有流明 · 尽收盒中** —— *Every lumen, in one crate.*
->
+[![Version](https://img.shields.io/badge/version-v1.28.0-blue.svg)](https://github.com/zouzuo1994321/LumaCrate/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey.svg)](https://github.com/zouzuo1994321/LumaCrate/releases)
+[![Python](https://img.shields.io/badge/Python-3.13-3776AB.svg)](https://www.python.org)
+[![License](https://img.shields.io/badge/license-开源软件·禁止商用-orange.svg)](./README.md#版权与声明)
+[![Build](https://img.shields.io/badge/build-2609210038-success.svg)](https://github.com/zouzuo1994321/LumaCrate/releases)
+
+一个**不依赖浏览器、不依赖网页**的本地影视管理桌面软件。借鉴 Emby 的海报墙与演员管理模式，借鉴 tinyMediaManager 的本地管理思路，并重点强化了**片名 / 类型 / 演员的关联搜索**。影片刮削功能已阉割：仅读取已被 Emby / tinyMediaManager / Kodi 刮削好的 `.nfo`；演员信息独立保存，并可选通过 `www.minnano-av.com` / `IMDB` 单独补齐。
+
 > 原名「本地影视中心 / LocalMediaCenter」，**v1.27.0 起更名为「流明盒 / LumaCrate」**（功能不变，只是品牌与界面文案）。
-> 取名思路：`流明` = lumen，光的计量单位；`盒` = crate，收纳箱 —— 把收藏的每一道光都收进一个盒子里；
-> 英文名 `LumaCrate` 与 `lumen / crate` 同源，中英 Slogan 也因此能对上。
+
+## 目录 / Contents
+
+- [核心特性](#核心特性)
+- [屏幕截图](#屏幕截图)
+- [下载与安装](#下载与安装)
+- [依赖与运行环境](#依赖与运行环境)
+- [版本规则](#版本规则)
+- [使用方式](#使用方式)
+- [目录结构](#目录结构)
+- [开发 / 打包](#开发--打包)
+- [迭代记录](#迭代记录)
+- [相关项目 · NFO 画像矿工](#相关项目--nfo画像矿工)
+- [版权与声明](#版权与声明)
 
 ---
 
@@ -64,6 +82,29 @@
   - 首页列表**分批填充**（每批 200 行，批间交还事件循环）并在底部显示「正在载入列表… x / y」；
   - 海报 / 头像**带缓存**（原先是每建一张卡就重新读盘并缩放）。
 - **媒体库留档**：数据存于 `index_data/media_center.db`，演员索引独立持久化；运行日志在 `index_data/logs/`。
+
+---
+
+## 屏幕截图
+
+> 截图随版本发布附在 [GitHub Releases](https://github.com/zouzuo1994321/LumaCrate/releases)；也可把截图放在仓库 `docs/screenshots/` 下并在此处引用。
+
+- **首页**：列表 + 详情联动，鼠标悬停某行弹出缩略图预览卡
+- **影片墙海报墙**：每行 8 张卡片，分页增量加载，底部「加载更多」
+- **Emby 风格详情页**：全宽背景图 + 画质徽章 + 圆形演员行 + 文件信息
+- **工具箱**：画像概览 / 智能推荐 / 标签优化 / 重复检测 / 演员刮削
+
+## 下载与安装
+
+- 前往 **[GitHub Releases](https://github.com/zouzuo1994321/LumaCrate/releases)** 下载最新版 `流明盒-v1.28.0-<构建号>.exe`；
+- **Windows 单文件 exe，下载后双击即可运行，无需安装、无需 Python 环境**；
+- 若被系统 / 杀软拦截，请允许运行或加入白名单（单文件 exe 偶发被误报为可疑）；
+- 数据落在 exe **同目录**的 `index_data/`，换机器时连同 `index_data/` 一起拷贝即可迁移。
+
+## 依赖与运行环境
+
+- **运行（exe）**：Windows 10 / 11 64 位；exe 已内置 Python 3.13 + PySide6 6.x，无需自备运行时。
+- **从源码运行 / 打包**：Python 3.13 + `pip install -r requirements.txt`（含 PySide6、psutil）。
 
 ---
 
