@@ -1,0 +1,462 @@
+{
+  "nav": [
+    {
+      "key": "home",
+      "label": "首页",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "recent",
+      "label": "最近播放",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "favorites",
+      "label": "我的收藏",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "smart",
+      "label": "智能推荐",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "folders",
+      "label": "文件夹",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "collections",
+      "label": "合集",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "all",
+      "label": "全部",
+      "group": "分类",
+      "visible": true
+    },
+    {
+      "key": "actors",
+      "label": "演员库",
+      "group": "分类",
+      "visible": true
+    },
+    {
+      "key": "directors",
+      "label": "导演库",
+      "group": "分类",
+      "visible": true
+    }
+  ],
+  "home_modules": {
+    "recent": true,
+    "favorites": true,
+    "collections": true
+  },
+  "content_cards": {
+    "show_rating": false,
+    "show_year": false,
+    "show_quality": false,
+    "show_actors": true,
+    "show_directors": true,
+    "hover_trailer": false
+  },
+  "home_columns": [
+    "favorite",
+    "title",
+    "actors",
+    "user_rating",
+    "premiere",
+    "added_date"
+  ],
+  "home_column_widths": {
+    "favorite": 69,
+    "title": 363,
+    "actors": 173,
+    "user_rating": 82,
+    "premiere": 112,
+    "added_date": 106
+  },
+  "home_sort": {
+    "key": "added_date",
+    "asc": false
+  },
+  "home_split": [
+    938,
+    769
+  ],
+  "window_opacity": 1.0,
+  "libraries": [
+    {
+      "name": "Jav-library",
+      "kind": "电影",
+      "paths": [
+        "Y:/【01】Jav精选",
+        "Y:/【02】Jav严选",
+        "Y:/【03】Jav甄选",
+        "X:/【01】Jav精选",
+        "X:/【02】Jav严选",
+        "W:/【01】Jav精选"
+      ],
+      "filter": {}
+    },
+    {
+      "name": "Jav-VR",
+      "kind": "电影",
+      "paths": [
+        "X:/【30】VR视频"
+      ],
+      "filter": {}
+    },
+    {
+      "name": "Jav-待整理",
+      "kind": "电影",
+      "paths": [
+        "Y:/【99】待整理"
+      ],
+      "filter": {}
+    }
+  ],
+  "wall_prefs": {
+    "sort": "random",
+    "asc": false,
+    "filters": {},
+    "facet_open": false
+  },
+  "actor_prefs": {
+    "sort": "works",
+    "asc": false,
+    "filters": {}
+  },
+  "recommend": {
+    "algo": "ai",
+    "count": 24,
+    "use_tags": true,
+    "use_actors": true,
+    "use_directors": true,
+    "use_userrating": true,
+    "exclude_watched": false,
+    "diversity": 0.43,
+    "ai_model": "",
+    "no_repeat_rounds": 5
+  },
+  "dedupe": {
+    "exclude_multipart": true,
+    "min_confidence": "低"
+  },
+  "export": {
+    "sections": [
+      "media",
+      "people",
+      "links",
+      "favorite",
+      "play",
+      "userrating",
+      "people_fav",
+      "config"
+    ]
+  },
+  "insight": {
+    "scope": "",
+    "favorites_only": false
+  },
+  "vector_overrides": {
+    "tag": {
+      "有码": 1.5,
+      "单体作品": 1.5,
+      "中出": 1.5,
+      "巨乳": 1.5,
+      "DMM独家": 1.5,
+      "美少女": 1.5,
+      "口交": 1.5,
+      "荡妇": 1.5,
+      "人妻": 1.5,
+      "业余": 1.5,
+      "苗条": 1.5,
+      "潮吹": 1.5,
+      "多P": 1.5,
+      "熟女": 1.5,
+      "主观视角": 1.5,
+      "乳交": 1.5,
+      "颜射": 1.5,
+      "出轨": 1.5,
+      "フルハイビジョン(FHD)": 1.5,
+      "美乳": 1.5,
+      "痴女": 1.5,
+      "已婚妇女": 1.5,
+      "数位马赛克": 1.5,
+      "白天出轨": 1.5,
+      "Drama": 1.5,
+      "姐姐": 1.5,
+      "角色扮演": 1.5,
+      "巨尻": 1.5,
+      "连裤袜": 1.5,
+      "妄想族": 1.5
+    },
+    "studio": {
+      "MOODYZ": 1.3,
+      "S1 NO.1 STYLE": 1.3,
+      "マドンナ": 1.3,
+      "玛丹娜": 1.3,
+      "ムーディーズ": 1.3,
+      "プレステージ": 1.3,
+      "ダスッ！": 1.3,
+      "SOD": 1.3,
+      "DOC": 1.3,
+      "アタッカーズ": 1.3
+    },
+    "series": {
+      "【初撮り】ネットでAV応募→AV体験撮影": 1.2,
+      "ハンターブラック": 1.2,
+      "ラグジュTV": 1.2,
+      "脅迫スイートルーム": 1.2,
+      "kawaii*VR": 1.2,
+      "S1 VR": 1.2,
+      "3.1次元AV": 1.2,
+      "E-BODY専属デビュー": 1.2,
+      "胁迫スイートルーム": 1.2,
+      "クセ凄アヘり素人〇〇": 1.2
+    },
+    "actor": {
+      "森沢かな": 1.3,
+      "さつき芽衣": 1.3,
+      "君島みお": 1.3,
+      "新井リマ": 1.3,
+      "天馬ゆい": 1.3,
+      "橘メアリー": 1.3,
+      "深田えいみ": 1.3,
+      "美園和花": 1.3,
+      "森日向子": 1.3,
+      "百永さりな": 1.3
+    },
+    "director": {
+      "豆沢豆太郎": 1.2,
+      "きとるね川口": 1.2,
+      "ドラゴン西川": 1.2,
+      "トレンディ山口": 1.2,
+      "三島六三郎": 1.2,
+      "キョウセイ": 1.2,
+      "肉尊": 1.2,
+      "TAKE-D": 1.2,
+      "イナバール": 1.2,
+      "赤井彗星": 1.2
+    }
+  },
+  "seen_smart": [
+    9341,
+    4439,
+    7648,
+    40319,
+    4187,
+    15406,
+    29259,
+    8016,
+    11996,
+    5365,
+    18827,
+    9002,
+    12188,
+    46318,
+    28078,
+    1917,
+    11324,
+    8805,
+    8129,
+    46849,
+    37007,
+    44415,
+    18028,
+    27443,
+    16585,
+    17186,
+    41837,
+    45191,
+    9800,
+    38633,
+    46786,
+    43040,
+    46470,
+    30567,
+    15850,
+    43560,
+    26517,
+    48409,
+    11700,
+    10581,
+    15863,
+    15347,
+    26400,
+    7690,
+    32613,
+    10058,
+    3529,
+    20912,
+    48294,
+    17220,
+    2273,
+    9824,
+    3614,
+    17890,
+    43081,
+    48474,
+    35991,
+    15407,
+    16552,
+    44012,
+    39962,
+    41181,
+    40959,
+    23776,
+    16287,
+    42554,
+    11448,
+    17794,
+    1054,
+    47588,
+    4785,
+    12919
+  ],
+  "smart_history": [
+    {
+      "round": 1,
+      "ids": [
+        9341,
+        4439,
+        7648,
+        40319,
+        4187,
+        15406,
+        29259,
+        8016,
+        11996,
+        5365,
+        18827,
+        9002,
+        12188,
+        46318,
+        28078,
+        1917,
+        11324,
+        8805,
+        8129,
+        46849,
+        37007,
+        44415,
+        18028,
+        27443
+      ],
+      "ts": 1789961129.5471747
+    },
+    {
+      "round": 2,
+      "ids": [
+        16585,
+        17186,
+        41837,
+        45191,
+        9800,
+        38633,
+        46786,
+        43040,
+        46470,
+        30567,
+        15850,
+        43560,
+        26517,
+        48409,
+        11700,
+        10581,
+        15863,
+        15347,
+        26400,
+        7690,
+        32613,
+        10058,
+        3529,
+        20912
+      ],
+      "ts": 1789964067.8925633
+    },
+    {
+      "round": 3,
+      "ids": [
+        48294,
+        17220,
+        2273,
+        9824,
+        3614,
+        17890,
+        43081,
+        48474,
+        35991,
+        15407,
+        16552,
+        44012,
+        39962,
+        41181,
+        40959,
+        23776,
+        16287,
+        42554,
+        11448,
+        17794,
+        1054,
+        47588,
+        4785,
+        12919
+      ],
+      "ts": 1789967785.9703012
+    }
+  ],
+  "tagopt": {
+    "scope": "folder",
+    "path": "Y:/【03】Jav甄选",
+    "library": "Jav-library",
+    "algo": "ai",
+    "translate": true,
+    "overwrite": false,
+    "complete": true,
+    "backup": true
+  },
+  "background": {
+    "enabled": false,
+    "library": "",
+    "time": "03:00",
+    "frequency": "每天"
+  },
+  "appearance": {
+    "mode": "磨砂玻璃",
+    "level": "中",
+    "accent": "#e2659a"
+  },
+  "scraper": {
+    "enabled": true,
+    "sources": [
+      "minnano",
+      "imdb"
+    ],
+    "sources_enabled": {
+      "minnano": true,
+      "imdb": true
+    },
+    "fill_alias": true,
+    "fill_birthday": true,
+    "fill_bio": true,
+    "download_photo": true,
+    "overwrite": false,
+    "only_no_photo": true,
+    "delay_ms": 600,
+    "timeout": 15,
+    "limit": 0,
+    "retry": 1,
+    "proxy": "http://127.0.0.1:8866",
+    "photo_dir": ""
+  }
+}

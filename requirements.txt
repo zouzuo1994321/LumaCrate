@@ -1,0 +1,5 @@
+PySide6>=6.6
+# v1.27.0：侧栏「实时状态」用 psutil 读 CPU / 内存 / 网速（GPU 走 nvidia-smi）。
+# 不装也能跑 —— sysmon.py 会自动退到 ctypes GetSystemTimes / GlobalMemoryStatusEx /
+# InternetGetConnectedState，只是少了网速读数。
+psutil>=5.9

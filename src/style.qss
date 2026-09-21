@@ -1,0 +1,347 @@
+/* ============================================================
+   流明盒 LumaCrate · 磨砂玻璃主题 (v1.7.0)
+   ------------------------------------------------------------
+   基调：墨黑 / 朱红 / 鎏金。整体改为半透明玻璃质感 —— 由 Windows
+   DWM 系统模糊提供背景磨砂，这里的 rgba 只负责「烟熏玻璃」的层次。
+   下面 4 个透明令牌由 style_loader 在加载时替换：
+     __VEIL__   页面底色（最透，让模糊透出来）
+     __PANEL__  大面板：侧边栏 / 顶栏
+     __SURF__   各种表面：卡片 / 列表 / 表格 / 输入框 / 按钮
+     __DLG__    对话框 / 菜单（最实，保证可读）
+   经典暗色主题下四个令牌都是 255（完全不透明）。
+
+   另有 4 个「高亮色」令牌（v1.25.0 反馈 5），由 render_style() 按
+   「外观 → 高亮色」那一项现算。它们替换出来的是 **"r, g, b" 三通道文本**
+   （QSS 的 rgba() 通道位写不了十六进制），所以用法固定是 rgba(令牌, 透明度)：
+     ACCENT        基础色 —— hover 描边 / 焦点框 / 滑块 / 进度条 / 勾选框
+     ACCENT_DARK   按下 / 列表与表格选中底
+     ACCENT_DEEP   主按钮底
+     ACCENT_LIGHT  亮描边 —— 主按钮边框 / chip 选中边框
+   （上面的名字在 QSS 里前后各加两个下划线。）四个变体由 accent_shades()
+   在 HSL 空间一起派生，换任何基础色，明暗层次关系都保持一致。
+   ============================================================ */
+* {
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    font-size: 13px;
+    color: #ece5d8;
+}
+QWidget, QDialog { color: #ece5d8; background: transparent; }
+QMainWindow { background: transparent; }
+/* 文字控件一律透明：否则全局背景规则会给每个 QLabel 铺一块深色底 */
+QLabel { background: transparent; }
+/* 中央容器：磨砂底衬由 veil.VeilWidget 自绘（paintEvent），这里必须保持透明，
+   否则样式背景会在子控件区域把自绘的磨砂层盖掉。 */
+QWidget#CentralVeil { background: transparent; }
+QDialog {
+    background: rgba(18, 15, 13, __DLG__);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+}
+QToolTip {
+    background: rgba(28, 24, 19, __DLG__); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 5px 9px;
+}
+
+/* ---------- 侧边栏 / 顶栏 ---------- */
+QFrame#Sidebar {
+    background: rgba(12, 10, 9, __PANEL__);
+    border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+QLabel#TitleBig { font-size: 19px; font-weight: 700; color: #e7c86a; letter-spacing: 1px; }
+/* v1.26.0（反馈 3）：11px 下「LocalMediaCenter」量出 127px、品牌区只有 122px，
+   末尾的 r 被裁掉；降到 10px 并把字距收到 1.5px，实测 113px（余 9px）。
+   v1.27.0：改名后副标题变成「LumaCrate」（9 字符），10px 下只占约 66px，余量很足；
+   这里**保持用户确认过的 10px 不动**（要放大一档随时改这个 font-size 即可）。 */
+QLabel#Sub { color: #8c8071; font-size: 10px; letter-spacing: 1.5px; }
+QLabel#Section {
+    color: #7b7160; font-size: 10px; font-weight: 700; letter-spacing: 2px;
+    padding: 12px 8px 3px;
+}
+QFrame#TopBar {
+    background: rgba(19, 17, 16, __PANEL__);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* ---------- 按钮 ---------- */
+QPushButton {
+    background: rgba(255, 255, 255, 0.07); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 9px; padding: 7px 14px;
+}
+QPushButton:hover {
+    background: rgba(255, 255, 255, 0.13);
+    border-color: rgba(__ACCENT__, 0.75); color: #f7e3b4;
+}
+QPushButton:pressed { background: rgba(__ACCENT_DARK__, 0.85); color: #ffffff; }
+QPushButton:disabled { color: #6a6256; border-color: rgba(255, 255, 255, 0.05); background: rgba(255, 255, 255, 0.03); }
+QPushButton#Primary {
+    background: rgba(__ACCENT_DEEP__, 0.88);
+    border: 1px solid rgba(__ACCENT_LIGHT__, 0.85); color: #ffffff; font-weight: 600;
+}
+QPushButton#Primary:hover { background: rgba(__ACCENT__, 0.95); border-color: __ACCENT_LIGHT__; }
+QPushButton#Ghost {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.12); color: #d3cabb;
+}
+QPushButton#Ghost:hover {
+    border-color: rgba(__ACCENT__, 0.75); color: #f7e3b4; background: rgba(255, 255, 255, 0.10);
+}
+
+/* ---------- 详情页操作按钮（v1.20.0） ----------
+   「收藏 / 评分 / 刷新 / 更多」叠在详情页的 fanart 横幅上，底色是明亮杂乱的剧照。
+   原先这四类按钮复用 #Ghost（背景 α=0.04、边框 α=0.12、字色 #d3cabb），
+   在亮剧照上几乎看不见 —— 用户反馈「融入背景、不太明显」。
+   这里给它们单独一套「深底 + 鎏金描边 + 亮字」，保证叠在任何剧照上都清晰可辨。 */
+QPushButton#HeroAct {
+    background: rgba(24, 20, 17, 0.80);
+    border: 1px solid rgba(212, 175, 55, 0.60); color: #f6ecd8; font-weight: 600;
+}
+QPushButton#HeroAct:hover {
+    background: rgba(__ACCENT_DEEP__, 0.92);
+    border-color: rgba(__ACCENT_LIGHT__, 0.95); color: #ffffff;
+}
+QPushButton#HeroAct:pressed { background: rgba(__ACCENT_DARK__, 0.96); color: #ffffff; }
+QPushButton#Nav {
+    background: transparent; border: 1px solid transparent; border-radius: 9px;
+    padding: 8px 10px; text-align: left; color: #cfc4b0;
+}
+QPushButton#Nav:hover {
+    background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.08); color: #f7e3b4;
+}
+QPushButton#Nav:pressed { background: rgba(255, 255, 255, 0.12); color: #f7e3b4; }
+/* 「＋ 新建媒体库」：位置在媒体库列表里，但语气要弱于真实库（虚线框 + 暗一档的字色） */
+QPushButton#NavDim {
+    background: transparent; border: 1px dashed rgba(255, 255, 255, 0.14);
+    border-radius: 9px; padding: 7px 10px; text-align: left; color: #8f8574;
+}
+QPushButton#NavDim:hover {
+    background: rgba(255, 255, 255, 0.06); border-color: rgba(__ACCENT__, 0.6); color: #e7c86a;
+}
+
+/* 紧凑按钮（← → ↑ ↓ 测试 复制 等窄按钮）
+   全局 QPushButton 的 padding:7px 14px 是给常规按钮的；窄按钮宽度只有 28~48px，
+   减去 28px 内边距后内容区为负/过窄 → 字形被完全裁掉，表现为「按钮在、字看不见」。
+   用法：QPushButton 上 setProperty("compact", "1")（见 ui_hero.compact_button）。
+   注意：这里**不要**写 min-width —— QSS 的 min-width 会盖掉 setFixedSize 设的最小宽度，
+   按钮会缩回 sizeHint（36px 的 ← 会变成 23px），尺寸和设计值对不上。 */
+QPushButton[compact="1"] { padding: 0 4px; }
+
+/* ---------- 多维筛选 chip（v1.16.0） ----------
+   影片墙的「状态/进度/风格/地区/年份/类型」筛选项。未选中＝透明无边框（弱化），
+   选中＝朱红底白字（与 QPushButton:pressed 同一套色）。比全局按钮 padding 小很多。 */
+QPushButton#Chip {
+    background: transparent; color: #b9ad99;
+    border: 1px solid transparent; border-radius: 7px; padding: 3px 9px;
+}
+QPushButton#Chip:hover { color: #f7e3b4; background: rgba(255, 255, 255, 0.07); }
+QPushButton#Chip:checked {
+    background: rgba(__ACCENT_DARK__, 0.85); color: #ffffff;
+    border: 1px solid rgba(__ACCENT_LIGHT__, 0.9); font-weight: 600;
+}
+QPushButton#Chip:checked:hover { background: rgba(__ACCENT_DEEP__, 0.95); }
+
+/* ---------- 卡片右下角「直接播放」圆形按钮（v1.17.0） ----------
+   注意：这里**必须显式写 padding: 0**。全局 `QPushButton{padding:7px 14px}` 是给常规
+   按钮的，26px 的圆圈减掉 28px 横向内边距后内容区为负 → 字形被整块裁掉（本项目已复发多次）。 */
+QPushButton#CardPlay {
+    background: rgba(58, 54, 50, 0.82); color: #f2efe9;
+    border: 1px solid rgba(255, 255, 255, 0.30); border-radius: 13px;
+    padding: 0; font-size: 11px; font-weight: 700;
+}
+QPushButton#CardPlay:hover {
+    background: rgba(__ACCENT_DEEP__, 0.94); border-color: rgba(__ACCENT_LIGHT__, 0.95); color: #ffffff;
+}
+
+/* 影片墙「筛选」按钮**展开时高亮**（v1.17.0：FacetBar 默认收缩，点开才展开） */
+QPushButton#Ghost:checked {
+    background: rgba(__ACCENT_DARK__, 0.85); border-color: rgba(__ACCENT_LIGHT__, 0.9); color: #ffffff;
+}
+
+/* ---------- 首页模块快捷筛选（v1.25.0 反馈 6） ----------
+   首页顶部「最近添加 / 我的收藏 / 合集」这三个按钮原来复用 #Ghost：选中后只有
+   一点点极淡的描边，用户反馈「不知道是不是点了这个」。
+   这里单独一套「选中 = 实心强调底 + 亮描边 + 加粗白字」，未选中仍是玻璃质感。
+   注意：**不能**直接给 #Ghost 加 :checked —— `#Ghost:checked` 已经被「影片墙 → 筛选」
+   的展开态占用，两个控件共用同一个选择器会互相串样式，所以另开一个 objectName。 */
+QPushButton#Seg {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.12); color: #d3cabb;
+}
+QPushButton#Seg:hover {
+    background: rgba(255, 255, 255, 0.10);
+    border-color: rgba(__ACCENT__, 0.75); color: #f7e3b4;
+}
+QPushButton#Seg:checked {
+    background: rgba(__ACCENT_DARK__, 0.92);
+    border: 1px solid __ACCENT_LIGHT__; color: #ffffff; font-weight: 600;
+}
+QPushButton#Seg:checked:hover { background: rgba(__ACCENT_DEEP__, 0.96); }
+
+/* ---------- 输入 ---------- */
+QLineEdit {
+    background: rgba(255, 255, 255, 0.06); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 18px; padding: 7px 16px;
+    selection-background-color: rgba(__ACCENT_DARK__, 0.9); selection-color: #fff;
+}
+QLineEdit:hover { border-color: rgba(255, 255, 255, 0.18); }
+QLineEdit:focus { border-color: rgba(__ACCENT__, 0.9); background: rgba(255, 255, 255, 0.09); }
+/* 对话框（设置 / 新建媒体库等）表单里的输入框与下拉框保持一致：圆角 8 + 内边距 5/10。
+   全局 QLineEdit 是给顶栏搜索框用的「胶囊形」(radius 18)，表单里会显得与旁边的
+   下拉框/列表格格不入（v1.13.0 反馈「名称框和其他框样式一致」）。 */
+QDialog QLineEdit { border-radius: 8px; padding: 5px 10px; }
+
+QComboBox, QTimeEdit, QSpinBox {
+    background: rgba(255, 255, 255, 0.06); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 8px; padding: 5px 10px;
+}
+QComboBox:hover, QTimeEdit:hover, QSpinBox:hover { border-color: rgba(255, 255, 255, 0.18); }
+QComboBox:focus, QTimeEdit:focus, QSpinBox:focus { border-color: rgba(__ACCENT__, 0.9); }
+QComboBox::drop-down { border: none; width: 22px; }
+QComboBox QAbstractItemView {
+    background: rgba(28, 24, 19, __DLG__); color: #ece5d8; outline: none;
+    border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px;
+    selection-background-color: rgba(__ACCENT_DARK__, 0.9); selection-color: #fff;
+}
+
+/* ---------- 卡片（磨砂玻璃小面板） ---------- */
+QFrame#Card {
+    background: rgba(255, 255, 255, 0.055);
+    border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px;
+}
+QFrame#Card:hover {
+    border-color: rgba(__ACCENT__, 0.7); background: rgba(255, 255, 255, 0.10);
+}
+/* 字号/字重在 main_window.PosterCard 里用 setFont 定死（便于用 fontMetrics 精确排版），
+   此处只保留颜色，避免 QSS 覆盖 setFont 导致标题行数算错。 */
+QLabel#CardTitle { color: #f0e8da; }
+QLabel#CardSub { font-size: 11px; color: #a2967f; }
+
+/* ---------- 列表 / 表格 ---------- */
+QListWidget, QTreeWidget {
+    background: rgba(18, 16, 12, __SURF__); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; outline: none;
+}
+QListWidget::item { padding: 5px 4px; border-radius: 7px; }
+QListWidget::item:hover { background: rgba(255, 255, 255, 0.07); }
+QListWidget::item:selected { background: rgba(__ACCENT_DARK__, 0.72); color: #ffffff; }
+QListWidget::item:checked { color: #f7e3b4; }
+QListWidget::indicator {
+    width: 15px; height: 15px; border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.22); background: rgba(255, 255, 255, 0.05);
+}
+QListWidget::indicator:checked { background: __ACCENT__; border-color: __ACCENT_LIGHT__; }
+
+QTableWidget, QTableView {
+    background: rgba(18, 16, 12, __SURF__); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;
+    gridline-color: transparent; outline: none;
+    alternate-background-color: rgba(255, 255, 255, 0.03);
+}
+QTableWidget::item { padding: 7px 10px; border: none; }
+QTableWidget::item:hover { background: rgba(255, 255, 255, 0.06); }
+QTableWidget::item:selected { background: rgba(__ACCENT_DARK__, 0.72); color: #ffffff; }
+QHeaderView::section {
+    background: rgba(255, 255, 255, 0.05); color: #d4af37;
+    border: none; border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    padding: 9px 10px; font-weight: 600;
+}
+QHeaderView::section:hover { color: #f7e3b4; background: rgba(255, 255, 255, 0.09); }
+QTableCornerButton::section { background: rgba(255, 255, 255, 0.05); border: none; }
+
+/* ---------- 分组框 ---------- */
+QGroupBox {
+    background: rgba(255, 255, 255, 0.045);
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px;
+    margin-top: 10px; padding: 10px 12px 8px;
+    color: #e7c86a; font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin; left: 14px; padding: 0 6px;
+    background: transparent; color: #e7c86a;
+}
+
+/* ---------- 勾选 ---------- */
+QCheckBox, QRadioButton { background: transparent; color: #ece5d8; spacing: 8px; }
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px; height: 16px; border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.22); background: rgba(255, 255, 255, 0.05);
+}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: __ACCENT__; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: __ACCENT__; border-color: __ACCENT_LIGHT__;
+}
+
+/* ---------- 滑块 / 进度 ---------- */
+QSlider::groove:horizontal {
+    height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.10);
+}
+QSlider::sub-page:horizontal { background: rgba(__ACCENT__, 0.85); border-radius: 3px; }
+QSlider::handle:horizontal {
+    width: 16px; margin: -6px 0; border-radius: 8px;
+    background: #f3d9a0; border: 1px solid rgba(255, 255, 255, 0.4);
+}
+QProgressBar {
+    background: rgba(255, 255, 255, 0.06); border: none; border-radius: 6px;
+    height: 12px; text-align: center; color: #ece5d8; font-size: 10px;
+}
+QProgressBar::chunk { background: rgba(__ACCENT__, 0.85); border-radius: 6px; }
+
+/* ---------- 滚动 ---------- */
+QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: rgba(255, 255, 255, 0.16); border-radius: 5px; min-height: 32px; }
+QScrollBar::handle:vertical:hover { background: rgba(__ACCENT__, 0.85); }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal { background: rgba(255, 255, 255, 0.16); border-radius: 5px; min-width: 32px; }
+QScrollBar::handle:horizontal:hover { background: rgba(__ACCENT__, 0.85); }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QScrollBar:disabled { background: transparent; }
+
+/* ---------- 状态栏 / 菜单 / 分隔 ---------- */
+QStatusBar {
+    background: rgba(12, 10, 9, __PANEL__); color: #9a8f7d;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+QStatusBar::item { border: none; }
+QMenu {
+    background: rgba(28, 24, 19, __DLG__); color: #ece5d8;
+    border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; padding: 6px;
+}
+QMenu::item { padding: 7px 22px 7px 14px; border-radius: 7px; }
+QMenu::item:selected { background: rgba(__ACCENT_DARK__, 0.9); color: #ffffff; }
+QMenu::separator { height: 1px; background: rgba(255, 255, 255, 0.10); margin: 5px 8px; }
+QSplitter::handle { background: rgba(255, 255, 255, 0.06); width: 1px; }
+
+/* ---------- 悬停缩略图预览卡 ---------- */
+QFrame#HoverCard {
+    background: rgba(24, 20, 16, __DLG__);
+    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 14px;
+}
+QLabel#HoverTitle { font-size: 13px; font-weight: 600; color: #f2e8d6; }
+QLabel#HoverSub { font-size: 12px; color: #d4af37; }
+QLabel#HoverInfo { font-size: 11px; color: #a2967f; }
+
+/* ---------- 侧栏底部：数据统计 / 实时状态（v1.27.0 反馈 2） ---------- */
+/* 「数据统计」的两行正文。原先写在 main_window 的内联 setStyleSheet 里，
+   挪到这里才能和主题 / 高亮色那一套令牌一起走。 */
+QLabel#SideStats { color: #9b8e7a; font-size: 11px; padding: 0 8px 2px; }
+/* 「实时状态」的键名：CPU / 内存 / GPU / 网络 · Ollama / 当前模型 */
+QLabel#SysKey { color: #8b8071; font-size: 10px; }
+/* 对应的值（百分比 / 状态 / 模型名）。状态点 ● 的颜色由 sysmon.py 用富文本上，
+   这里只负责字号与默认色。 */
+QLabel#SysVal { color: #c9bda9; font-size: 10px; }
+/* 「网络 · Ollama」/「当前模型」两行：名称与值合起来一个富文本标签，左对齐铺满整行。 */
+QLabel#SysInfo { color: #c9bda9; font-size: 10px; padding: 0 8px; }
+
+/* ---------- 「关于」对话框的 Slogan（v1.27.0 反馈 1） ---------- */
+QLabel#Slogan {
+    color: #cbb17a; font-size: 12px; font-weight: 600; letter-spacing: 1px;
+}
+
+/* v1.28.0（反馈 2 / 3）：下面两处可以点开外链 —— 悬停给一层极淡提亮暗示「这里能点」
+   （手型光标与悬停提示在 main_window.LinkFilter 里设）。静态外观与之前完全一致。 */
+QWidget#BrandBox { background: transparent; border-radius: 8px; }
+QWidget#BrandBox:hover { background: rgba(255, 255, 255, 0.07); }
+QStatusBar:hover { background: rgba(32, 26, 23, __PANEL__); }

@@ -1,0 +1,107 @@
+{
+  "nav": [
+    {
+      "key": "home",
+      "label": "🏠  首页",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "recent",
+      "label": "🕘  最近播放",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "favorites",
+      "label": "♥  我的收藏",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "folders",
+      "label": "📁  文件夹",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "collections",
+      "label": "🗂  合集",
+      "group": "",
+      "visible": true
+    },
+    {
+      "key": "movie",
+      "label": "🎬  电影",
+      "group": "媒体库",
+      "visible": true
+    },
+    {
+      "key": "tv",
+      "label": "📺  电视",
+      "group": "媒体库",
+      "visible": true
+    },
+    {
+      "key": "anime",
+      "label": "🌸  番剧",
+      "group": "媒体库",
+      "visible": true
+    },
+    {
+      "key": "acg",
+      "label": "✨  二次元",
+      "group": "媒体库",
+      "visible": true
+    },
+    {
+      "key": "banned",
+      "label": "🚫  禁片",
+      "group": "媒体库",
+      "visible": true
+    },
+    {
+      "key": "domestic",
+      "label": "🏳  国产",
+      "group": "媒体库",
+      "visible": true
+    },
+    {
+      "key": "all",
+      "label": "▦  全部",
+      "group": "分类",
+      "visible": true
+    },
+    {
+      "key": "actors",
+      "label": "👤  演员库",
+      "group": "分类",
+      "visible": true
+    }
+  ],
+  "home_modules": {
+    "recent": true,
+    "favorites": true,
+    "collections": true
+  },
+  "content_cards": {
+    "show_rating": true,
+    "show_quality": true,
+    "hover_trailer": false
+  },
+  "libraries": [
+    {
+      "name": "新库",
+      "kind": "电影",
+      "paths": [
+        "C:\\Users\\zouzu\\AppData\\Local\\Temp\\lmc_smoke_vmwljo9e"
+      ]
+    }
+  ],
+  "background": {
+    "enabled": false,
+    "library": "",
+    "time": "03:00",
+    "frequency": "每天"
+  }
+}
