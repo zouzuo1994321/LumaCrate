@@ -85,6 +85,21 @@ QPushButton#Ghost {
 QPushButton#Ghost:hover {
     border-color: rgba(__ACCENT__, 0.75); color: #f7e3b4; background: rgba(255, 255, 255, 0.10);
 }
+/* ---------- 「关于」里的联系图标按钮（v1.33.0 反馈 4） ----------
+   固定 34x30，**必须显式 padding:0** —— 全局 QPushButton 的 padding:7px 14px 会把
+   内容区压成负数，图标整个被裁掉（v1.11.1「箭头按钮看不见」同款坑）。
+   也**绝不能加 min-width**（会盖掉 setFixedSize）。 */
+QPushButton#ContactIcon {
+    padding: 0; margin: 0;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 7px;
+}
+QPushButton#ContactIcon:hover {
+    background: rgba(__ACCENT__, 0.22);
+    border-color: rgba(__ACCENT_LIGHT__, 0.85);
+}
+QPushButton#ContactIcon:pressed { background: rgba(__ACCENT_DARK__, 0.85); }
 
 /* ---------- 详情页操作按钮（v1.20.0） ----------
    「收藏 / 评分 / 刷新 / 更多」叠在详情页的 fanart 横幅上，底色是明亮杂乱的剧照。
@@ -209,6 +224,11 @@ QFrame#Card {
 }
 QFrame#Card:hover {
     border-color: rgba(__ACCENT__, 0.7); background: rgba(255, 255, 255, 0.10);
+}
+/* 按钮行内的分组竖线（v1.33.1）：1px 高 18px，纯装饰不响应鼠标 */
+QFrame#VRule {
+    background: rgba(255, 255, 255, 0.14);
+    border: none; border-radius: 0px;
 }
 /* 字号/字重在 main_window.PosterCard 里用 setFont 定死（便于用 fontMetrics 精确排版），
    此处只保留颜色，避免 QSS 覆盖 setFont 导致标题行数算错。 */

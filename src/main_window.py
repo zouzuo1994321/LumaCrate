@@ -6,13 +6,14 @@ import json
 import math
 import html
 import time
+import base64                      # v1.33.1：联系图标 logo 以 base64 内联
 from datetime import datetime
 
 from PySide6.QtCore import (Qt, QThread, Signal, QTimer, QRect, QPoint, QSize, QRectF, QPointF,
-                            QUrl, QObject, QEvent)
+                            QUrl, QObject, QEvent, QByteArray)
 from PySide6.QtGui import (QPixmap, QKeySequence, QShortcut, QGuiApplication, QPainter,
                            QColor, QPen, QFont, QPainterPath, QPolygonF, QIcon,
-                           QDesktopServices)
+                           QDesktopServices, QImage)
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QListWidget, QListWidgetItem, QScrollArea,
@@ -32,6 +33,7 @@ import veil as veil_mod
 import media_meta as mm
 import applog
 import sysmon                    # v1.27.0：侧栏「实时状态」面板（叶子模块，无循环导入）
+import i18n                      # v1.32.0：界面语言（叶子模块，无循环导入；查不到原样返回中文）
 from ui_hero import HeroView, circle_pixmap, cover_pixmap, placeholder_pixmap, compact_button
 from ui_home import HomeListView
 from ui_settings import SettingsDialog, LibraryEditDialog
@@ -300,6 +302,36 @@ def _parse_size(s):
     return (b.group(1) if b else None,
             w.group(1) if w else None,
             h.group(1) if h else None)
+
+
+#: meta 里可能承载罩杯的键（真机库里 3870 / 5909 位演员有独立的「罩杯」键）
+_CUP_META_KEYS = ("罩杯", "カップ", "cup", "CUP")
+
+
+def _parse_cup(size_str, *extra):
+    """解析罩杯字母（`尺寸` 串形如 `T155 / B111( Lカップ ) / W65 / H96 / S`）。
+
+    v1.31.0（反馈 2）：真机库里罩杯信息一直都在，只是 v1.10.0 的 `_parse_size`
+    当年只取了 B/W/H 三项，卡片上「三围」因此少了最关键的一档。
+    两个来源都试（按可靠性排序）：
+      ① `尺寸` 串里 `B111( Lカップ )` 括号内的字母；
+      ② 紧随字母的 `カップ`；
+      ③ 任意括号里的裸字母；
+      ④ 独立键（`meta["罩杯"]`）里就是一个裸字母（L / E / I / H …）。
+    取不到一律返回空串（宁缺勿脏，别拿字母瞎凑）。
+    """
+    for s in (size_str,) + tuple(extra or ()):
+        t = _clean_meta_value(s, 60)
+        if not t:
+            continue
+        m = (re.search(r"B\s*\d{2,3}\s*[（(]\s*([A-Za-z]{1,3})", t)
+             or re.search(r"([A-Za-z]{1,3})\s*カップ", t)
+             or re.search(r"[（(]\s*([A-Za-z]{1,3})\s*[)）]", t))
+        if m:
+            return m.group(1).upper()
+        if re.fullmatch(r"[A-Za-z]{1,3}", t):
+            return t.upper()
+    return ""
 
 
 def _person_status(p):
@@ -915,7 +947,11 @@ class LazyGrid(QWidget):
       · 数据本身也按页从数据库取（offset/limit），不把 5 万行一次性读进内存。
     """
 
-    COLS_BY_KIND = {"media": 8, "actor": 5, "folder": 6}
+    # v1.28.1（反馈）：演员库 / 导演库由每行 5 个改为 **每行 6 个**。
+    # 两库共用 kind="actor"（见 _view_actors / _view_directors），所以一处即覆盖两者。
+    # 宽度校验：1920 默认窗 − 侧栏 186 − 页面左右边距 40 − 竖滚动条 ≈ 1680；
+    # 6 列 = 6×236 + 5×12 = 1476，留有余量，不会把最后一列挤出可视区。
+    COLS_BY_KIND = {"media": 8, "actor": 6, "folder": 6}
 
     refresh_requested = Signal()      # v1.16.0：随机排序下点「刷新一下」
 
@@ -932,6 +968,8 @@ class LazyGrid(QWidget):
         self._busy = False
         self._scrollbar = None
         self._error = ""
+        self._jump_target = None      # v1.30.0：A-Z 跳转目标下标
+        self._jump_cb = None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -948,7 +986,17 @@ class LazyGrid(QWidget):
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(6)
         self.bar.setMaximumWidth(260)
+        self.bar.setVisible(False)      # v1.33.0：默认不显示
         hl.addWidget(self.bar, 1)
+        # v1.33.0（反馈 2）：**head 必须默认隐藏**。
+        # 原缺陷：`_update_head()` 首行是「未接管工具行就 return」，而演员库 / 导演库 /
+        # 最近播放 / 合集这四页的 LazyGrid **都没调 `mark_toolbar_placed()`** →
+        # 该函数一次都没跑过 → head 保持 QWidget 的默认可见状态 → 里面的
+        # QProgressBar（`maximum` 从未设置、也没有任何进度）在工具行右侧画出一条
+        # **空槽灰白细条**，就是用户截图里那条「白条」。
+        # 影片墙（_wall_page）与智能推荐（_view_smart）调了 mark_toolbar_placed，
+        # 所以它们反而是干净的 —— 与用户「只有这四个界面有」的观察完全吻合。
+        self.head.setVisible(False)
         v.addWidget(self.head)
 
         # v1.18.0：加载更多 / 刷新一下 移出网格头部，由页面统一排到工具行
@@ -1019,7 +1067,12 @@ class LazyGrid(QWidget):
         # 仅在全部载入后给出最终「共 N 部」，卡片本身增量出现即是最直观的进度反馈。
         # v1.21.1（反馈 3）：未 mark_toolbar_placed 的网格（_grid 小列表）其按钮
         # 默认隐藏，这里**不**改可见性，避免它们被 setVisible(True) 后变成浮动窗。
+        # v1.33.0（反馈 2）：**这里必须主动把 head 收起来，不能只 return。**
+        # 演员库 / 导演库 / 最近播放 / 合集都没调 mark_toolbar_placed → 本函数以前
+        # 一次都没执行过，head 就一直是可见的，`bar`（QProgressBar，无进度）画出
+        # 一条空槽白条挂在工具行右侧。显式 hide 一次，把这条路径钉死。
         if not self._toolbar_ready:
+            self.head.setVisible(False)
             return
         if self._loaded >= self._total:
             self.head.setVisible(True)
@@ -1071,6 +1124,96 @@ class LazyGrid(QWidget):
         if sb is None:                       # 没挂滚动条（列表页等）→ 保守分页，不全量建卡
             return self._loaded < 600
         return sb.maximum() <= 0
+
+    # ------ A-Z 字母索引跳转（v1.30.0 反馈 4） ------
+    def card_at(self, index):
+        """第 index 个条目对应的卡片控件（还没建到那里则返回 None）。"""
+        if index is None or not (0 <= index < self._loaded):
+            return None
+        if not _qt_alive(self, self._grid):
+            return None
+        it = self._grid.itemAtPosition(index // self._cols, index % self._cols)
+        return it.widget() if it is not None else None
+
+    def jump_to(self, index, callback=None):
+        """滚动定位到第 `index` 个条目。
+
+        目标位置如果还没被渲染出来，这里会**分批补载**（每批交还一次事件循环，
+        不让 GUI 线程被几万张卡的建设卡死），到位后用 `callback(card)` 回调，
+        由页面去调 `scroll.ensureWidgetVisible(card)`。
+
+        为什么不直接 while 补齐：演员库 5909 人时，一路补到 'Z' 要建几千张卡，
+        同步跑会有好几秒的「未响应」，正是 v1.14.0 增量渲染要消灭的东西。
+        """
+        if not self._total or not _qt_alive(self, self._grid):
+            return
+        self._jump_target = max(0, min(int(index), self._total - 1))
+        self._jump_cb = callback
+        QTimer.singleShot(0, self._jump_step)
+
+    def _jump_step(self):
+        if not _qt_alive(self, self._grid):
+            return
+        tgt = getattr(self, "_jump_target", None)
+        if tgt is None:
+            return
+        if self._busy:                    # 常规增量渲染正在跑，让一轮，别两边同时加布局
+            QTimer.singleShot(8, self._jump_step)
+            return
+        if self._loaded > tgt:
+            cb, card = self._jump_cb, self.card_at(tgt)
+            self._jump_target = None
+            self._jump_cb = None
+            self._update_head()             # 把「正在跳转…」表头还原
+            if cb is not None:
+                cb(card)
+            return
+        self._busy = True
+        # v1.30.0：批量取 600（普通增量渲染仍是 self.batch）。
+        # 实测 5909 位演员跳到 'Z'：每批 240 → 32s、600 → 26s、2400 → 14s。
+        # 开销大头是「每批结束后的整表布局激活」，批越少越省；但单批越大 GUI 阻塞
+        # 越久（2400 会一次卡 3 秒），折中取 600（单批 ~0.8s，界面还在动）。
+        want = min(max(self.batch, 600), max(0, self._total - self._loaded))
+        try:
+            rows = self._fetch(self._loaded, want) or []
+        except Exception as e:
+            applog.log(f"字母跳转读取列表失败：{e}", "error")
+            rows = []
+        try:
+            for item in rows:
+                idx = self._loaded
+                self._grid.addWidget(self._make(item), idx // self._cols, idx % self._cols)
+                self._loaded += 1
+        except RuntimeError:
+            pass                           # 页面已被换掉，C++ 对象没了 → 安静退出
+        if not rows:
+            self._total = self._loaded     # 到底了
+        self._busy = False
+        self._update_head()
+        if rows:
+            if self._jump_target is not None:
+                self._show_jump_progress(tgt)
+            QTimer.singleShot(0, self._jump_step)
+        else:
+            cb, card = self._jump_cb, self.card_at(min(tgt, max(0, self._loaded - 1)))
+            self._jump_target = None
+            self._jump_cb = None
+            if cb is not None:
+                cb(card)
+
+    def _show_jump_progress(self, tgt):
+        """跳转途中给个明确进度（v1.30.0）。
+
+        v1.18.0 刻意把加载中的计数/读条藏了 —— 数万部的库里百分比长期停在 0%，
+        看着像卡死。但字母跳转**知道终点**，写「正在跳转… 3200 / 4806」是真进度，
+        比一片死寂强；跳转结束 `_update_head()` 会把表头还原成「共 N 位」。
+        """
+        if not getattr(self, "_toolbar_ready", False):
+            return                          # 小列表网格（_grid）没工具行，别碰按钮可见性
+        self.head.setVisible(True)
+        self.bar.setVisible(False)
+        self.more_btn.setVisible(False)
+        self.count_lbl.setText("正在跳转… 已载入 %d / %d" % (self._loaded, tgt + 1))
 
 
 class ScanWorker(QThread):
@@ -1775,9 +1918,11 @@ _ACTOR_BTN = 26
 # 六项信息（状态单独做成彩色徽标）：标签 -> (行, 列, 跨列数)
 # 「三围」的值形如「胸92·腰58·臀89」，比半边卡宽还长 —— 早期放右列会被硬裁掉尾巴，
 # 所以让它**整行跨两列**（可用的整行宽 ≈ 212px，实测文本 ≈ 133px，留足余量）。
-# 腾出来的左列给「胸围」，正好和「身高」凑成一对单值项。
+# v1.30.0 反馈 1：右列「胸围」换成「作品」（参演片数）。理由：「三围」里已经带了胸围
+# （胸92·腰58·臀89），单列出来是冗余；而「作品数」是判断演员是否值得点进去的第一信息。
+# 卡片仍是 3 行、高度不变 → 不用动 ACTOR_CARD_H / DirectorCard 那一套定高算式。
 _ACTOR_FACTS = (("出生", 0, 0, 1), ("出身地", 0, 1, 1), ("身高", 1, 0, 1),
-                ("胸围", 1, 1, 1), ("三围", 2, 0, 2))
+                ("作品", 1, 1, 1), ("三围", 2, 0, 2))
 
 
 class _TextSummary:
@@ -1809,6 +1954,9 @@ class ActorCard(QFrame):
     #: 卡面显示哪几项：(标签, 行, 列, 跨列数)。子类 `DirectorCard` 换掉这一组
     #: （导演不显示生日 / 出身地 / 身高 / 胸围 / 三围 —— v1.24.0 反馈 10）。
     FACTS = _ACTOR_FACTS
+    #: 卡片定高。子类 `DirectorCard` 的事实区比演员卡少两行，覆盖此值压低卡片
+    #: （v1.28.1 反馈：导演去掉「简介」后卡片高度同步收紧）。
+    CARD_H = ACTOR_CARD_H
 
     def __init__(self, person, on_open, on_fav, on_pin, on_select, main_win):
         super().__init__()
@@ -1822,7 +1970,7 @@ class ActorCard(QFrame):
         self._phase = 0.0
         self._timer = None
         self.setObjectName("ActorCard")
-        self.setFixedSize(ACTOR_CARD_W, ACTOR_CARD_H)
+        self.setFixedSize(ACTOR_CARD_W, self.CARD_H)
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_StyledBackground, False)
         self._build()
@@ -1834,10 +1982,13 @@ class ActorCard(QFrame):
         head = QHBoxLayout()
         head.setSpacing(10)
         self._avatar = QLabel()
-        # 头像走缓存：演员库翻页/重绘时不再反复读盘 + 裁剪（v1.14.0）
-        _ava = _cached_avatar(self.person.get("thumb") or self.person.get("photo_path"),
-                              _ACTOR_AVATAR)
-        self._avatar.setPixmap(_ava if _ava is not None else circle_pixmap(None, _ACTOR_AVATAR))
+        # 头像走缓存：演员库翻页/重绘时不再反复读盘 + 裁剪（v1.14.0）。
+        # v1.30.0 再进一步：改成「画到才读」—— 这里只摆占位圆，真正的读盘推迟到
+        # 卡片第一次被绘制（= 真的被用户看见）时，见 `_ensure_avatar`。
+        self._avatar_path = (self.person.get("thumb")
+                             or self.person.get("photo_path") or "").strip()
+        self._avatar_pending = bool(self._avatar_path)
+        self._avatar.setPixmap(circle_pixmap(None, _ACTOR_AVATAR))
         self._avatar.setFixedSize(_ACTOR_AVATAR, _ACTOR_AVATAR)
         head.addWidget(self._avatar)
         col = QVBoxLayout()
@@ -1897,7 +2048,9 @@ class ActorCard(QFrame):
         """卡面各项的取值（缺 → 空串，由 `_set_fact` 统一显示成「—」）。"""
         p = self.person
         meta = _parse_meta(p.get("meta"))       # meta 经清洗，兼容老库里的 HTML 乱码
-        bust, waist, hip = _parse_size(meta.get("尺寸", ""))
+        size = meta.get("尺寸", "")
+        bust, waist, hip = _parse_size(size)
+        cup = _parse_cup(size, *(meta.get(k, "") for k in _CUP_META_KEYS))
         bits = []
         if bust:
             bits.append("胸" + str(bust))
@@ -1905,21 +2058,45 @@ class ActorCard(QFrame):
             bits.append("腰" + str(waist))
         if hip:
             bits.append("臀" + str(hip))
+        # v1.31.0（反馈 2）：罩杯写在三围最前面（`H 胸88·腰56·臀84`），由 `_set_fact`
+        # 单独加粗。仅「有字母没尺寸」时也显示字母本身 —— 罩杯本身就是有效信息。
+        torso = "·".join(bits)
+        if cup:
+            torso = (cup + " " + torso) if torso else cup
+        # 作品数：SELECT 里用 COUNT(mp.media_id) 聚合出来的左连接计数，没戏就是 0
+        works = p.get("works") or p.get("works_n") or 0
+        try:
+            works_n = int(works)
+        except (TypeError, ValueError):
+            works_n = 0
         return {
             "出生": (p.get("birthday") or "").strip(),
             "出身地": _clean_meta_value(meta.get("出身地") or meta.get("出生地") or ""),
             "身高": _clean_meta_value(meta.get("身高") or ""),
-            "三围": "·".join(bits),
-            "胸围": (str(bust) + "cm") if bust else "",
+            "三围": torso,
+            "作品": ("%d 部" % works_n) if works_n > 0 else "",
         }
 
+    #: 「三围」值开头的罩杯（`H 胸88·…` 里的 `H`）—— 单独加粗，其余原样
+    _CUP_LEAD_RE = re.compile(r"^([A-Za-z]{1,3})\s+(\S.*)$")
+
     def _set_fact(self, key, value):
-        """把一项信息写进单元格（标签暗色 + 值亮色；空值统一「—」）。"""
+        """把一项信息写进单元格（标签暗色 + 值亮色；空值统一「—」）。
+
+        v1.31.0（反馈 2）：「三围」开头的罩杯字母**加粗并提亮**，其余照旧。
+        注意富文本里的颜色必须显式写进 `<span style="color:…">`（继承不到 QSS）。
+        """
         val = str(value).strip() if value else "—"
+        inner = html.escape(val)
+        if key == "三围":
+            m = self._CUP_LEAD_RE.match(val)
+            if m:
+                inner = ('<b><span style="color:#e8d7ab;">%s</span></b>&nbsp;%s'
+                         % (html.escape(m.group(1)), html.escape(m.group(2))))
         self._fact_cells[key].setText(
             '<span style="color:#7b7160;">%s</span>'
             '&nbsp;<span style="color:#c9bda7;">%s</span>'
-            % (key, html.escape(val)))
+            % (key, inner))
 
     def _update_texts(self):
         p = self.person
@@ -1950,6 +2127,27 @@ class ActorCard(QFrame):
         self._facts = summ
         self.setToolTip("%s\n%s\n%s" % (p.get("name") or "",
                                         self._status_badge.text(), summ.text()))
+
+    def _ensure_avatar(self):
+        """真正把头像读进来（只调一次）。
+
+        为什么要拖到绘制时才读：演员库 5909 人时，A-Z 索引条跳到 'Z' 要一路补建
+        4800 张卡；原先在 `_build` 里同步读 NAS 上的 JPEG（冷读实测 ~5.7 ms/张），
+        整趟要 59 秒看着像卡死。改成「画到才读」后，没被看见的卡根本不读盘 ——
+        跳转、首屏、滚动都一起变快（缓存命中后仍是 0 成本，见 `_cached_avatar`）。
+        """
+        if not self._avatar_pending:
+            return
+        self._avatar_pending = False           # 先落闸：读失败也不再重试，避免滚动反复读坏图
+        if not _qt_alive(self, self._avatar):
+            return
+        try:
+            pm = _cached_avatar(self._avatar_path, _ACTOR_AVATAR)
+        except Exception as e:                  # 单张图坏了不能拖垮整页
+            applog.log("头像读取失败：%s" % e, "warning")
+            return
+        if pm is not None and _qt_alive(self, self._avatar):
+            self._avatar.setPixmap(pm)
 
     def _toggle_fav(self):
         self._on_fav(self.person)
@@ -2005,6 +2203,10 @@ class ActorCard(QFrame):
 
     # ---------- 自绘（现役绿 / 退役黄 / 选中粉） ----------
     def paintEvent(self, e):
+        # v1.30.0：头像按需加载 —— 只有真被画出来（= 用户看得见）的卡才读盘。
+        # 放在 QPainter 之前：setPixmap 会再触发一次重绘，那时 pending 已落闸，不会递归。
+        if self._avatar_pending:
+            self._ensure_avatar()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         # 内缩 3px：给选中流光留出绘制空间（原先发光画在控件外被裁掉）
@@ -2036,62 +2238,456 @@ class ActorCard(QFrame):
         p.end()
 
 
-# 导演卡的三项（**刻意不含** 生日 / 出身地 / 身高 / 胸围 / 三围 —— v1.24.0 反馈 10）
-_DIRECTOR_FACTS = (("作品", 0, 0, 1), ("别名", 0, 1, 1), ("简介", 1, 0, 2))
+# 导演卡的两项（**刻意不含** 生日 / 出身地 / 身高 / 胸围 / 三围 —— v1.24.0 反馈 10；
+# v1.28.1 反馈：再去掉「简介」——真机 1218 位导演的 bio 几乎全空，只留一排「—」白占高度）
+_DIRECTOR_FACTS = (("作品", 0, 0, 1), ("别名", 0, 1, 1))
+# 事实区只剩 1 行（演员卡 3 行）→ 卡片压低 2 行：每行 = 单元格高 17 + 网格竖向间距 4。
+# 余量核对：上下边距 20 + 头部（最长两行姓名）59 + 间距 8 + 事实行 17 + 间距 8 = 112 < 118。
+DIRECTOR_CARD_H = ACTOR_CARD_H - 2 * (17 + 4)     # 160 - 42 = 118
 
 
 class DirectorCard(ActorCard):
     """导演卡（v1.24.0 反馈 10）：外形与演员卡完全一致（头像 / 姓名 / 状态 / ☆ / ▲），
-    但信息区换成 **作品数 / 别名 / 简介**。
+    但信息区换成 **作品数 / 别名**（v1.28.1 起去掉「简介」，卡片高度随之收紧）。
 
     为什么不用演员那五项：导演的 nfo 里这些字段基本是空的（实测 1218 位导演几乎全空），
-    照搬只会得到五排「—」。导演真正有信息量的是「拍过多少部 / 别名 / 简介」。
+    照搬只会得到五排「—」。导演真正有信息量的是「拍过多少部 / 别名」。
     """
 
     FACTS = _DIRECTOR_FACTS
+    CARD_H = DIRECTOR_CARD_H
 
     def _fact_values(self) -> dict:
         p = self.person
         works = p.get("works") or p.get("works_n") or ""
-        bio = (p.get("bio") or "").strip()
-        bio = re.sub(r"\s+", " ", bio)
-        if len(bio) > 46:
-            bio = bio[:46] + "…"
         return {
             "作品": (f"{int(works)} 部" if str(works).isdigit() else ""),
             "别名": (p.get("alias") or "").strip(),
-            "简介": bio,
         }
 
 
 class AboutDialog(QDialog):
+    """「关于」对话框（v1.32.0 反馈 4：内容重写）。
+
+    设计口径
+    --------
+    * **只放真源里的东西** —— 名称 / 标语 / 版本 / 版权 / 链接全部从 `version.py` 取，
+      这里一个字符串都不硬编码（改品牌只改 version.py，两处一起变）。
+    * **把「这个软件能干什么」写清楚** —— 第一次打开的人从「关于」就能看懂八个模块各自
+      干什么、数据存在哪、要不要联网。旧版只有三行简介。
+    * **免责与隐私如实写明** —— 本软件不联网刮削、不上传任何东西、AI 完全本地；
+      「仅供个人已合法持有的本地媒体文件管理使用」这句必须有。
+    """
+
+    #: 「关于」里列的功能模块 —— (标题, 一句话说明)。顺序与「工具」导航分组一致。
+    SECTIONS = [
+        ("媒体库", "海报墙 / 列表双视图，支持多媒体库、文件夹、合集、分页与随机排序；"
+                   "5 万片规模下靠 SQL 下推 + 增量渲染保持流畅。"),
+        ("演员与导演", "独立 people 表（Emby 模式），可从演员反查全部作品、按作品数排序；"
+                       "卡片直接显示三围与罩杯。"),
+        ("智能推荐", "本地离线推荐：八维画像 + 可选向量编辑；接入本地 Ollama 时可用 AI 增强。"),
+        ("手动修改", "不改 nfo 也能修：17 项字段 + 海报/缩略图/背景图三槽位上传，写回并同步索引。"),
+        ("标签优化", "批量清洗标题里的冗余标签（普通算法 / AI 算法二选一），改动前自动备份。"),
+        ("重复检测", "跨目录找同一部片子的多份副本，算出可回收空间；AI 复核给保留建议。"),
+        ("演员检测", "揪出「不同艺名其实是同一人」，逐簇给判定依据，由你确认后关联合并。"),
+        ("图像检测", "找出缺图与截断图（JPEG 缺 EOI / PNG 缺 IEND），逐个上传替换。"),
+        ("画像概览与日志", "八维偏好雷达、高频榜、分布与共现分析；索引 / 日志可一键导出。"),
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("关于")
-        self.setMinimumSize(520, 404)     # v1.27.0：多一行 Slogan
+        self.setWindowTitle("关于 %s" % ver.APP_NAME)
+        self.setMinimumWidth(660)
         v = QVBoxLayout(self)
-        v.addWidget(QLabel(f"{ver.APP_NAME}  {ver.VERSION}"))
-        v.addWidget(QLabel(ver.FULL_VERSION))
-        v.addWidget(QLabel(ver.COPYRIGHT))
-        # v1.27.0（反馈 1）：Slogan 单独起一行放在版权上方，走 QLabel#Slogan 的鎏金样式。
-        sl = QLabel(ver.SLOGAN_CN)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(8)
+
+        head = QLabel("%s　%s" % (ver.APP_NAME, ver.VERSION))
+        head.setStyleSheet("font-size:19px;font-weight:700;color:#f7e3b4;")
+        v.addWidget(head)
+        sub = QLabel("%s / %s" % (ver.APP_NAME_EN, ver.FULL_VERSION))
+        sub.setStyleSheet("color:#a2967f;font-size:12px;")
+        v.addWidget(sub)
+
+        # Slogan 走 QLabel#Slogan 的鎏金样式（启动画面共用同一句）
+        sl = QLabel("%s　·　%s" % (ver.SLOGAN_CN, ver.SLOGAN_EN))
         sl.setObjectName("Slogan")
+        sl.setWordWrap(True)
         v.addWidget(sl)
+
         tb = QTextBrowser()
-        tb.setMarkdown(
-            f"**{ver.APP_NAME} / {ver.APP_NAME_EN}**\n\n"
-            f"*{ver.SLOGAN_CN} — {ver.SLOGAN_EN}*\n\n"
-            f"{ver.COPYRIGHT}\n\n"
-            f"{ver.LICENSE_NOTE}\n\n"
-            "设计借鉴：\n"
-            "- Emby：海报墙、演员管理模式与详情页布局（本软件不依赖网页，可直接调用本地播放器）\n"
-            "- tinyMediaManager：本地媒体管理思路（本软件加强了片名/类型/演员关联搜索）\n\n"
-            "刮削功能已阉割：仅读取已刮削的 nfo，演员信息独立保存。\n"
-        )
-        tb.setStyleSheet("background:#1c1714;color:#e8e0d4;border:1px solid #2a221c;border-radius:6px;")
-        v.addWidget(tb)
-        ok = QPushButton("确定"); ok.clicked.connect(self.accept)
+        tb.setOpenExternalLinks(True)
+        tb.setMarkdown(self._body())
+        tb.setStyleSheet("background:#1c1714;color:#e8e0d4;"
+                         "border:1px solid #2a221c;border-radius:6px;")
+        tb.setMinimumHeight(380)
+        v.addWidget(tb, 1)
+
+        # v1.33.0（反馈 4）：作者联系图标栏 —— 四个**自绘**小图标（不依赖任何外部
+        # 图片文件，onefile exe 里最省事），点一下就用系统浏览器 / 邮件客户端打开。
+        v.addWidget(self._contact_bar())
+
+        ok = QPushButton("确定")
+        ok.setObjectName("Primary")
+        ok.setCursor(Qt.PointingHandCursor)
+        ok.clicked.connect(self.accept)
         v.addWidget(ok, alignment=Qt.AlignRight)
+
+    # ---------------------------------------------------------------- 联系图标
+    # v1.33.1（反馈 3）：github / bilibili / weibo 三枚改为**真实品牌图形** ——
+    # 用户提供的官方 logo 剪影（RGBA 300×300、填充近白、alpha 为遮罩）以 base64
+    # 内联在本文件里，运行时按 `tint` 重新着色（CompositionMode_SourceIn）。
+    #
+    # 为什么内联 base64 而不是 --add-data 图片：单文件 exe 里 `sys._MEIPASS` 路径
+    # 在 v1.23.0 图标链上踩过一次（打包后 404 → 空白图标），内联字符串则**打包与
+    # 直接跑源码完全同一条路径**，没有任何资源定位风险。三张图合计约 12KB。
+    _CONTACT_LOGO_B64 = {
+        # github  (github-1.png)  2266 bytes PNG → 3024 chars b64
+        "github": (
+            "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAIoUlEQVR42u2dXYxdVRXHf+vcOzS2"
+            "ICXVYGNKi5gAUkD8qK2xRouGB/uAQemb0cQnjR/PDSY1EGPQB6IPxvgVEhNfbMRYEopRqXwMVDSN"
+            "lBLEwYoQAoQabJkOc+/Zfx/OOro5mfsxc8+ZOefOWcnJdKYz++61/mutvfZea68DLbXUUksttdRS"
+            "Sy211FJLLa0q2Wp8iKSOf5byx8xUR4FIMp9r/sjM0sYi7AwtCYqkpEbz7LiijM1D7S1AkpmZJH0K"
+            "uB54GngWOGVmb/jvJABmFtZK8EDILVLSJuBK4N3+zJrZHyQlazXHlTKWSDJJOyX19Wb6m6TvSdpd"
+            "0EBbTcuMLVDSPkk/lPRsYa7zkq4o/n4TAOj41585I+clpZJCxFwq6bCkXTFwQwRmDmxnxJODb8Pm"
+            "BtDr9falaXq0IPTgSnPev//+sLnV1u9LulTSS85QWhB8L/q+J+k7kjYWwMuF3Z3Ut+fCy8eS9DZJ"
+            "PykIvVeYZ/DnOUmbq1gPrCrtN7NU0ieA3wIBGKQ9qf+fAQ8CXzCzuaLPdQF2gcuBy3zMpSgBngfm"
+            "gDSOYPIxJX0Y+BHwHh9HQGcEWx8ys+M5b2XJqluxMezMeR/yOznjfWAvMCvpVjN7QNIO/9l7gY8C"
+            "m4GtwKYRn3seeAE4J+kYcAo4ZmZPSzoA3A1s8M8cJYNcQT4OHC9babsVR1cfHAOAeC4p8HbgXkl/"
+            "Ba5yoRdpVDTyFo9gcPAA5iWdBN7voKdj8i/n55IqBFW1BSyXOs7wRmB3JOzYhdkQdxYLTdHfm4+5"
+            "K/r/zjLn1msiAKdXaD2KhJ6MIfClxrBoTaAw5krcyIYmAZBr32xBCMsRYIfy3WJnAnf692W407Ep"
+            "qRiAOWA+0uomUg7ao40BwEM9M7OnosghNFD4+ZyfcmVqjAUAJL5p+e4qfFbVAPzCzF73PUBjADCf"
+            "7FkaTiGEzVVtXKvaCSduqpuB+z32VoOtIAE+Y2aHy94JV3YUkSRJGkL4ve8gQ0OFH/v8l4A9wD/d"
+            "ukMtXZCft6S9Xu/rLvx+g4VPFEC8I4RwV61dUOR6tgEngIsbvAAXrSAAnX6/f9PMzMz9ZbmipKKF"
+            "96CfnWgKhP8mRe12uwcjRauPBURHvds8bt64mon/VQ5Lb/TT2omtoEztzMf6PNlxcZgy4ccR0YE6"
+            "rwEnyPIA0+J+lgLgX8A1ZnY2LzxYUwuIcqVXk1UUMIXCz3nKg4xry+AzKdmS9gAXNPjgbRxKnb/d"
+            "ZXiRsgG4bsyM1TRERdvKOJwrC4DgB29bpzDyGaRsez3uXtsoyBehQJaH3bUOAKBMK0/qOKn1REkr"
+            "gukBwNaJ66HMzFhScni2uI4AuKAWAHj5ecfMFoCH1tFa8EwZBbtl7wNemfJNWFz09XiddsK50H9X"
+            "UU0PNStTMeDPtdqI+dfHgZcbXgc0ik8jq75+rAx3m5SUhcnXgTPAfdGiPK2br3vM7FwZZSpJBRcz"
+            "ftDwJPwwN5u4Yv20rFA0KTEXmXpK8lHgN9Fkpy0X8GvgRFmX9qyCiogg6X1ktZTJBNXIdUzKLwA3"
+            "mNkzZQGQVFATmpjZX4BvRBchmk595+U2F36nrLogq+iCXuIa8wDZ1aJ+DS+DLEf4XXc9t+TuqKwa"
+            "0aSCglBF13puBh52BvpNFX4I4Shwa35bp8wC3crK0/3rv4H9wLEIhCbsDxRp/pEkST5rZov8v+6p"
+            "Obfl/etbJd0X3b8t3pyvE8Vz+6WkmUZd0h5SMUG/3z8o6T/RZe1+zQSf3+J/TdLXRt3er1tfiO6g"
+            "DihxnwVJN0i6d4m2AGENhL6UEhyWdG3cHqGRWj8AiE70709KOjpAIGlFgORgFwEPko5I2rfUXKlr"
+            "w6aoHc31ZAVZKXDCzObijdlSLin/uaS9ZKV+NwPvHHDKahVeoz0C/NzMHqtD+5yVdkT5aqRNZyTd"
+            "LemaYZpUdFeStkj6tKS7JB2XtFCBBbwu6WFJd0raL+mSgtV2aGpHLEkHJL0QMXtW0k2jzHlQpyrv"
+            "0XOjpNNR15KVuBw5mPu990StO3dNagnXSXpe0qIzfz4CIRmjgVInbtwkaUPUQCmdAIBzkrYX2td0"
+            "GrnADhFgHi/v8b47vYj5K3MBjzlW113CVyYQfjGu/3IerTGNZSlm1pM0Y2azwJ2+i1wENoUQfpwf"
+            "UYwLgi+Cl0UnkZPSR3zM6S0YiFqKXSjpSXcBi66BdxQ1fMQ4JumeEnbO+d/OVt0BsW7rweciAeRC"
+            "+FXui4vRh4PSjcHx5n5luaA/rhcAcu29WNLLUb+4XIivSLoj320OGWeLpH+UCMCDdQSgqovaXTPr"
+            "S7oNuJ2s2dGMb9Q60SbrOHCGrMTjtK9JHwB2+MZue3S0zQQVex3gITPbO+mVoqYA8L9mSSGER5Ik"
+            "2RWBoGW0C6OkksnaAlBVPkCHDh0yICwsLNwCPOnC70WNonIgBj1tqXuJ+YCtfrwQ9wkddeAWSj7f"
+            "r+UaUOkWPErSvwh8DDgEvOYWkFdLLKX96+WWTfXFUxEI82b2TV9kbweeAN5w/1x8AF4NIYT2/QEl"
+            "V0vkl9p8v3A1WVd1RWtEAjwHnAT+BLxrwkq7Wi/Cq3Yu4kynvi4kZtZ3IZ8cAlp/2i1g1Q+m8vOY"
+            "6E0VyYD+PMl6WAfW7GQwqh8KA7Js7SLc0voGoGwLqGWFQ1LzcvAyw9BeHava6ghAnjnbAFxYoiVd"
+            "7m/BSOqUA64dAGYWzCxN0/RLZM0/ehO6I/MxtgNfNLO0UW9DWoM8wqVpmn57SFFVL0ryDHp6Q6rt"
+            "vuW5hlqsCVYnADz8vIjs3OgqsgZQO8lywyvt3z9P1mz1CbJ2+qd8Vzxfh12xNcAyNpJVzF3hzw6y"
+            "15xsAS6KgDlP1qf6VbIut6fJOp7PAS/6Tf71exa0kryyv8cxlHg0npBdsAgtABO8XHPEFdG4a0vt"
+            "Xx7aUksttdRSSy211FJLLbXU0irTfwG/JlbyM0N/DAAAAABJRU5ErkJggg=="
+        ),
+        # bilibili  (bilibili-1.png)  3398 bytes PNG → 4532 chars b64
+        "bilibili": (
+            "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"
+        ),
+        # weibo  (weibo-1.png)  3417 bytes PNG → 4556 chars b64
+        "weibo": (
+            "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"
+        ),
+    }
+    _CONTACT_LOGO_CACHE = {}
+
+    @classmethod
+    def _contact_logo_pixmap(cls, kind, size, tint):
+        """把内联的品牌 logo 剪影按 `tint` 着色成 `size×size` 的 QPixmap。"""
+        key = (kind, int(size), tint)
+        hit = cls._CONTACT_LOGO_CACHE.get(key)
+        if hit is not None:
+            return hit
+        raw = QByteArray(base64.b64decode(cls._CONTACT_LOGO_B64[kind]))
+        img = QImage()
+        img.loadFromData(raw, "PNG")
+        if img.isNull():
+            return None
+        # 先按原图长边缩放到目标尺寸（保持比例），再居中贴到 size×size 画布
+        img = img.scaled(int(size), int(size),
+                         Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = QPixmap(int(size), int(size))
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        x = (int(size) - img.width()) // 2
+        y = (int(size) - img.height()) // 2
+        p.drawImage(x, y, img)
+        # 关键一步：把颜色**整体替换**为目标色，只保留原图 alpha ——
+        # 源 logo 是近白填充，直接画在浅底按钮上会「看不见」。
+        p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        p.fillRect(QRect(0, 0, int(size), int(size)), QColor(tint))
+        p.end()
+        cls._CONTACT_LOGO_CACHE[key] = pm
+        return pm
+
+    @classmethod
+    def _contact_icon(cls, kind, size=22, tint="#e8e0d4"):
+        """按 `version.CONTACTS` 的 key 生成联系图标（QIcon）。
+
+        - github / bilibili / weibo：用户提供的官方 logo 剪影（内联 base64）着色后出图；
+        - mail：仍用 QPainterPath 自绘信封 —— 邮箱没有「官方 logo」，自绘反而是最
+          干净的做法（也避免和 Gmail / QQ 邮箱商标混淆）。
+
+        自绘的历史理由仍然成立：用字符图标（"" "✉"）会因字体缺字变方块，且字形
+        side bearing 不对称永远不对齐（v1.21.0 播放键同款坑）。
+        """
+        if kind in cls._CONTACT_LOGO_B64:
+            try:
+                pm = cls._contact_logo_pixmap(kind, size, tint)
+                if pm is not None and not pm.isNull():
+                    return QIcon(pm)
+            except Exception as e:                       # 兜底：解码失败退回自绘
+                applog.log("联系图标加载失败 %s：%s" % (kind, e), "error")
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        col = QColor(tint)
+        s = float(size)
+        if kind == "mail":
+            # 信封：一个方框 + 一个 V 形折线
+            p.setPen(Qt.NoPen); p.setBrush(col)
+            p.drawRoundedRect(QRectF(s * 0.08, s * 0.22, s * 0.84, s * 0.58),
+                              s * 0.08, s * 0.08)
+            pen = QPen(QColor("#1c1714")); pen.setWidthF(max(1.4, s * 0.075))
+            pen.setJoinStyle(Qt.RoundJoin); p.setPen(pen); p.setBrush(Qt.NoBrush)
+            p.drawPolyline(QPolygonF([QPointF(s * 0.14, s * 0.30), QPointF(s * 0.50, s * 0.56),
+                                      QPointF(s * 0.86, s * 0.30)]))
+        p.end()
+        return QIcon(pm)
+
+    def _contact_bar(self):
+        """四个联系图标 + 一行说明，居中排一行。"""
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 2, 0, 0)
+        h.setSpacing(10)
+        lbl = QLabel("联系作者：")
+        lbl.setStyleSheet("color:#a2967f;font-size:12px;")
+        h.addWidget(lbl)
+        for kind, name, url in ver.CONTACTS:
+            b = QPushButton()
+            b.setObjectName("ContactIcon")
+            b.setFixedSize(34, 30)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setIcon(self._contact_icon(kind))
+            b.setIconSize(QSize(22, 22))
+            # 邮箱显示明文，方便直接抄走；其余显示跳转地址
+            shown = ver.CONTACT_MAIL if kind == "mail" else url
+            b.setToolTip("%s\n%s" % (name, shown))
+            b.clicked.connect(lambda _c, u=url: self._open_contact(u))
+            h.addWidget(b)
+        mail = QLabel("<a href='mailto:%s' style='color:#d4af37;text-decoration:none;'>%s</a>"
+                      % (ver.CONTACT_MAIL, ver.CONTACT_MAIL))
+        mail.setOpenExternalLinks(True)
+        mail.setStyleSheet("font-size:12px;")
+        mail.setCursor(Qt.PointingHandCursor)
+        h.addWidget(mail)
+        h.addStretch(1)
+        return box
+
+    @staticmethod
+    def _open_contact(url):
+        """打开外链 —— 失败**只记日志、绝不弹框**（与主窗 open_url 同口径）。"""
+        try:
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception as e:
+            applog.log("打开联系链接失败 %s：%s" % (url, e), "error")
+
+    @classmethod
+    def _body(cls) -> str:
+        lines = []
+        lines.append("**%s / %s**" % (ver.APP_NAME, ver.APP_NAME_EN))
+        lines.append("")
+        # 正文里也要有版本 —— 对话框头部那行只在窗口上，用户复制正文 / 截图时
+        # 就丢了版本信息，报 bug 时最常见的就是「你用的哪版」对不上。
+        lines.append("版本：`%s`　·　内部构建号 `%s`" % (ver.FULL_VERSION, ver.BUILD))
+        lines.append("")
+        lines.append("*%s — %s*" % (ver.SLOGAN_CN, ver.SLOGAN_EN))
+        lines.append("")
+        lines.append("## 这是什么")
+        lines.append("")
+        lines.append("一个**纯本地**的影视收藏管理桌面软件 —— 不依赖浏览器、不起 Web 服务，"
+                     "海报墙、演员关联、批量整理全部在你自己机器上完成。"
+                     "设计上借鉴了 Emby 的观影体验与 tinyMediaManager 的本地管理思路，"
+                     "但**刮削已阉割**：只读取你已经刮削好的 nfo，不主动联网抓取。")
+        lines.append("")
+        lines.append("## 功能一览")
+        lines.append("")
+        for title, desc in cls.SECTIONS:
+            lines.append("- **%s**：%s" % (title, desc))
+        lines.append("")
+        lines.append("## 隐私与联网")
+        lines.append("")
+        lines.append("- **不联网刮削**：软件本身不会向任何刮削站点发起请求，"
+                     "所有资料来自你本地已有的 nfo 文件。")
+        lines.append("- **AI 完全本地**：普通算法之外的可选 AI 复核走本机 Ollama（默认端口 11434），"
+                     "**全程不出网**；模型没装时自动降级为普通算法。")
+        lines.append("- **数据留在本机**：索引是程序目录下 `index_data/media_center.db` 一个 SQLite 文件，"
+                     "头像在同目录的图片缓存里；除你手动点「导出」外，任何数据都不会离开这台机器。")
+        lines.append("- **AI 收到的内容做过脱敏**：重复检测 / 图像检测送进模型的只有"
+                     "体积、时长、画质、槽位这类判定所需的量，**不含盘符、目录名、番号与文件名**。")
+        lines.append("")
+        lines.append("## 技术栈")
+        lines.append("")
+        lines.append("- Python 3.13 + PySide6（Qt 6）原生界面，无浏览器内核")
+        lines.append("- SQLite 单文件索引；SQL 下推 + 增量渲染支撑 5 万片规模")
+        lines.append("- PyInstaller `--onefile --windowed` 打包为**单文件 exe**，免安装、免运行库")
+        lines.append("- 首次启动即自动建库，不需要任何配置")
+        lines.append("")
+        lines.append("## 界面语言")
+        lines.append("")
+        lines.append("19 种：简体中文（基准）、英语、日语、韩语、西班牙语、印地语、阿拉伯语、"
+                     "葡萄牙语、俄语、德语、法语、意大利语、土耳其语、荷兰语、波兰语、"
+                     "瑞典语、泰语、越南语、印尼语。在「工具 → 个性化设置 → 外观 → 界面语言」切换，"
+                     "**立即生效、无需重启**。")
+        lines.append("")
+        lines.append("## 使用须知")
+        lines.append("")
+        lines.append("- 本软件**仅供个人对自己已合法持有的本地媒体文件做整理与浏览**。")
+        lines.append("- 软件不提供、不下载、不分发任何影视内容，删除类操作一律由你自己确认后执行。")
+        lines.append("- " + ver.LICENSE_NOTE)
+        lines.append("- " + ver.COPYRIGHT)
+        lines.append("")
+        lines.append("## 链接")
+        lines.append("")
+        lines.append("- 项目主页：<%s>" % ver.REPO_URL)
+        lines.append("- 作者主页：<%s>" % ver.AUTHOR_URL)
+        lines.append("")
+        lines.append("### 联系作者")
+        lines.append("")
+        # v1.33.0（反馈 4）：正文里也列一遍 —— 图标栏是给「看」的，这里是给「抄」的
+        # （用户复制正文 / 截图时链接不会丢）。
+        for _kind, _name, _url in ver.CONTACTS:
+            if _kind == "mail":
+                lines.append("- %s：`%s`" % (_name, ver.CONTACT_MAIL))
+            else:
+                lines.append("- %s：<%s>" % (_name, _url))
+        return "\n".join(lines)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -2311,18 +2907,21 @@ class MainWindow(QMainWindow):
             if group and group != last_group:
                 sv.addWidget(self._section(group))
                 last_group = group
-            sv.addWidget(self._nav_btn(item["label"], builders[item["key"]]))
+            # v1.32.0（反馈 3）：`item["label"]` 是**导航身份**（配置里的真源、用于排序与显隐），
+            # 显示时才过 i18n —— 否则配置里会存进外语词、老用户升级后导航就串了。
+            sv.addWidget(self._nav_btn(i18n.tr(item["label"]), builders[item["key"]]))
         # 媒体库：**只有一个分组**（v1.12.0 合并了旧版的「媒体库/分类」与「命名媒体库」两套），
         # 全部由用户自己命名；右键 编辑 / 重命名 / 扫描 / 删除。
         sv.addWidget(self._section("媒体库"))
         self._lib_btns = {}
+        # 注：库名是用户自己起的（身份），**不翻译**；这里只翻「媒体库」这个分组标题。
         self._lib_rings = {}       # v1.24.0（反馈 11）：库名旁的圆形扫描进度环
         for lib in s.libraries:
             btn = self._lib_btn(lib)
             self._lib_btns[lib["name"]] = btn
             sv.addWidget(self._lib_row(lib["name"], btn))
         # 没有内置库，所以「新建」入口必须在侧边栏就够得着（设置页里也有一份）
-        new_btn = self._nav_btn(self._NEW_LIB_TEXT, self._new_library)
+        new_btn = self._nav_btn(i18n.tr(self._NEW_LIB_TEXT), self._new_library)
         new_btn.setObjectName("NavDim")
         sv.addWidget(new_btn)
         sv.addItem(QSpacerItem(10, 10, QSizePolicy.Minimum, QSizePolicy.Expanding))
@@ -2553,7 +3152,9 @@ class MainWindow(QMainWindow):
         return w
 
     def _section(self, text):
-        l = QLabel(text)
+        # v1.32.0（反馈 3）：分组标题只在**显示层**翻译 —— 调用点传的仍是中文原名，
+        # 中文键同时也是 i18n 词典的 key，查不到就原样显示。
+        l = QLabel(i18n.tr(text))
         l.setObjectName("Section")
         l.setContentsMargins(8, 12, 0, 2)
         return l
@@ -2577,7 +3178,10 @@ class MainWindow(QMainWindow):
         h.addWidget(self.back_btn); h.addWidget(self.fwd_btn)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索 (Ctrl+K)   片名 / 类型 / 演员  （用 @ 指定演员）")
+        # v1.32.0（反馈 3）：搜索框提示语走词典（`COMMON` 里有整句译文），
+        # 提示语属于「会引导操作」的文案，值得翻译；业务细节不译。
+        self.search.setPlaceholderText(
+            i18n.tr("搜索 (Ctrl+K)   片名 / 类型 / 演员  （用 @ 指定演员）"))
         self.search.returnPressed.connect(self._do_search)
         h.addWidget(self.search, 1)
 
@@ -2968,13 +3572,15 @@ class MainWindow(QMainWindow):
         w.filter_bar = bar
         v.addWidget(bar)
         v.addWidget(grid)
-        hint = QLabel("头像+作品数卡片 · 不显示生日/出身地/身高/胸围/三围（导演资料里本就没有） · "
+        hint = QLabel("头像+作品数/别名卡片 · 不显示生日/出身地/身高/胸围/三围/简介（导演资料里本就没有） · "
                       "☆收藏 · 右上角▲置顶 · 双击查看作品")
         hint.setStyleSheet("color:#8c8071;font-size:11px;")
         v.addWidget(hint)
         # v1.24.1（反馈 3）：记住「当前人物页」是导演库，收藏 / 置顶后原地重建这一页
         self._people_builder = self._view_directors
-        return self._page(f"导演库（共 {total} 位）", w)
+        page = self._page(f"导演库（共 {total} 位）", w)
+        # v1.31.0（反馈 1）：撤销 v1.30.0 的 A-Z 索引条，直接返回原页面
+        return page
 
     # ---------- 智能推荐（v1.24.0 反馈 8） ----------
     def _view_smart(self, force=False):
@@ -3182,7 +3788,9 @@ class MainWindow(QMainWindow):
         v.addWidget(hint)
         # v1.24.1（反馈 3）：进入演员库 → 收藏/置顶后就重建演员库（别重建到导演库去）
         self._people_builder = self._view_actors
-        return self._page(f"演员库（共 {total} 位）", w)
+        page = self._page(f"演员库（共 {total} 位）", w)
+        # v1.31.0（反馈 1）：撤销 v1.30.0 的 A-Z 索引条，直接返回原页面
+        return page
 
     # ---------- 卡片选中（强调色流光 + 外发光，全局唯一） ----------
     def _select_card(self, card):
@@ -3328,7 +3936,8 @@ class MainWindow(QMainWindow):
         if height:
             facts.append("身高 " + height)
         bust, waist, hip = _parse_size(meta.get("尺寸", ""))
-        if bust or waist or hip:
+        cup = _parse_cup(meta.get("尺寸", ""), *(meta.get(k, "") for k in _CUP_META_KEYS))
+        if bust or waist or hip or cup:
             sz = []
             if bust:
                 sz.append(f"胸{bust}")
@@ -3336,7 +3945,9 @@ class MainWindow(QMainWindow):
                 sz.append(f"腰{waist}")
             if hip:
                 sz.append(f"臀{hip}")
-            facts.append("三围 " + "·".join(sz))
+            # v1.31.0（反馈 2）：罩杯写在三围最前面（`三围 H 胸88·腰56·臀84`）
+            seg = "·".join(sz)
+            facts.append("三围 " + ((cup + " " + seg) if cup and seg else (cup or seg)))
             if bust:
                 facts.append(f"胸围 {bust}cm")
         facts.append(f"参演作品 {len(works)} 部")
