@@ -1,0 +1,15 @@
+alive_after_28s = True
+windows(pid=16832) = [('PyInstaller Onefile Hidden Window', 'PyInstallerOnefileHiddenWindow', False), ('Default IME', 'IME', False)]
+log_lines = 4
+log_head:
+    2026-09-25 02:11:20 [INFO] 启动 流明盒 v1.34.2 (Build 2609250050)  frozen=True
+    2026-09-25 02:11:21 [INFO] 数据库就绪
+    2026-09-25 02:11:23 [INFO] 实时状态：采集能力 psutil=ok nvidia-smi=C:\WINDOWS\system32\nvidia-smi.EXE
+    2026-09-25 02:11:44 [INFO] [AI 引擎检测] engine=ollama at 02:11:44
+log_tail:
+    2026-09-25 02:11:20 [INFO] 启动 流明盒 v1.34.2 (Build 2609250050)  frozen=True
+    2026-09-25 02:11:21 [INFO] 数据库就绪
+    2026-09-25 02:11:23 [INFO] 实时状态：采集能力 psutil=ok nvidia-smi=C:\WINDOWS\system32\nvidia-smi.EXE
+    2026-09-25 02:11:44 [INFO] [AI 引擎检测] engine=ollama at 02:11:44
+SUSPECT_LINES = 0
+done

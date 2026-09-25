@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Qt 生命周期 · 懒初始化容器可见性",
+    "anchor": "## 数据模型与性能架构\n",
+    "insert_before": "## Qt 可见性陷阱（v1.33.0「白条」真缺陷，务必遵守）\n- **`QWidget` 容器默认可见**。凡「懒初始化 + 门闩」的容器（装进度条/计数标签、由 `_update_xxx()` 按需填充），**构造时必须显式 `setVisible(False)`，不能依赖那个初始化函数来隐藏它** —— 它可能永远不会被调到。\n- v1.33.0 实例：`LazyGrid._update_head()` 首行 `if not self._toolbar_ready: return`，而 `mark_toolbar_placed()` **全项目只有 `_wall_page` / `_view_smart` 两处调用**；演员库/导演库/最近播放/合集四页的网格**从未调** → 函数一次没跑过 → `head` 保持默认可见 → 里面那个 `maximum` 从未设置、无进度的 `QProgressBar` 画成一条**空槽灰白细条**。\n- 修法**双保险**：构造时 `head` 与 `bar` 都 `setVisible(False)`；`_update_head()` 未接管分支**主动 hide** 而非只 `return`。\n- 这类缺陷**离屏冒烟全绿、打包零警告**，只有真机、**只在页面有内容时**才看得见（判据：空数据页没有、满数据页才有）。定位靠 `PrintWindow` 抓帧 + 逐行扫亮度找亮包，再 `grep` 那个初始化函数的调用点。\n- 同族：v1.21.1 的 `more_btn`/`refresh_btn` 无父时 `setVisible(True)` 会变成带最小/最大/关闭的顶层小窗。\n\n"
+  },
+  {
+    "name": "四个检测页结果导入导出",
+    "anchor": "## 媒体库 / 设置模型\n",
+    "insert_before": "## 四个检测页的结果导入 / 导出（v1.33.0）\n- `duplicates` / `imagedetect` / `actorcheck` / `tagopt` 各有一对 `export_json` / `import_json`（纯 Python、不 import Qt）。\n- **统一信封** `{\"_app\": \"LumaCrate\", \"_kind\": \"duplicates|imagedetect|actorcheck|tagopt\", \"_format\": 1, \"report\"/\"result\"/\"plans\": …}`：导入**先验 `_kind`**（选错页给「这不是『图像检测』的结果文件」而非 `KeyError`）、**再验 `_format`**（更高版本 → 请升级软件），并**兼容 v1.32.0 的裸格式**。新增模块务必照抄这套。\n- 页面按钮属性名：`dd_exp_result`/`dd_imp_result`（重复检测，在 `ui_settings`）、`btn_to_exp`/`btn_to_imp`（标签优化，同文件）、`exp_btn`/`imp_btn`（图像/演员检测各在自己的 `ui_` 文件）；导入**复用各自的 `_on_done`**（重复检测是 `_on_dedupe_done`）。\n- **改这四个模块必重跑 `dev/smoke_v1330.py` 的 C 段**，它守着三个真踩过的序列化坑：① `actorcheck` 的 `_occ` 键是 **tuple**（`json.dump` 直接 `TypeError`），**簇自身也有**，必须**递归**剥；② `tagopt` 的 `translated` 是**嵌套二元组**，非递归的 str 兜底会把它整个字符串化 → 导入回来解包成 13 个字符；③ `duplicates` 用 `as_dict()` 导出而 `as_dict()` 把 `scanned`/`missing`/`generated_at` 塞在 **`summary` 子字典**里 → 导入读顶层全是默认值、汇总行写成「核对 0 部作品」。**导出结构必须与导入读取的层级对齐。**\n\n"
+  },
+  {
+    "name": "关于入口与联系图标",
+    "anchor": "## 品牌与文案\n",
+    "insert_before": "## 「关于」入口与作者联系图标（v1.33.0）\n- **「关于」不在工具窗导航里** —— 它是**主窗顶部工具栏最右**那一枚（`扫描媒体库 / 刷新 / 工具 / 关于`）。真机脚本找入口别翻 `dialog_nav`；坐标探测见 `dev/_scratch/ui_coords_v1330.py`（`main_about_btn` / `main_sidebar_v1330`）。\n- 联系方式真源 = `version.CONTACTS`（`[(key, 中文名, url), …]`，**key 兼作图标类型**）+ `version.CONTACT_MAIL`。图标是 `QPainterPath`/`QPolygonF` **现画的矢量**（不占 png 资源），34×30。\n- **`QPushButton#ContactIcon` 的 QSS 必须 `padding: 0`** —— 全局 `QPushButton{padding:7px 14px}` 会把 34×30 内容区压成负数、图标整个不见；**绝不能加 `min-width`**（会盖掉 `setFixedSize`）。\n\n"
+  }
+]

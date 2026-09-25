@@ -2,7 +2,7 @@
 """
 设置界面（参考截图 2–7）
 ========================
-- 个性化设置：导航菜单(开关 + 上下排序) / 首页管理(模块开关) / 内容卡片(显示评分·分辨率·演员·导演)
+- 个性化设置：导航菜单(开关 + 上下排序) / 首页管理(模块开关) / 内容卡片(显示评分·分辨率·悬停预告片)
 - 服务管理：媒体库(新建 / 列表 / 扫描全部 —— 全部由用户自己命名，无内置库) / 后台任务管理(启用 / 库 / 时间 / 频率)
 自绘 ToggleSwitch（无额外图片依赖）。
 """
@@ -35,10 +35,6 @@ import scraper as scraper_mod
 import applog
 import backup as backup_mod
 import tagopt as tagopt_mod
-import ui_imagedetect              # v1.30.0 反馈 2：图像检测
-import ui_manualedit               # v1.30.0 反馈 3：手动修改
-import ui_actorcheck               # v1.31.0 反馈 3：演员检测
-import i18n                        # v1.32.0 反馈 3：界面语言（19 种）
 from ui_hero import compact_button
 
 # v1.13.0：拉大行距，避免列表里内容被裁（反馈 1/2）；导航菜单列表高度改为按条目数自适应（反馈 7）
@@ -237,27 +233,18 @@ class TestSourceWorker(QThread):
 
 # ---------- 重复检测线程（v1.23.0） ----------
 class DedupeWorker(QThread):
-    """跨目录重复影片检测（在后台线程跑，避免 5 万片规模下卡界面）。
-
-    v1.32.0（反馈 1）：接入「普通算法 / AI 算法」双模式 —— 普通算法跑完
-    `find_duplicates()` 后，若选的是 AI 算法且本机 Ollama 可用，再让本地模型
-    逐组复核（**只加一列建议，不动任何文件**）。
-    """
+    """跨目录重复影片检测（在后台线程跑，避免 5 万片规模下卡界面）。"""
     progress = Signal(int, int, str)
     done = Signal(object)          # DupReport 或 None（失败）
 
     def __init__(self, library, min_confidence, exclude_multipart=True,
-                 verify_exists=True, algo="normal", model="", fast=True):
+                 verify_exists=True):
         super().__init__()
         self.library = library or None
         self.min_confidence = min_confidence
         # v1.24.0（反馈 1/2）：分片排除开关 + 磁盘存在性校验
         self.exclude_multipart = bool(exclude_multipart)
         self.verify_exists = bool(verify_exists)
-        # v1.32.0（反馈 1）：算法与 AI 复核参数
-        self.algo = "ai" if algo == "ai" else "normal"
-        self.model = model or ""
-        self.fast = bool(fast)
 
     def run(self):
         try:
@@ -266,23 +253,10 @@ class DedupeWorker(QThread):
                 exclude_multipart=self.exclude_multipart,
                 verify_exists=self.verify_exists,
                 progress=lambda a, b, m: self.progress.emit(a, b, m))
+            self.done.emit(rep)
         except Exception as e:
             applog.log(f"[重复检测] 失败：{type(e).__name__}: {e}")
             self.done.emit(None)
-            return
-        if self.algo == "ai" and rep is not None:
-            try:
-                dup_mod.review_with_ai(
-                    rep, model=self.model or None, fast=self.fast,
-                    progress=lambda a, b, m: self.progress.emit(a, b, m),
-                    stop=self.isInterruptionRequested)
-            except Exception as e:
-                # 复核失败**绝不能吞掉普通算法的结果** —— 报告照发，只补一条说明
-                applog.log(f"[重复检测] AI 复核异常：{type(e).__name__}: {e}")
-                rep.ai = {"ai": False, "done": 0, "failed": 0, "skipped": 0,
-                          "jobs": 0, "fast": self.fast,
-                          "note": "AI 复核出错（%s），以下为普通算法结果。" % e}
-        self.done.emit(rep)
 
 
 # ---------- 玻璃对话框基类 ----------
@@ -820,32 +794,41 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.nav_frame = QFrame()
-        self.nav_frame.setObjectName("Sidebar")
-        self.nav_frame.setFixedWidth(150)
-        root.addWidget(self.nav_frame)
-        self._rebuild_nav_buttons(build=True)
+        nav = QFrame()
+        nav.setObjectName("Sidebar")
+        nav.setFixedWidth(150)
+        nl = QVBoxLayout(nav)
+        nl.setContentsMargins(8, 12, 8, 10)
+        nl.setSpacing(4)
+        self.sub_btns = {}
+        # v1.24.0（反馈 6/8）：画像概览插到「个性化设置」之后、「演员刮削」之前；
+        # 智能推荐（含向量编辑）作为独立一页。
+        # v1.25.0（反馈 4）：「标签优化」跟在「智能推荐」后面 —— 它俩同源
+        # （都用「普通智能算法 / AI 智能算法」那套本地离线能力），放在一起好找。
+        self.ORDER = ["个性化设置", "画像概览", "演员刮削", "智能推荐", "标签优化",
+                      "服务管理", "重复检测", "数据与日志"]
+        for key in self.ORDER:
+            b = QPushButton(key)
+            b.setObjectName("Nav")
+            b.clicked.connect(lambda _c, k=key: self._show(k))
+            nl.addWidget(b)
+            self.sub_btns[key] = b
+        nl.addStretch(1)
+        root.addWidget(nav)
 
         self.stack = QStackedWidget()
         self._pg_personal = self._page_scroll(self._build_personal())
         # v1.24.0：画像概览内容很高（雷达 + 概览 + 高频榜 + 分布 + 共现），**必须套滚动** ——
         # 不套的话它会把整窗最小高度顶到 1733px（真机 1080p 屏幕上底部够不着，live_verify 抓到过）。
-        # v1.30.0：手动修改（左列表 + 右表单，自带滚动）／图像检测（结果树，必须套滚动）
-        self._pg_manual = self._page_scroll(ui_manualedit.ManualEditPage())
         self._pg_insight = self._page_scroll(self._build_insight())
         self._pg_scraper = self._build_scraper()      # 紧凑布局，整页一屏、不套滚动
         self._pg_smart = self._page_scroll(self._build_smart())     # v1.24.0：智能推荐
         self._pg_tagopt = self._page_scroll(self._build_tagopt())   # v1.25.0：标签优化
         self._pg_service = self._page_scroll(self._build_service())
         self._pg_dedupe = self._page_scroll(self._build_dedupe())   # v1.23.0：重复检测
-        # v1.31.0（反馈 3）：演员检测自带上下两块 + 内外滚动，**不再套 _page_scroll**
-        # （外面再包一层滚动区会让两个分隔条的高度互相打架）。
-        self._pg_actorcheck = ui_actorcheck.ActorCheckPage()
-        self._pg_imagedetect = self._page_scroll(ui_imagedetect.ImageDetectPage())
         self._pg_data = self._page_scroll(self._build_data())   # v1.13.0：数据 / 日志导出
-        for pg in (self._pg_personal, self._pg_manual, self._pg_insight, self._pg_scraper,
-                   self._pg_smart, self._pg_tagopt, self._pg_service, self._pg_dedupe,
-                   self._pg_actorcheck, self._pg_imagedetect, self._pg_data):
+        for pg in (self._pg_personal, self._pg_insight, self._pg_scraper, self._pg_smart,
+                   self._pg_tagopt, self._pg_service, self._pg_dedupe, self._pg_data):
             self.stack.addWidget(pg)
         root.addWidget(self.stack, 1)
 
@@ -867,97 +850,18 @@ class SettingsDialog(QDialog):
         sc.setWidget(widget)
         return sc
 
-    @staticmethod
-    def _section(text):
-        """导航分组小标题。样式来自 `QLabel#Section`（与主页侧栏的「分类 / 媒体库」同一套）。"""
-        l = QLabel(i18n.tr(text))
-        l.setObjectName("Section")
-        return l
-
-    #: 导航分组（v1.31.0 反馈 4 定的四组）。**键是中文**，因为它是页面的身份
-    #: （`self.sub_btns` 的 key、`ORDER` 的元素、dev 脚本遍历的依据），
-    #: 翻译只发生在**显示**这一层 —— 换语言绝不能改身份，否则 `_show()` 会找不到页。
-    NAV_GROUPS = [
-        ("基础工具", ["个性化设置", "服务管理", "手动修改"]),
-        ("数据优化", ["演员刮削", "智能推荐", "标签优化"]),
-        ("智能检测", ["重复检测", "演员检测", "图像检测"]),
-        ("数据分析", ["画像概览", "数据与日志"]),
-    ]
-
-    def _rebuild_nav_buttons(self, build=False):
-        """(重)建左侧导航按钮。换语言时会再调一次（`build=False`）。
-
-        v1.31.0（反馈 4）：导航按**用途分成四组**，与主页侧栏「分类 + 媒体库」同一套
-        分组写法（`QLabel#Section` 小标题）。10 来个平铺页签已经不好找了，分组后
-        「检测类工具在哪」一眼可见。
-
-        v1.32.0（反馈 3）：按钮文字走 `i18n.tr()`；`self.sub_btns` 的**键仍是中文**，
-        页面映射（`_show`）因此不受语言影响。
-        """
-        old = self.nav_frame.layout()
-        if old is None:
-            old = QVBoxLayout(self.nav_frame)
-        else:
-            # ⚠ 清空布局必须 `setParent(None)` —— 只 `takeAt()` + `deleteLater()`
-            # 不会立刻脱离父对象，旧按钮会在新按钮之前继续显示（v1.31.0 踩过。
-            # 见 skill 第 27.2 节）。
-            while old.count():
-                it = old.takeAt(0)
-                w = it.widget()
-                if w is not None:
-                    w.hide()
-                    w.setParent(None)
-                    w.deleteLater()
-        old.setContentsMargins(8, 12, 8, 10)
-        old.setSpacing(4)
-        self.sub_btns = {}
-        # `ORDER` 保持「扁平、按可见顺序」—— dev/ 下的 live_verify 与 render 脚本
-        # 都按它遍历页面，分组只是显示层的包装。
-        self.ORDER = [k for _g, keys in self.NAV_GROUPS for k in keys]
-        for group, keys in self.NAV_GROUPS:
-            old.addWidget(self._section(group))
-            for key in keys:
-                b = QPushButton(i18n.tr(key))
-                b.setObjectName("Nav")
-                b.setToolTip("%s · %s" % (i18n.tr(key), key))   # 悬停能看回原名，排查方便
-                b.clicked.connect(lambda _c, k=key: self._show(k))
-                old.addWidget(b)
-                self.sub_btns[key] = b
-        old.addStretch(1)
-        if build:
-            self._rebuild_nav_highlight()
-
-    def _rebuild_nav_highlight(self):
-        """把当前页的高亮重新画一遍（换语言重建按钮后必须补这一步）。
-
-        ⚠ 必须容忍 `self.stack` 还不存在 —— 首次 `_build()` 里是**先**建导航
-        （`_rebuild_nav_buttons(build=True)`）**后**建 `self.stack`（页面要按
-        `NAV_GROUPS` 的顺序逐个建，价格不菲，所以放在按钮之后）。这里若直接
-        `_show()` 就会 `AttributeError: no attribute 'stack'`，设置窗**完全打不开**。
-        `_show()` 是换页的**唯一**入口（`_current_key` 的写入点也在它里面），
-        所以这里只做「有能力就补画高亮」，真正的首次 `_show("个性化设置")` 由
-        `_build()` 末尾负责 —— 那时 stack 已经就绪。
-        """
-        if getattr(self, "stack", None) is None:
-            return
-        self._show(getattr(self, "_current_key", None) or self.ORDER[0])
-
     def _show(self, key):
-        self._current_key = key
         for k, b in self.sub_btns.items():
             b.setStyleSheet(
                 "background:rgba(255,255,255,0.12);color:#f7e3b4;" if k == key else "")
         self.stack.setCurrentWidget({
             "个性化设置": self._pg_personal,
-            "手动修改": self._pg_manual,
             "画像概览": self._pg_insight,
             "演员刮削": self._pg_scraper,
             "智能推荐": self._pg_smart,
             "标签优化": self._pg_tagopt,
             "服务管理": self._pg_service,
             "重复检测": self._pg_dedupe,
-            "演员检测": self._pg_actorcheck,
-            "图像检测": self._pg_imagedetect,
             "数据与日志": self._pg_data,
         }.get(key, self._pg_personal))
         # v1.24.0：画像概览第一次打开时自动分析一次（后续手动点「重新分析」）
@@ -995,24 +899,7 @@ class SettingsDialog(QDialog):
         af = QFormLayout()
         af.addRow("主题模式", self.ap_mode)
         af.addRow("玻璃浓度", self.ap_level)
-        # v1.32.0（反馈 3）：界面语言（19 种）。下拉里显示**自称**
-        # （`English` / `日本語` / `العربية`）—— 用户认自己的字，不认别人的字母。
-        self.ap_lang = QComboBox()
-        for _code, _native in i18n.lang_names():
-            self.ap_lang.addItem("%s  ·  %s" % (_native, i18n.cn_name(_code)), _code)
-        _cur = self.s.language()
-        _idx = self.ap_lang.findData(_cur)
-        self.ap_lang.setCurrentIndex(_idx if _idx >= 0 else 0)
-        self.ap_lang.setMinimumWidth(240)
-        self.ap_lang.currentIndexChanged.connect(self._apply_language)
-        af.addRow("界面语言", self.ap_lang)
         g0v.addLayout(af)
-        # 语言说明（切到非基准语言时会写明「哪些已译、哪些仍是中文」）
-        self.ap_lang_hint = QLabel("")
-        self.ap_lang_hint.setStyleSheet("color:#a2967f;font-size:11px;")
-        self.ap_lang_hint.setWordWrap(True)
-        g0v.addWidget(self.ap_lang_hint)
-        self._refresh_lang_hint()
         self.ap_hint = QLabel("")
         self.ap_hint.setStyleSheet("color:#a2967f;font-size:11px;")
         self.ap_hint.setWordWrap(True)
@@ -1111,7 +998,8 @@ class SettingsDialog(QDialog):
                     ("show_year", "显示年份"),
                     ("show_quality", "显示分辨率 / 画质"),
                     ("show_actors", "显示演员"),
-                    ("show_directors", "显示导演")]
+                    ("show_directors", "显示导演"),
+                    ("hover_trailer", "悬停时显示预告片（预留）")]
         for key, label in card_map:
             sw = ToggleSwitch(checked=self.s.content_cards.get(key, True))
             sw.toggled.connect(lambda c, k=key: (self.s.content_cards.__setitem__(k, c), self.s.save()))
@@ -1238,45 +1126,6 @@ class SettingsDialog(QDialog):
         if self.on_changed:
             self.on_changed()
         self._refresh_backdrop_hint()
-
-    # ---------- 界面语言（v1.32.0 反馈 3） ----------
-    def _apply_language(self, *_):
-        """换界面语言：落盘 → 换 i18n 当前语言 → 让主窗重建界面。
-
-        ⚠ 两件事必须按这个顺序做，且**只在这里做**：
-        1. 先 `i18n.set_lang()`，再 `on_changed()` —— 主窗重建时会读 `i18n.tr()`，
-           顺序反了就会用旧语言重建一遍、再也没人触发第二次刷新。
-        2. 重建走的是主窗那一个入口（`_apply_settings`）。本项目 v1.27.0 踩过
-           「面板被 deleteLater 时把运行中的 QThread 一起销毁 → 进程 abort」的坑，
-           刷新界面**绝不能**在设置页里自己再写一套重建逻辑。
-        """
-        code = self.ap_lang.currentData() or i18n.DEFAULT_LANG
-        self.s.set_appearance(language=code)
-        i18n.set_lang(code)
-        applog.log("[设置] 界面语言切换为 %s（%s）" % (code, i18n.cn_name(code)))
-        if self.on_changed:
-            self.on_changed()
-        # 设置窗自己也要跟着重建导航（否则左侧还是旧语言的页名）
-        self._rebuild_nav_buttons()
-        self._show(self._current_key)
-        self._refresh_lang_hint()
-
-    def _refresh_lang_hint(self):
-        lb = getattr(self, "ap_lang_hint", None)
-        if lb is None:
-            return
-        code = i18n.get_lang()
-        if code == i18n.BASE_LANG:
-            lb.setText("界面语言：简体中文（基准语言）。切换后立即生效，无需重启。")
-            lb.setStyleSheet("color:#a2967f;font-size:11px;")
-            return
-        note = ("界面语言已切到 %s（%s）。导航与常用动作已本地化；"
-                "算法说明、免责声明等业务细节仍保留中文原文 —— "
-                "本项目界面文案量很大，逐条机器翻译反而会误导。" % (i18n.cn_name(code), code))
-        if i18n.is_rtl(code):
-            note += "　⚠ 该语言从右往左书写，但本软件版面仍是左起 —— 只译文字、未做镜像。"
-        lb.setText(note)
-        lb.setStyleSheet("color:#8c8071;font-size:11px;")
 
     # ---------- 演员刮削 ----------
     def _build_scraper(self):
@@ -2427,46 +2276,6 @@ class SettingsDialog(QDialog):
         hint.setStyleSheet("color:#a2967f;font-size:11px;")
         g1v.addWidget(hint)
 
-        # ---- v1.32.0（反馈 1）：算法模式（与「演员检测 / 标签优化」同一套写法）
-        alg = QGroupBox("检测方式")
-        algv = QVBoxLayout(alg)
-        algv.setContentsMargins(10, 8, 10, 8)
-        algv.setSpacing(6)
-        arow = QWidget()
-        arh = QHBoxLayout(arow)
-        arh.setContentsMargins(0, 0, 0, 0)
-        arh.setSpacing(14)
-        self.dd_rb_normal = QRadioButton("普通算法（本地规则，秒出结果）")
-        self.dd_rb_ai = QRadioButton("AI 算法（本地离线 AI 复核，较慢）")
-        self.dd_rb_normal.setChecked(True)
-        for rb in (self.dd_rb_normal, self.dd_rb_ai):
-            arh.addWidget(rb)
-        self.dd_fast = QCheckBox("极速模式：只复核普通算法拿不准的组")
-        self.dd_fast.setChecked(True)
-        self.dd_fast.setToolTip(
-            "打开（默认）：置信度「高 / 极高」且各份体积时长一致的组直接采纳普通算法结论，"
-            "只把有疑点的送去 AI —— 真机上能把复核量压掉大半。\n"
-            "关闭：全部重复组都让 AI 过一遍（结论更全，但可能要等几分钟）。")
-        arh.addWidget(self.dd_fast)
-        self.dd_ai_btn = QPushButton("检测本地 AI 引擎")
-        self.dd_ai_btn.setObjectName("Ghost")
-        self.dd_ai_btn.setCursor(Qt.PointingHandCursor)
-        self.dd_ai_btn.clicked.connect(lambda: self._probe_detect_ai(self.dd_ai_lbl))
-        arh.addWidget(self.dd_ai_btn)
-        arh.addStretch(1)
-        algv.addWidget(arow)
-        self.dd_ai_lbl = QLabel("选「AI 算法」时会自动探测本机 Ollama；"
-                                "用哪个模型跟「智能推荐」页共用同一项设置。")
-        self.dd_ai_lbl.setWordWrap(True)
-        self.dd_ai_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
-        algv.addWidget(self.dd_ai_lbl)
-        self.dd_rb_ai.toggled.connect(
-            lambda on: on and self._probe_detect_ai(self.dd_ai_lbl))
-        self.dd_rb_normal.toggled.connect(self._save_dedupe_prefs)
-        self.dd_rb_ai.toggled.connect(self._save_dedupe_prefs)
-        self.dd_fast.toggled.connect(self._save_dedupe_prefs)
-        g1v.addWidget(alg)
-
         opt = QHBoxLayout()
         opt.setSpacing(8)
         opt.addWidget(QLabel("媒体库"))
@@ -2541,59 +2350,25 @@ class SettingsDialog(QDialog):
         tip7.setWordWrap(True)
         g2v.addWidget(tip7)
 
-        # v1.33.0（反馈 1）：结果文件导入 / 导出 —— 全库跑一次要 70 多秒，
-        # 当天没处理完的导出来，第二天导入接着处理，不必重新扫描。
-        # v1.33.1（反馈 2）：取消「导出 CSV」「导出 JSON」两枚按钮 ——
-        # 与「导出结果文件…」功能重叠且格式对用户无意义，只留可回灌的结果文件。
-        ex2 = QHBoxLayout()
-        self.dd_exp_result = QPushButton("导出结果文件…")
-        self.dd_exp_result.setObjectName("Ghost")
-        self.dd_exp_result.setToolTip("把本次检测结果存成一个 JSON，下次可导入继续处理（不必重新扫描）")
-        self.dd_exp_result.clicked.connect(self._export_dedupe_result)
-        self.dd_imp_result = QPushButton("导入结果文件…")
-        self.dd_imp_result.setObjectName("Ghost")
-        self.dd_imp_result.setToolTip("导入上次导出的检测结果，直接查看/导出/继续 AI 复核，无需重新扫描")
-        self.dd_imp_result.clicked.connect(self._import_dedupe_result)
-        ex2.addWidget(self.dd_exp_result)
-        ex2.addWidget(self.dd_imp_result)
-        ex2.addStretch(1)
-        g2v.addLayout(ex2)
+        ex = QHBoxLayout()
+        self.dd_exp_csv = QPushButton("导出 CSV")
+        self.dd_exp_csv.setObjectName("Ghost")
+        self.dd_exp_csv.clicked.connect(lambda: self._export_dedupe("csv"))
+        self.dd_exp_json = QPushButton("导出 JSON")
+        self.dd_exp_json.setObjectName("Ghost")
+        self.dd_exp_json.clicked.connect(lambda: self._export_dedupe("json"))
+        ex.addWidget(self.dd_exp_csv)
+        ex.addWidget(self.dd_exp_json)
+        ex.addStretch(1)
+        g2v.addLayout(ex)
         v.addWidget(g2)
 
         v.addStretch(1)
         return page
 
-    def _dedupe_algo(self):
-        """当前选的算法：`"ai"` / `"normal"`。"""
-        return "ai" if getattr(self, "dd_rb_ai", None) is not None \
-            and self.dd_rb_ai.isChecked() else "normal"
-
-    def _probe_detect_ai(self, label):
-        """探测本机 Ollama 并把结论写进 `label`（三个检测页共用一个实现）。
-
-        走 `aireview.ai_available()` 而不是自己再写一遍探测 —— 四个检测页必须
-        **口径完全一致**，否则会出现「演员检测说可用、图像检测说不可用」这种怪事。
-        """
-        try:
-            import aireview as ar
-            ok, note = ar.ai_available(self.s.ai_model() if hasattr(self.s, "ai_model") else "")
-        except Exception as e:
-            label.setText("探测失败：%s" % e)
-            label.setStyleSheet("color:#e8b76a;font-size:11px;")
-            return
-        if ok:
-            label.setText("✓ " + note)
-            label.setStyleSheet("color:#8fd18f;font-size:11px;")
-        else:
-            label.setText("✗ " + note)
-            label.setStyleSheet("color:#e8b76a;font-size:11px;")
-
     def _save_dedupe_prefs(self, *_):
         self.s.set_dedupe_prefs(exclude_multipart=self.dd_excl.isChecked(),
-                               min_confidence=self.dd_conf.currentText(),
-                               algo=self._dedupe_algo(),
-                               fast=bool(getattr(self, "dd_fast", None) is not None
-                                         and self.dd_fast.isChecked()))
+                               min_confidence=self.dd_conf.currentText())
 
     def _run_dedupe(self):
         if getattr(self, "_dd_worker", None) is not None and self._dd_worker.isRunning():
@@ -2604,27 +2379,15 @@ class SettingsDialog(QDialog):
         # v1.24.0（反馈 1）：**重检前先清空上次结果**（表格 / 树 / 汇总 / 导出用的报告），
         # 否则用户会看到「已经删掉的片子还在结果里」的旧数据。
         self._clear_dedupe_result()
-        algo = self._dedupe_algo()
         self.dd_run.setEnabled(False)
         self.dd_bar.setRange(0, 0)                 # 忙碌态
         self.dd_status.setText("正在读取作品元数据…")
         self._dd_worker = DedupeWorker(lib, self.dd_conf.currentText(),
                                        exclude_multipart=self.dd_excl.isChecked(),
-                                       verify_exists=self.dd_verify.isChecked(),
-                                       algo=algo,
-                                       model=self._ai_model_name(),
-                                       fast=bool(getattr(self, "dd_fast", None) is None
-                                                 or self.dd_fast.isChecked()))
+                                       verify_exists=self.dd_verify.isChecked())
         self._dd_worker.progress.connect(self._on_dedupe_progress)
         self._dd_worker.done.connect(self._on_dedupe_done)
         self._dd_worker.start()
-
-    def _ai_model_name(self):
-        """本地 AI 用哪个模型 —— 与「智能推荐」页共用配置，绝不各存一份。"""
-        try:
-            return str(self.s.smart.get("ai_model") or "")
-        except Exception:
-            return ""
 
     def _clear_dedupe_result(self):
         self._dd_report = None
@@ -2671,117 +2434,70 @@ class SettingsDialog(QDialog):
         s = report.summary()
         self.dd_bar.setValue(100)
         gone = f"，其中 {report.missing} 部在磁盘上已不存在、未参与比对" if report.missing else ""
-        # v1.32.0（反馈 1）：把「用了哪个算法、AI 复核了多少条」如实写出来。
-        # 选 AI 但引擎不可用时**必须**让用户看见降级原因，否则会以为 AI 跑过了。
-        algo_note = ""
-        if report.algo == "ai":
-            ai = report.ai or {}
-            if ai.get("ai"):
-                algo_note = (f" · AI 复核 {s['ai_done']} 组"
-                             + (f"（{s['ai_skipped']} 组按极速模式跳过）"
-                                if s["ai_skipped"] else "")
-                             + (f" · {s['ai_failed']} 组复核失败" if s["ai_failed"] else ""))
-            else:
-                algo_note = " · AI 不可用，已按普通算法给出结果"
         self.dd_status.setText(
-            f"检测完成（{'AI 算法' if report.algo == 'ai' else '普通算法'}）："
-            f"核对 {s['scanned']} 部作品{gone}，耗时 {s['elapsed']} 秒。{algo_note}")
+            f"检测完成：核对 {s['scanned']} 部作品{gone}，耗时 {s['elapsed']} 秒。")
         mp = (f"同目录分片（已排除）{s['multipart_groups']} 组"
               if s.get("multipart_excluded", True)
               else "同目录分片（未排除，已并入上方结果）")
         self.dd_summary.setText(
             f"重复组 <b>{s['dup_groups']}</b> 组 · 涉及 {s['dup_movies']} 部 · "
-            f"冗余 {s['redundant_copies']} 份 · 可回收 <b>{s['redundant_text']}</b> · {mp}"
-            + (f"<br><span style='color:#8c8071;'>AI 复核：{s['ai_note']}</span>"
-               if report.algo == "ai" and s.get("ai_note") else ""))
+            f"冗余 {s['redundant_copies']} 份 · 可回收 <b>{s['redundant_text']}</b> · {mp}")
         self._fill_dedupe_tree(report)
         self.dd_tree.resizeColumnToContents(0)
         applog.log(f"[重复检测] 完成：{s['dup_groups']} 组重复，可回收 {s['redundant_text']}，"
-                   f"已失效副本 {report.missing}，算法 {report.algo}")
+                   f"已失效副本 {report.missing}")
 
     def _fill_dedupe_tree(self, report):
-        """把重复组填进树：分组行可展开看每个副本的完整路径（v1.24.0 反馈 7）。
-
-        v1.32.0（反馈 1）：表头改为从 `self.dd_tree.headerItem().setText()` 动态设置 ——
-        只在选了 AI 算法时才追加「AI 建议」列，普通算法下不多出一列空白。
-        """
-        show_ai = (report.algo == "ai")
-        heads = (["标识 / 文件", "依据", "置信度", "AI 建议", "体积", "时长", "目录"]
-                 if show_ai else ["标识 / 文件", "依据", "置信度", "体积", "时长", "目录"])
-        self.dd_tree.setColumnCount(len(heads))
-        self.dd_tree.setHeaderLabels(heads)
-        # 列号随表头长度变，先算出来，下面所有 setForeground / setToolTip 都用它
-        C_AI = 3 if show_ai else -1
-        C_SIZE = 4 if show_ai else 3
-        C_DUR = 5 if show_ai else 4
-        C_DIR = 6 if show_ai else 5
+        """把重复组填进树：分组行可展开看每个副本的完整路径（v1.24.0 反馈 7）。"""
         self.dd_tree.clear()
-
-        def _ai_cells(g):
-            """一组重复的 AI 建议两个格子（组行 / 成员行）。"""
-            if not show_ai:
-                return []
-            a = g.ai or {}
-            if not a:
-                return ["—"]
-            return ["%s（%s）" % (a.get("advice") or "", a.get("confidence") or "")]
-
         for g in report.groups:
-            row = [f"{g.label}   （{g.copies} 份，冗余 {g.redundant_copies}）",
-                   "番号" if g.kind == "num" else "标题+年份",
-                   g.confidence] + _ai_cells(g) + \
-                  [g.total_text, "", " | ".join(g.folders)]
-            top = QTreeWidgetItem(row)
-            top.setToolTip(C_DIR, "\n".join(g.folders))
-            ai_tip = ""
-            if show_ai and g.ai:
-                ai_tip = "\nAI 建议：%s（%s）%s" % (g.ai.get("advice") or "",
-                                                  g.ai.get("confidence") or "",
-                                                  ("　" + (g.ai.get("reason") or ""))
-                                                  if g.ai.get("reason") else "")
-            top.setToolTip(0, f"{g.note or ''}\n可回收 {g.redundant_text}{ai_tip}")
+            top = QTreeWidgetItem([
+                f"{g.label}   （{g.copies} 份，冗余 {g.redundant_copies}）",
+                "番号" if g.kind == "num" else "标题+年份",
+                g.confidence,
+                g.total_text,
+                "",
+                " | ".join(g.folders)])
+            top.setToolTip(5, "\n".join(g.folders))
+            top.setToolTip(0, f"{g.note or ''}\n可回收 {g.redundant_text}")
             if g.redundant_bytes:
                 top.setForeground(0, QBrush(QColor("#f0c674")))
-            if show_ai and g.ai:
-                top.setForeground(C_AI, QBrush(QColor(
-                    "#8fd18f" if (g.ai.get("advice") or "") == "全部保留" else "#f0c674")))
             # 分组行双击 → 打开它最大的那一份（体积最大的留、其余是冗余）
             if g.members:
                 top.setData(0, Qt.UserRole, g.members[0].path)
             for m in g.members:
-                cells = [(m.original_filename or m.path),
-                         "保留（最大）" if m is g.members[0] else "冗余副本",
-                         m.num or ""] + ([""] if show_ai else []) + \
-                        [m.size_text, m.duration_text, m.folder]
-                child = QTreeWidgetItem(cells)
+                child = QTreeWidgetItem([
+                    (m.original_filename or m.path),
+                    "保留（最大）" if m is g.members[0] else "冗余副本",
+                    m.num or "",
+                    m.size_text,
+                    m.duration_text,
+                    m.folder])
                 child.setData(0, Qt.UserRole, m.path)
                 child.setToolTip(0, m.path)
-                child.setToolTip(C_DIR, m.folder)
+                child.setToolTip(5, m.folder)
                 if m is not g.members[0]:
                     child.setForeground(1, QBrush(QColor("#e2685a")))
                 top.addChild(child)
             self.dd_tree.addTopLevelItem(top)
         if report.multipart:
-            head = QTreeWidgetItem([f"同目录分片（{len(report.multipart)} 组，未计入重复）"]
-                                   + [""] * (len(heads) - 1))
+            head = QTreeWidgetItem([f"同目录分片（{len(report.multipart)} 组，未计入重复）",
+                                    "", "", "", "", ""])
             head.setForeground(0, QBrush(QColor("#8c8071")))
             for g in report.multipart:
-                it = QTreeWidgetItem([g.label, "同目录多份", g.confidence]
-                                     + ([""] if show_ai else [])
-                                     + [g.total_text, "", " | ".join(g.folders)])
+                it = QTreeWidgetItem([g.label, "同目录多份", g.confidence,
+                                      g.total_text, "",
+                                      " | ".join(g.folders)])
                 for m in g.members:
                     ch = QTreeWidgetItem([m.original_filename or m.path, "分片",
-                                          m.num or ""]
-                                         + ([""] if show_ai else [])
-                                         + [m.size_text, m.duration_text, m.folder])
+                                          m.num or "", m.size_text, m.duration_text,
+                                          m.folder])
                     ch.setData(0, Qt.UserRole, m.path)
                     it.addChild(ch)
                 head.addChild(it)
             self.dd_tree.addTopLevelItem(head)
         self.dd_tree.expandToDepth(0)
 
-    # ---- v1.33.0（反馈 1）：结果文件导出 / 导入 ----
-    # v1.33.1（反馈 2）：入口按钮已取消，保留此方法供脚本 / 冒烟调用，不再挂 UI。
     def _export_dedupe(self, fmt):
         rep = getattr(self, "_dd_report", None)
         if rep is None:
@@ -2798,50 +2514,6 @@ class SettingsDialog(QDialog):
             applog.log(f"[重复检测] 已导出清单：{p}")
         except Exception as e:
             QMessageBox.warning(self, "导出失败", str(e))
-
-    def _export_dedupe_result(self):
-        """把本次检测结果存成可再次导入的结果文件。"""
-        rep = getattr(self, "_dd_report", None)
-        if rep is None:
-            QMessageBox.information(self, "提示", "请先执行一次检测（或先导入上次的结果）。")
-            return
-        default = "重复检测结果.json"
-        path, _sel = QFileDialog.getSaveFileName(self, "导出检测结果", default, "结果文件 (*.json)")
-        if not path:
-            return
-        try:
-            p = dup_mod.export_json(rep, path)
-            QMessageBox.information(
-                self, "完成",
-                f"已导出：\n{p}\n\n下次用「导入结果文件…」载入本文件，即可接着处理"
-                f"（本页现有 {len(rep.groups)} 组重复 + {len(rep.multipart)} 组同目录分片）。")
-            applog.log(f"[重复检测] 已导出结果文件：{p}")
-        except Exception as e:
-            QMessageBox.warning(self, "导出失败", str(e))
-
-    def _import_dedupe_result(self):
-        """导入上次导出的结果文件 → 直接渲染结果树（不必重新扫描）。"""
-        path, _sel = QFileDialog.getOpenFileName(self, "导入检测结果", "",
-                                                 "结果文件 (*.json);;所有文件 (*)")
-        if not path:
-            return
-        try:
-            rep = dup_mod.import_json(path)
-        except Exception as e:
-            QMessageBox.warning(self, "导入失败", f"{e}\n\n请确认选的是本页「导出结果文件…」"
-                                                  f"产出的文件。")
-            applog.log(f"[重复检测] 导入结果失败：{e}", "error")
-            return
-        # 复用正常检测完成的渲染路径 —— 树、汇总、导出、后续 AI 复核全都一致。
-        self._on_dedupe_done(rep)
-        self.dd_status.setText(self.dd_status.text()
-                               + f"　（本结果是**导入**的：{os.path.basename(path)}，"
-                                 f"生成于 {rep.generated_at or '未知时间'}）")
-        applog.log(f"[重复检测] 已导入结果文件：{path}（{len(rep.groups)} 组重复）")
-        QMessageBox.information(
-            self, "导入完成",
-            f"已载入 {len(rep.groups)} 组重复、{len(rep.multipart)} 组同目录分片。\n"
-            f"可以直接「导出结果文件…」留档，或切到「AI 算法」对这些结果做复核。")
 
     # ---------- 数据与日志（v1.13.0 新增） ----------
     def _build_data(self):
@@ -3394,9 +3066,6 @@ class SettingsDialog(QDialog):
         # ---------- 预览与执行 ----------
         g3 = QGroupBox("预览与执行（先预览，确认后才写盘）")
         g3v = QVBoxLayout(g3)
-        # v1.33.1（反馈 1）：五枚按钮**同排水平对齐** —— 原先「导出/导入结果文件…」
-        # 单独占一行，与「扫描并预览」错位，视觉上像从属关系；合并成一行后
-        # 主操作在前、结果文件操作在后，中间用竖线分隔表达分组。
         arow = QHBoxLayout()
         arow.setSpacing(8)
         self.btn_to_scan = QPushButton("扫描并预览")
@@ -3414,25 +3083,6 @@ class SettingsDialog(QDialog):
         self.btn_to_clear.setObjectName("Ghost")
         self.btn_to_clear.clicked.connect(self._tagopt_clear)
         arow.addWidget(self.btn_to_clear)
-        # 结果文件导入 / 导出 —— 扫全库 nfo 要逐个读盘（还可能跑 AI），
-        # 当天没写完的导出来，第二天导入后**直接点「执行写入」**，不必重新扫。
-        sep_to = QFrame()
-        sep_to.setObjectName("VRule")
-        sep_to.setFixedWidth(1)
-        sep_to.setFixedHeight(18)
-        arow.addSpacing(6)
-        arow.addWidget(sep_to)
-        arow.addSpacing(6)
-        self.btn_to_exp = QPushButton("导出结果文件…")
-        self.btn_to_exp.setObjectName("Ghost")
-        self.btn_to_exp.setToolTip("把当前预览的改动清单存成一个 JSON，下次可导入后直接写入")
-        self.btn_to_exp.clicked.connect(self._tagopt_export_result)
-        arow.addWidget(self.btn_to_exp)
-        self.btn_to_imp = QPushButton("导入结果文件…")
-        self.btn_to_imp.setObjectName("Ghost")
-        self.btn_to_imp.setToolTip("导入上次导出的改动清单，填回预览表格后可直接执行写入")
-        self.btn_to_imp.clicked.connect(self._tagopt_import_result)
-        arow.addWidget(self.btn_to_imp)
         arow.addStretch(1)
         g3v.addLayout(arow)
 
@@ -3605,55 +3255,6 @@ class SettingsDialog(QDialog):
         self.to_progress.setValue(0)
         self.to_status.setStyleSheet("color:#8c8071;font-size:11px;")
         self.to_status.setText("已清空预览。")
-
-    # ---- v1.33.0（反馈 1）：结果文件导出 / 导入 ----
-    def _tagopt_export_result(self):
-        """把当前预览的改动清单存成可再次导入的结果文件。"""
-        plans = list(getattr(self, "_to_plans", None) or [])
-        if not plans:
-            QMessageBox.information(self, "提示", "还没有扫描结果，先点「扫描并预览」。")
-            return
-        default = "标签优化结果.json"
-        path, _sel = QFileDialog.getSaveFileName(self, "导出扫描结果", default, "结果文件 (*.json)")
-        if not path:
-            return
-        try:
-            p = tagopt_mod.export_json(plans, path)
-            changed = len(getattr(self, "_to_changed", None) or [])
-            QMessageBox.information(
-                self, "完成",
-                f"已导出：\n{p}\n\n共 {len(plans)} 条扫描记录（其中 {changed} 条会改动）。"
-                f"\n下次用「导入结果文件…」载入，即可直接点「执行写入」。")
-            applog.log(f"[标签优化] 已导出结果文件：{p}（{len(plans)} 条）")
-        except Exception as e:
-            QMessageBox.warning(self, "导出失败", str(e))
-
-    def _tagopt_import_result(self):
-        """导入上次导出的扫描结果 → 填回预览表格，「执行写入」立即可用。"""
-        path, _sel = QFileDialog.getOpenFileName(self, "导入扫描结果", "",
-                                                 "结果文件 (*.json);;所有文件 (*)")
-        if not path:
-            return
-        try:
-            plans = tagopt_mod.import_json(path)
-        except Exception as e:
-            QMessageBox.warning(self, "导入失败", f"{e}\n\n请确认选的是本页「导出结果文件…」"
-                                                  f"产出的文件。")
-            applog.log(f"[标签优化] 导入结果失败：{e}", "error")
-            return
-        changed = [p for p in plans if not p.get("error")
-                   and list(p.get("before") or []) != list(p.get("after") or [])]
-        self._to_plans = plans
-        self._to_changed = changed
-        self._fill_to_table(changed)
-        self.btn_to_run.setEnabled(bool(changed))
-        self.to_progress.setValue(0)
-        self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
-        self.to_status.setText(
-            "已导入 %s：%d 条扫描记录、其中 %d 条标签会变化。"
-            "确认无误后点「执行写入」即可（**无需重新扫描**）。"
-            % (os.path.basename(path), len(plans), len(changed)))
-        applog.log(f"[标签优化] 已导入结果文件：{path}（{len(plans)} 条 / 改动 {len(changed)}）")
 
     def _on_to_progress(self, i, n, msg):
         if n and n > 0:

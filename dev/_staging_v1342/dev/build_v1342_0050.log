@@ -1,0 +1,88 @@
+[归档] 流明盒-v1.34.2-2609250049.exe -> history/流明盒-v1.34.2-2609250049.exe（覆盖字节相同的同名留档）
+[logo] --icon C:\lmc_build\logo.ico
+265 INFO: PyInstaller: 6.22.2, contrib hooks: 2026.7
+265 INFO: Python: 3.13.14
+287 INFO: Platform: Windows-11-10.0.26200-SP0
+287 INFO: Python environment: C:\Users\zouzu\.workbuddy\binaries\python\envs\default
+288 INFO: wrote C:/lmc_build_tmp\流明盒-v1.34.2-2609250050.spec
+291 INFO: Removing temporary files and cleaning cache in C:\Users\zouzu\AppData\Local\pyinstaller
+293 INFO: Module search paths (PYTHONPATH):
+['C:\\lmc_build\\src',
+ 'C:\\lmc_build',
+ 'C:\\Users\\zouzu\\AppData\\Local\\Programs\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\vendor\\shim',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python313.zip',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\versions\\3.13.12\\DLLs',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\versions\\3.13.12\\Lib',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\versions\\3.13.12',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\win32',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\win32\\lib',
+ 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\pythonwin',
+ 'C:\\lmc_build\\src']
+1188 INFO: Appending 'datas' from .spec
+1188 INFO: checking Analysis
+1188 INFO: Building Analysis because Analysis-00.toc is non existent
+1188 INFO: Looking for Python shared library...
+1188 INFO: Using Python shared library: C:\Users\zouzu\.workbuddy\binaries\python\versions\3.13.12\python313.dll
+1188 INFO: Running Analysis Analysis-00.toc
+1188 INFO: Target bytecode optimization level: 0
+1188 INFO: Initializing module dependency graph...
+1208 INFO: Initializing module graph hook caches...
+1222 INFO: Analyzing modules for base_library.zip ...
+3929 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+4805 INFO: Processing standard module hook 'hook-math.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+5933 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+6781 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+7209 INFO: Caching module dependency graph...
+7239 INFO: Analyzing C:\lmc_build\src\main.py
+7248 INFO: Processing standard module hook 'hook-PySide6.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+7937 INFO: Processing standard module hook 'hook-shiboken6.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+8088 INFO: Processing standard module hook 'hook-PySide6.QtNetwork.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+11025 INFO: Processing standard module hook 'hook-PySide6.QtCore.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+13992 INFO: Processing standard module hook 'hook-PySide6.QtWidgets.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+17624 INFO: Processing standard module hook 'hook-PySide6.QtGui.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+36766 INFO: Processing standard module hook 'hook-sqlite3.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+38423 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+38445 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+38573 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+38579 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+38906 INFO: Processing standard module hook 'hook-psutil.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+39491 INFO: Analyzing hidden import 'PySide6.QtXml'
+39517 INFO: Processing standard module hook 'hook-PySide6.QtXml.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+40386 INFO: Processing module hooks (post-graph stage)...
+40456 INFO: Performing binary vs. data reclassification (124 entries)
+40548 INFO: Looking for ctypes DLLs
+40562 INFO: Analyzing run-time hooks ...
+40563 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+40567 INFO: Including run-time hook 'pyi_rth_pyside6.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+40570 INFO: Processing pre-find-module-path hook 'hook-_pyi_rth_utils.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+40573 INFO: Processing standard module hook 'hook-_pyi_rth_utils.py' from 'C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PyInstaller\\hooks'
+40581 INFO: Creating base_library.zip...
+40601 INFO: Looking for dynamic libraries
+41375 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\shiboken6']
+41375 INFO: Extra DLL search directories (PATH): ['C:\\Users\\zouzu\\.workbuddy\\binaries\\python\\envs\\default\\Lib\\site-packages\\PySide6']
+42541 INFO: Warnings written to C:\lmc_build_tmp\流明盒-v1.34.2-2609250050\warn-流明盒-v1.34.2-2609250050.txt
+42560 INFO: Graph cross-reference written to C:\lmc_build_tmp\流明盒-v1.34.2-2609250050\xref-流明盒-v1.34.2-2609250050.html
+42591 INFO: checking PYZ
+42591 INFO: Building PYZ because PYZ-00.toc is non existent
+42591 INFO: Building PYZ (ZlibArchive) C:\lmc_build_tmp\流明盒-v1.34.2-2609250050\PYZ-00.pyz
+42870 INFO: Building PYZ (ZlibArchive) C:\lmc_build_tmp\流明盒-v1.34.2-2609250050\PYZ-00.pyz completed successfully.
+42880 INFO: checking PKG
+42880 INFO: Building PKG because PKG-00.toc is non existent
+42880 INFO: Building PKG (CArchive) 流明盒-v1.34.2-2609250050.pkg
+55466 INFO: Building PKG (CArchive) 流明盒-v1.34.2-2609250050.pkg completed successfully.
+55471 INFO: Bootloader C:\Users\zouzu\.workbuddy\binaries\python\envs\default\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+55471 INFO: checking EXE
+55471 INFO: Building EXE because EXE-00.toc is non existent
+55471 INFO: Building EXE from EXE-00.toc
+55471 INFO: Copying bootloader EXE to C:\lmc_build_tmp\流明盒-v1.34.2-2609250050.exe
+55486 INFO: Copying icon to EXE
+55499 INFO: Copying 0 resources to EXE
+55499 INFO: Embedding manifest in EXE
+55510 INFO: Appending PKG archive to EXE
+55549 INFO: Fixing EXE headers
+55796 INFO: Building EXE from EXE-00.toc completed successfully.
+55801 INFO: Build complete! The results are available in: C:\lmc_build_tmp
+[完成] 根目录: C:\lmc_build\流明盒-v1.34.2-2609250050.exe
+[完成] 归档:  C:\lmc_build\history\流明盒-v1.34.2-2609250050.exe

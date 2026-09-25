@@ -1,0 +1,19 @@
+PASS  AUTOFILL_TOP_RANGE==(1,999)   (1, 999)
+PASS  PORTRAIT_TOP==999   999
+PASS  MAX_TAGS>=999   1200
+PASS  most_common 上限=999   len=999
+PASS  items[:999] 长度=999   len=999
+PASS  sp_top.max==999   999
+PASS  sp_top 无后缀   ''
+PASS  sp_top 显示 999   '999'
+PASS  sp_top 三位宽够   minW=114
+PASS  对话框高度紧凑[420,900]   543
+  [info] dialog.height=543
+PASS  找到组框(>=2)   2
+PASS  统计范围组框 SizePolicy=Fixed   Policy.Fixed
+PASS  scope tip 不换行   False
+PASS  scope tip 恒 1 行高   tipH=17 lh=13
+PASS  统计范围组框不再虚高   g1H=97
+PASS  _plan 收到 999   [999, 999, 999, 999, 999]
+
+==== SMOKE v1.34.2: ALL PASS
