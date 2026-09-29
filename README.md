@@ -12,7 +12,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.13-3776ab?style=flat-square\&logo=python)
 
-\!\[Qt\](<https://img.shields.io/badge/UI-PySide6%20(Qt%206\\\\)-41cd52?style=flat-square\\\\\\\&logo=qt>)
+!\[Qt\](<https://img.shields.io/badge/UI-PySide6%20(Qt%206\\\\)-41cd52?style=flat-square\\\\\\\&logo=qt>)
 
 ![Offline](https://img.shields.io/badge/network-只读nfo%20不联网-2c3e50?style=flat-square)
 
