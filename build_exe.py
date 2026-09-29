@@ -30,12 +30,13 @@ LEGACY_PREFIXES = ("本地影视中心-",)
 
 
 def _ensure_logo_ico():
-    """确保 logo.ico 存在且不旧于 logo.png（PyInstaller --icon 用，v1.23.0 反馈 2）。
+    """确保 logo.ico 存在且不旧于 logo-3.png（PyInstaller --icon 用，v1.23.0 反馈 2）。
 
-    坑：只在「文件不存在」时生成会一直沿用旧 ico（换了 logo.png 也不更新），
+    坑：只在「文件不存在」时生成会一直沿用旧 ico（换了源图也不更新），
     所以按 mtime 判断，源图更新过就重新生成多分辨率 ico。
+    v1.35.0：品牌图标由旧 logo.png 换成金色胶片 logo-3.png，源图路径随动。
     """
-    png = os.path.join(ROOT, "logo.png")
+    png = os.path.join(ROOT, "logo-3.png")
     ico = os.path.join(ROOT, "logo.ico")
     if os.path.exists(ico) and (not os.path.exists(png)
                                 or os.path.getmtime(ico) >= os.path.getmtime(png)):
@@ -111,7 +112,7 @@ def main():
         "--noconfirm",
         "--clean",
         "--add-data", f"{os.path.join(SRC, 'style.qss')};.",
-        "--add-data", f"{os.path.join(ROOT, 'logo.png')};.",      # v1.22.0（反馈 3）：运行时窗口图标
+        "--add-data", f"{os.path.join(ROOT, 'logo-3.png')};.",    # v1.35.0：新品牌图标（运行时窗口 / 任务栏）
         "--hidden-import", "PySide6.QtXml",
         "--hidden-import", "backdrop",
         "--hidden-import", "scraper",

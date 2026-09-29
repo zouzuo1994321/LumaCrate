@@ -14,8 +14,10 @@ v1.14.0 海量数据优化（目标 5 万+ 影片）
 5. **关联表按需查**：`cast_crew_map()` / `actors_map()` 支持只查指定若干 media_id，
    不再每次都把整张 `media_people`（5 万片 × 数人 = 数十万行）拉进内存。
 """
+import json
 import os
 import random
+import re
 import sqlite3
 import sys
 import threading
@@ -876,10 +878,16 @@ def all_people(role_type: str = "Actor"):
 
 
 # ---------- 演员库的筛选与排序（v1.14.0） ----------
+# 「首字母」：优先罗马音 romaji（真机 4766 / 7127 有值），退化到姓名首字符。
+# 用它排序时中/日文名会挤到后面，所以 A-Z 索引把非 A-Z 的一律归到 "#"（见
+# `people_letter_index`），不做分散处理。
+_ACTOR_LETTER_EXPR = "UPPER(SUBSTR(COALESCE(NULLIF(TRIM(p.romaji), ''), p.name), 1, 1))"
+
 ACTOR_SORTS = [
     ("works",     "作品数",   "works"),
     ("last_year", "最新作品", "last_year"),
     ("name",      "姓名",     "p.name COLLATE NOCASE"),
+    ("letter",    "首字母",   _ACTOR_LETTER_EXPR),
     ("birthday",  "生日",     "p.birthday"),
     ("favorite",  "收藏",     "p.favorite"),
     ("pinned",    "置顶",     "p.pinned"),
@@ -922,12 +930,13 @@ def _people_having(status=None, min_works=None, cur_year=None):
     return having, params
 
 
-def query_people(role_type: str = "Actor", limit: int = 0, offset: int = 0,
-                 sort: str = "works", asc: bool = False, favorite=None, pinned=None,
-                 status=None, has_photo=None, min_works=None, cur_year=None):
-    """演员库查询（筛选 + 排序 + 分页）。
+def _people_clauses(role_type="Actor", favorite=None, pinned=None, status=None,
+                    has_photo=None, min_works=None, cur_year=None):
+    """WHERE / HAVING / 参数 **三处共用**（v1.30.0）。
 
-    排序恒以「置顶」优先（与旧行为一致）；`sort` 只接受白名单键。
+    原来 `query_people` 与 `count_people` 各写一份构造逻辑 —— 两处一旦不同步
+    （比如漏一个 `has_photo`），表现是「总数是 5909，实际翻几页就没了」这种
+    极难复盘的错。现在只有这一份，`people_letter_index` 也复用它，三边口径天然一致。
     """
     clauses = ["p.role_type=?"]
     params = [role_type]
@@ -944,12 +953,28 @@ def query_people(role_type: str = "Actor", limit: int = 0, offset: int = 0,
     elif has_photo is False:
         clauses.append("(p.photo_path IS NULL OR p.photo_path='')")
     having, hparams = _people_having(status, min_works, cur_year)
+    return clauses, params, having, hparams
+
+
+def _people_order(sort: str, asc: bool) -> str:
+    """ORDER BY 子句（含 tie-breaker），查询与字母索引共用同一份口径。"""
     expr = _ACTOR_SORT_EXPR.get(sort) or _ACTOR_SORT_EXPR["works"]
-    direction = "ASC" if asc else "DESC"
+    return f" ORDER BY p.pinned DESC, {expr} {'ASC' if asc else 'DESC'}, p.name COLLATE NOCASE"
+
+
+def query_people(role_type: str = "Actor", limit: int = 0, offset: int = 0,
+                 sort: str = "works", asc: bool = False, favorite=None, pinned=None,
+                 status=None, has_photo=None, min_works=None, cur_year=None):
+    """演员库查询（筛选 + 排序 + 分页）。
+
+    排序恒以「置顶」优先（与旧行为一致）；`sort` 只接受白名单键。
+    """
+    clauses, params, having, hparams = _people_clauses(
+        role_type, favorite, pinned, status, has_photo, min_works, cur_year)
     sql = ("SELECT " + _PEOPLE_SELECT + " WHERE " + " AND ".join(clauses) + " GROUP BY p.id")
     if having:
         sql += " HAVING " + " AND ".join(having)
-    sql += f" ORDER BY p.pinned DESC, {expr} {direction}, p.name COLLATE NOCASE"
+    sql += _people_order(sort, asc)
     if limit and int(limit) > 0:
         sql += " LIMIT ? OFFSET ?"
         params = params + hparams + [int(limit), int(offset)]
@@ -966,21 +991,8 @@ def query_people(role_type: str = "Actor", limit: int = 0, offset: int = 0,
 def count_people(role_type: str = "Actor", favorite=None, pinned=None, status=None,
                  has_photo=None, min_works=None, cur_year=None) -> int:
     """`query_people` 同口径的总人数（用于「共 N 位」）。"""
-    clauses = ["p.role_type=?"]
-    params = [role_type]
-    if favorite is True:
-        clauses.append("IFNULL(p.favorite,0)=1")
-    elif favorite is False:
-        clauses.append("IFNULL(p.favorite,0)=0")
-    if pinned is True:
-        clauses.append("IFNULL(p.pinned,0)=1")
-    elif pinned is False:
-        clauses.append("IFNULL(p.pinned,0)=0")
-    if has_photo is True:
-        clauses.append("p.photo_path IS NOT NULL AND p.photo_path<>''")
-    elif has_photo is False:
-        clauses.append("(p.photo_path IS NULL OR p.photo_path='')")
-    having, hparams = _people_having(status, min_works, cur_year)
+    clauses, params, having, hparams = _people_clauses(
+        role_type, favorite, pinned, status, has_photo, min_works, cur_year)
     sql = ("SELECT COUNT(*) c FROM (SELECT p.id AS pid, MAX(m.year) AS last_year, "
            "COUNT(mp.media_id) AS works FROM people p "
            "LEFT JOIN media_people mp ON mp.person_id = p.id "
@@ -996,6 +1008,47 @@ def count_people(role_type: str = "Actor", favorite=None, pinned=None, status=No
             return r["c"] if r else 0
         finally:
             conn.close()
+
+
+def people_letter_index(role_type: str = "Actor", asc: bool = True, favorite=None,
+                        pinned=None, status=None, has_photo=None, min_works=None,
+                        cur_year=None) -> dict:
+    """A-Z 导航条用的「字母 -> 该字母第一个人在列表中的下标（0 基）」映射。
+
+    必须与 `query_people(sort="letter", asc=asc)` 的 ORDER BY **逐项一致**
+    （`_people_order` 共用 + 这里内联同一个首字母表达式），否则点字母会跳错人。
+    `p.pinned DESC` 那段意味着置顶的人排在最前 —— 若某个字母的第一人恰好是置顶者，
+    映射里该字母的下标就是 0，跳转仍然正确（扫的是同一条顺序）。
+
+    非 A-Z 开头的一律归到 "#"（真机 actors 里姓名以 ASCII 开头的只有 101 位，
+    绝大多数要靠 romaji 兜），其余字母不出现在返回的 dict 里 → 界面画成暗色不可点。
+    """
+    clauses, params, having, hparams = _people_clauses(
+        role_type, favorite, pinned, status, has_photo, min_works, cur_year)
+    letter = _ACTOR_LETTER_EXPR
+    sql = ("SELECT p.id AS id, " + letter + " AS lt FROM people p "
+           "LEFT JOIN media_people mp ON mp.person_id = p.id "
+           "LEFT JOIN media m ON m.id = mp.media_id"
+           " WHERE " + " AND ".join(clauses) + " GROUP BY p.id")
+    if having:
+        sql += " HAVING " + " AND ".join(having)
+    # 注意：这里**不能**用 _people_order(sort="letter")，因为它第三 tie-breaker 是
+    # p.name —— 两边一致即可（查询侧也是同样的三元组），所以直接内联同一串。
+    sql += f" ORDER BY p.pinned DESC, {letter} {'ASC' if asc else 'DESC'}, p.name COLLATE NOCASE"
+    with _LOCK:
+        conn = get_conn()
+        try:
+            rows = conn.execute(sql, params + hparams).fetchall()
+        finally:
+            conn.close()
+    out = {}
+    for i, r in enumerate(rows):
+        ch = (r["lt"] or "").strip().upper()
+        key = ch if ("A" <= ch <= "Z") else "#"
+        # 只记第一次出现的位置：置顶块里可能已经出现过该字母，后面正文里那次不必覆盖
+        if key not in out:
+            out[key] = i
+    return out
 
 
 def all_people_ordered(role_type: str = "Actor"):
@@ -1280,6 +1333,37 @@ def set_person_photo(person_id: int, photo_path: str) -> None:
             conn.close()
 
 
+#: 「演员检测 → 手动编辑」允许直接改的列（白名单，防止 UI 误传字段写坏库）
+_PERSON_EDITABLE = ("name", "alias", "romaji", "birthday", "status", "bio",
+                    "thumb", "photo_path", "meta", "source", "source_url")
+
+
+def set_person_fields(person_id: int, **fields) -> int:
+    """**手动编辑专用**：原样写入，含空串 —— 也就是「能把字段清空」。
+
+    为什么不复用 `update_person`：那个函数是给刮削用的，刻意跳过空值（不能拿空值覆盖
+    已刮好的数据）。但手动编辑里用户把别名删掉就该真的删掉，所以另开这一条通道。
+    `name` 有 UNIQUE 约束，撞名会抛 `sqlite3.IntegrityError`，由调用方提示。
+    """
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k not in _PERSON_EDITABLE:
+            continue
+        sets.append(f"{k}=?")
+        vals.append("" if v is None else str(v))
+    if not sets:
+        return 0
+    with _LOCK:
+        conn = get_conn()
+        try:
+            conn.execute(f"UPDATE people SET {', '.join(sets)} WHERE id=?",
+                         vals + [int(person_id)])
+            conn.commit()
+            return len(sets)
+        finally:
+            conn.close()
+
+
 # ---------- 演员刮削 ----------
 _PERSON_FIELDS = ("name", "thumb", "bio", "photo_path", "alias", "birthday",
                   "romaji", "source", "source_url", "scraped_at", "meta", "status")
@@ -1485,6 +1569,131 @@ def people_by_role(role_type: str = "Actor", limit: int = 500):
             conn.close()
 
 
+# ---------- 演员检测（v1.31.0，反馈 3） ----------
+def people_for_match(role_type: str = "Actor"):
+    """演员检测的输入：一次取回比对所需的**轻量画像**。
+
+    刻意不取 `bio`（每条几百字，5909 条纯属浪费）—— 比对只用得上
+    `name / alias / romaji / birthday / meta / 头像 / 作品数`。
+    """
+    with _LOCK:
+        conn = get_conn()
+        try:
+            return [dict(r) for r in conn.execute(
+                "SELECT p.id, p.name, p.alias, p.romaji, p.birthday, p.thumb,"
+                " p.photo_path, p.status, p.meta, p.source,"
+                " (SELECT COUNT(*) FROM media_people mp WHERE mp.person_id=p.id) AS works"
+                " FROM people p WHERE p.role_type=? ORDER BY p.id", (role_type,)
+            ).fetchall()]
+        finally:
+            conn.close()
+
+
+def merge_people(keep_id: int, drop_id: int) -> dict:
+    """把 `drop` 并进 `keep`（「演员检测」页确认关联时调用的唯一写入口）。
+
+    做四件事：
+      1. `media_people` 链接搬运 —— 主键是 (media_id, person_id)，所以用
+         `INSERT OR IGNORE ... SELECT` 天然去重（两人都演过的片子不会插重）；
+      2. 补齐 `keep` 的空字段（生日 / 罗马音 / 头像 / 简介 / 来源…），
+         已有值**一律不覆盖** —— 合并是「补全」而不是「覆盖」；
+      3. `alias` 追加 `drop` 的主名与旧别名（去重、滤垃圾），
+         `meta` 按键补齐缺失项；
+      4. 删掉 `drop` 行（`people.name` 是 UNIQUE，所以名字只能落进 alias）。
+
+    返回统计字典；失败时 `ok=False` 且不改动任何东西。
+    """
+    keep_id, drop_id = int(keep_id), int(drop_id)
+    if keep_id == drop_id:
+        return {"ok": False, "err": "保留者与被合并者是同一个人"}
+    with _LOCK:
+        conn = get_conn()
+        try:
+            k = conn.execute("SELECT * FROM people WHERE id=?", (keep_id,)).fetchone()
+            d = conn.execute("SELECT * FROM people WHERE id=?", (drop_id,)).fetchone()
+            if k is None or d is None:
+                return {"ok": False, "err": "记录不存在（可能已被合并过）"}
+            kd, dd = dict(k), dict(d)
+
+            before = conn.total_changes
+            conn.execute(
+                "INSERT OR IGNORE INTO media_people(media_id, person_id, char_role, person_order)"
+                " SELECT media_id, ?, char_role, person_order FROM media_people WHERE person_id=?",
+                (keep_id, drop_id))
+            moved = conn.total_changes - before
+            conn.execute("DELETE FROM media_people WHERE person_id=?", (drop_id,))
+
+            sets, vals = [], []
+            for f in ("birthday", "romaji", "thumb", "photo_path", "bio",
+                      "source", "source_url", "status"):
+                if not str(kd.get(f) or "").strip() and str(dd.get(f) or "").strip():
+                    sets.append(f"{f}=?")
+                    vals.append(dd[f])
+
+            alias = _merge_alias_text(kd.get("alias"), kd.get("name"),
+                                      dd.get("name"), dd.get("alias"))
+            if alias != (kd.get("alias") or ""):
+                sets.append("alias=?")
+                vals.append(alias)
+
+            meta = _merge_meta_text(kd.get("meta"), dd.get("meta"))
+            if meta != (kd.get("meta") or ""):
+                sets.append("meta=?")
+                vals.append(meta)
+
+            if sets:
+                conn.execute(f"UPDATE people SET {', '.join(sets)} WHERE id=?",
+                             vals + [keep_id])
+            conn.execute("DELETE FROM people WHERE id=?", (drop_id,))
+            conn.commit()
+            return {"ok": True, "keep_id": keep_id, "drop_id": drop_id, "moved": moved,
+                    "fields": len(sets), "alias": alias}
+        finally:
+            conn.close()
+
+
+#: 别名拆分类（与 actorcheck._ALIAS_SEP 同口径，但这边不能反向 import 检测层）
+_ALIAS_SPLIT = re.compile(r"[、，,／/|｜;；・･]+")
+
+
+def _merge_alias_text(keep_alias, keep_name, drop_name, drop_alias) -> str:
+    out, seen = [], set()
+    for src in (keep_alias, drop_name, drop_alias):
+        for t in _ALIAS_SPLIT.split(str(src or "")):
+            t = t.strip()
+            if not t or len(t) < 2 or any(x in t for x in ("編集", "データ")):
+                continue
+            key = t.casefold()
+            if key == str(keep_name or "").strip().casefold() or key in seen:
+                continue
+            seen.add(key)
+            out.append(t)
+    return "、".join(out[:40])
+
+
+def _merge_meta_text(keep_meta, drop_meta) -> str:
+    """meta 按键补齐（keep 已有的键不动），非法 JSON 时退化为「keep 原样」。"""
+    try:
+        km = json.loads(keep_meta) if keep_meta else {}
+        dm = json.loads(drop_meta) if drop_meta else {}
+    except Exception:
+        return keep_meta or ""
+    if not isinstance(km, dict) or not isinstance(dm, dict):
+        return keep_meta or ""
+    changed = False
+    for key, val in dm.items():
+        if val in (None, "") or km.get(key):
+            continue
+        km[key] = val
+        changed = True
+    if not changed:
+        return keep_meta or ""
+    try:
+        return json.dumps(km, ensure_ascii=False)
+    except Exception:
+        return keep_meta or ""
+
+
 # v1.15.0：决定「一条记录是独立影片、还是某部影片的分片/分集」的结构字段。
 # 这四个字段与 mode 无关，永远比对写入（见 upsert_media_by_path）。
 _STRUCT_COLS = ("kind", "parent_id", "season", "episode")
@@ -1662,6 +1871,30 @@ def media_for_prune(library: Optional[str] = None, root: Optional[str] = None):
         params.extend([root.rstrip("\\/") + "%", root.rstrip("\\/") + "%"])
     sql = ("SELECT id, parent_id, kind, file_path, nfo_path, title, poster FROM media"
            + ((" WHERE " + " AND ".join(where)) if where else ""))
+    with _LOCK:
+        conn = get_conn()
+        try:
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+        finally:
+            conn.close()
+
+
+def media_for_imagescan(library: Optional[str] = None):
+    """图像检测（v1.30.0）用：只取判定需要的最小列。
+
+    刻意**不带 plot**：5 万片时那列能占几百 MB，而检测只需要路径。
+
+    `poster/thumb/fanart` 三列来自上一次刮削，是「图上哪儿去了」的第一线索；
+    真正判定时 `imagedetect.resolve()` 还会拿它们当候选之一。
+    """
+    if library:
+        sql = ("SELECT id, title, library, file_path, nfo_path, poster, thumb, fanart "
+               "FROM media WHERE library=? ORDER BY sort_title")
+        params = (library,)
+    else:
+        sql = ("SELECT id, title, library, file_path, nfo_path, poster, thumb, fanart "
+               "FROM media")
+        params = ()
     with _LOCK:
         conn = get_conn()
         try:
@@ -1859,4 +2092,26 @@ def favorite_people(role_type: str = None):
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
         finally:
             conn.close()
+
+
+def person_work_counts() -> dict:
+    """{人名: 作品数} —— 全库每位演员/导演关联的**去重作品数**。
+
+    v1.33.2（反馈）：智能推荐里「收藏的艺人」需要按**稀有度**给权重，否则
+    作品数最多的那几位（如 350 部的头部艺人）会垄断推荐结果。这里一次性
+    聚合出全库计数（约 7000 人，毫秒级），供 recommend.py 做稀有度折减。
+    同名不同人（重名）会合并计数 —— 对「稀有度」这个用途足够了。
+    """
+    out = {}
+    with _LOCK:
+        conn = get_conn()
+        try:
+            for name, n in conn.execute(
+                    "SELECT p.name, COUNT(DISTINCT mp.media_id) "
+                    "FROM people p JOIN media_people mp ON mp.person_id=p.id "
+                    "GROUP BY p.name"):
+                out[str(name or "")] = int(n)
+        finally:
+            conn.close()
+    return out
 

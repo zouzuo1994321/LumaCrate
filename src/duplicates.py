@@ -34,6 +34,11 @@ import database as db
 
 COPYRIGHT_NOTICE = "Copyright  2026 肆月Aperture　本软件为开源软件，没有授权禁止用于商业用途。"
 
+# v1.33.0（反馈 1）：结果文件信封格式号（四个检测页共用同一套约定）。
+# 导入时先验 `_kind` 再解析 —— 报「这不是重复检测的结果文件」比报
+# `KeyError: 'groups'` 好懂得多。字段有破坏性改动就 +1。
+EXPORT_FORMAT = 1
+
 
 # ---------------------------------------------------------------------------
 # 归一化
@@ -208,6 +213,14 @@ class DupGroup:
     total_bytes: int = 0
     redundant_bytes: int = 0
     by_folder: Dict[str, List[DupMember]] = field(default_factory=dict)
+    # v1.32.0（反馈 1）：AI 复核结论。只在用户选了「AI 算法」且本机 Ollama 可用时才有值，
+    # 结构是 ``{"advice": …, "confidence": …, "reason": …, "raw": …}``。**纯建议** ——
+    # 本软件从不在任何情况下代用户删文件，AI 判定只是把「哪份更像正本」的意见摆出来。
+    ai: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ai_advice(self) -> str:
+        return str((self.ai or {}).get("advice") or "")
 
     @property
     def copies(self) -> int:
@@ -237,6 +250,7 @@ class DupGroup:
             "total_bytes": self.total_bytes, "total_text": self.total_text,
             "redundant_bytes": self.redundant_bytes, "redundant_text": self.redundant_text,
             "folders": self.folders,
+            "ai": dict(self.ai or {}),
             "members": [m.as_dict() for m in self.members],
         }
 
@@ -253,6 +267,11 @@ class DupReport:
     # 否则「重复的片子我已经删掉了，检测结果里还有」会一直复现。
     missing: int = 0
     multipart_excluded: bool = True
+    # v1.32.0（反馈 1）：本次检测用的算法与 AI 复核统计。
+    # `algo` = "normal" | "ai"；`ai` 是 aireview.review_batch 的返回，
+    # 含 `note`（AI 不可用时的原因原文）/ `done` / `failed` / `skipped`。
+    algo: str = "normal"
+    ai: Dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -268,11 +287,19 @@ class DupReport:
             "multipart_groups": len(self.multipart),
             "multipart_movies": sum(len(g.members) for g in self.multipart),
             "elapsed": round(self.elapsed, 2),
+            "algo": self.algo,
+            "ai_done": int((self.ai or {}).get("done") or 0),
+            "ai_failed": int((self.ai or {}).get("failed") or 0),
+            "ai_skipped": int((self.ai or {}).get("skipped") or 0),
+            "ai_model": str((self.ai or {}).get("model") or ""),
+            "ai_note": str((self.ai or {}).get("note") or ""),
         }
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "summary": self.summary(),
+            "algo": self.algo,
+            "ai": dict(self.ai or {}),
             "groups": [g.as_dict() for g in self.groups],
             "multipart": [g.as_dict() for g in self.multipart],
             "copyright": COPYRIGHT_NOTICE,
@@ -424,6 +451,63 @@ def find_duplicates(*, library: Optional[str] = None, use_num: bool = True,
     return report
 
 
+def review_with_ai(report, model=None, fast=True, progress=None, stop=None,
+                   limit=None):
+    """对一次重复检测的结果做 **AI 复核**（v1.32.0，反馈 1）。
+
+    与「演员检测」同一套模式：普通算法负责把候选缩到可复核的规模，本地离线 AI
+    逐组复核「这真的是同一部片子的多份副本吗、该保留哪一份」，结论**只写进
+    `group.ai`，只用于界面加一列建议** —— 本模块不会因此删除或移动任何文件。
+
+    :param fast: 极速模式（默认开）。只复核普通算法自己拿不准的组 ——
+        「极高 / 高」置信度（番号一致、体积还完全一致）根本没有可判的余地，
+        送去让模型再确认一遍纯属浪费；AI 一慢就从「偶尔卡几秒」变成「整页几分钟」。
+    :param limit: 最多复核多少组（`None` 用 `aireview.MAX_ITEMS`）。
+    """
+    import aireview as ar
+
+    if report is None:
+        return {"ai": False, "note": "没有可复核的结果。", "done": 0, "failed": 0,
+                "skipped": 0, "jobs": 0, "fast": bool(fast), "kind": "重复检测"}
+    report.algo = "ai"
+    groups = list(report.groups or [])
+    if limit is None:
+        limit = ar.MAX_ITEMS
+
+    # 「拿不准」的判据：置信度不到「高」，或者各份体积/时长不一致（存在画质差异）
+    def _unsure(g):
+        if str(g.confidence) not in ("高", "极高"):
+            return True
+        sizes = {m.size for m in g.members if m.size > 0}
+        durs = {m.duration_sec for m in g.members if m.duration_sec > 0}
+        return len(sizes) > 1 or len(durs) > 1
+
+    def _prompt(g):
+        folders = list(g.by_folder.keys())
+        # 目录名脱敏：只给「目录 1 / 目录 2」，绝不把用户的盘符与目录名送进模型
+        alias = {f: "目录 %d" % (i + 1) for i, f in enumerate(folders)}
+        info = {
+            "label": g.label,
+            "label_masked": "序号 1 起（原标识 %d 个字符）" % len(str(g.label or "")),
+            "members": [{
+                "size": m.size, "duration": m.duration_text,
+                "resolution": m.resolution, "folder_alias": alias.get(m.folder, ""),
+            } for m in g.members],
+        }
+        return ar.dedupe_prompt(info)
+
+    def _apply(g, text):
+        advice, conf, why = ar.verdict_to_dup(text)
+        g.ai = {"advice": advice, "confidence": conf, "reason": why,
+                "raw": str(text or "")[:400]}
+
+    res = ar.review_batch("重复检测", groups, _prompt, _apply, model=model,
+                          fast=bool(fast), fast_filter=_unsure,
+                          progress=progress, stop=stop, limit=limit)
+    report.ai = res
+    return res
+
+
 def _judge(kind: str, members: Sequence[DupMember],
            by_folder: Dict[str, List[DupMember]]) -> Tuple[str, str]:
     """给出置信度与说明文字。"""
@@ -516,13 +600,113 @@ def export_json(report: DupReport, path: str) -> str:
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
+    # v1.33.0（反馈 1）：加一层信封，标明来源与格式版本 —— 导入时先验这个再解析，
+    # 免得用户把别的 JSON 选进来后报一个看不懂的 KeyError。
+    # 同时把顶层标量**平铺**到 report 里（`as_dict()` 只把它们塞在 `summary` 下），
+    # 否则导入回来 `scanned` / `missing` / `generated_at` 全是默认值，汇总行会写成
+    # 「核对 0 部作品」，用户以为文件坏了。
+    _rep = report.as_dict()
+    _s = _rep.get("summary") or {}
+    for _k in ("scanned", "elapsed", "generated_at", "missing", "multipart_excluded"):
+        _rep.setdefault(_k, _s.get(_k))
+    payload = {
+        "_app": "LumaCrate",
+        "_kind": "duplicates",
+        "_format": EXPORT_FORMAT,
+        "report": _rep,
+    }
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(report.as_dict(), fh, ensure_ascii=False, indent=2)
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
     return path
+
+
+# v1.33.0（反馈 1）：四个检测页共用的导出信封格式号。导入时报「格式不匹配」比报
+# 「KeyError: 'groups'」好懂得多。以后字段有破坏性改动就 +1。
+# （定义已提到文件顶部，与 COPYRIGHT_NOTICE 放在一起。）
+
+
+def _member_from_dict(d: Dict[str, Any]) -> DupMember:
+    return DupMember(
+        movie_id=int(d.get("movie_id") or 0),
+        path=str(d.get("path") or ""),
+        folder=str(d.get("folder") or ""),
+        nfo_name=str(d.get("nfo_name") or ""),
+        num=str(d.get("num") or ""),
+        title=str(d.get("title") or ""),
+        year=int(d.get("year") or 0),
+        resolution=str(d.get("resolution") or ""),
+        video_size=int(d.get("video_size") or 0),
+        duration_sec=int(d.get("duration_sec") or 0),
+        dateadded=str(d.get("dateadded") or ""),
+        source=str(d.get("source") or ""),
+        original_filename=str(d.get("original_filename") or ""),
+    )
+
+
+def _group_from_dict(d: Dict[str, Any], excluded: bool) -> DupGroup:
+    members = [_member_from_dict(x) for x in (d.get("members") or [])]
+    # `by_folder` 是普通字段（真扫描里由 scan() 填），导出时没写进去 —— 这里按
+    # 每条的 `folder` 重建，`copies` / `folders` / `redundant_copies` 都是它的
+    # property，重建好就全对了。
+    by_folder: Dict[str, List[DupMember]] = {}
+    for m in members:
+        by_folder.setdefault(m.folder or "(未知目录)", []).append(m)
+    return DupGroup(
+        key=str(d.get("key") or ""),
+        kind=str(d.get("kind") or "num"),
+        label=str(d.get("label") or ""),
+        confidence=str(d.get("confidence") or "高"),
+        members=members,
+        note=str(d.get("note") or ""),
+        total_bytes=int(d.get("total_bytes") or 0),
+        redundant_bytes=int(d.get("redundant_bytes") or 0),
+        by_folder=by_folder,
+        ai=dict(d.get("ai") or {}),
+    )
+
+
+def import_json(path: str) -> DupReport:
+    """从 `export_json` 产出的文件恢复 `DupReport`（v1.33.0 反馈 1）。
+
+    为什么要它：真机全库跑一次重复检测要 70 多秒，用户当天没处理完、明天想接着看时
+    只能从头再扫一遍。导入后结果树、汇总、导出、**AI 复核**都能继续用 —— `ai` 字段
+    也一并还原，所以上次跑过的 AI 结论不会丢。
+
+    兼容两代文件：新格式是带 `_kind` 信封的 `{"report": …}`，v1.32.0 直接 dump 的
+    裸 `report.as_dict()` 也认（用户手里可能有旧文件）。
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if not isinstance(raw, dict):
+        raise ValueError("文件内容不是 JSON 对象")
+    if "_kind" in raw:                                  # 新格式：带信封
+        if raw.get("_kind") != "duplicates":
+            raise ValueError("这不是「重复检测」的结果文件（_kind=%r）" % raw.get("_kind"))
+        if int(raw.get("_format") or 0) > EXPORT_FORMAT:
+            raise ValueError("结果文件来自更新的版本（格式 %s），请升级软件后再导入"
+                             % raw.get("_format"))
+        data = raw.get("report") or {}
+    else:                                               # 旧格式：裸报告
+        data = raw
+    if "groups" not in data and "multipart" not in data:
+        raise ValueError("文件里没有检测结果（缺 groups / multipart）")
+    rep = DupReport(
+        groups=[_group_from_dict(g, False) for g in (data.get("groups") or [])],
+        multipart=[_group_from_dict(g, True) for g in (data.get("multipart") or [])],
+        scanned=int(data.get("scanned") or 0),
+        elapsed=float(data.get("elapsed") or 0.0),
+        generated_at=str(data.get("generated_at") or ""),
+        missing=int(data.get("missing") or 0),
+        multipart_excluded=bool(data.get("multipart_excluded", True)),
+        algo=str(data.get("algo") or "normal"),
+        ai=dict(data.get("ai") or {}),
+    )
+    return rep
 
 
 __all__ = [
     "DupMember", "DupGroup", "DupReport", "find_duplicates",
-    "export_csv", "export_json", "human_size", "human_duration",
+    "export_csv", "export_json", "import_json", "EXPORT_FORMAT",
+    "human_size", "human_duration",
     "norm_num", "extract_num", "title_key", "COPYRIGHT_NOTICE",
 ]

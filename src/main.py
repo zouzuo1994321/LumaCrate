@@ -15,9 +15,9 @@ from main_window import MainWindow, load_style
 
 
 def _app_resource(name):
-    """定位打包 / 开发期的资源文件（logo.png 等）。
+    """定位打包 / 开发期的资源文件（logo-3.png 等）。
 
-    打包后资源在 sys._MEIPASS；开发期 logo.png 放在项目根目录（src 的上级）。
+    打包后资源在 sys._MEIPASS；开发期 logo-3.png 放在项目根目录（src 的上级）。
     """
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = []
@@ -26,7 +26,7 @@ def _app_resource(name):
         candidates.append(os.path.dirname(sys.executable))
     else:
         candidates.append(here)                       # src/
-        candidates.append(os.path.dirname(here))      # 项目根（logo.png 在此）
+        candidates.append(os.path.dirname(here))      # 项目根（logo-3.png 在此）
     for c in candidates:
         if c:
             p = os.path.join(c, name)
@@ -72,6 +72,20 @@ def _kill_other_instances():
                 pass
 
 
+def _i18n_tip(text):
+    """启动提示语按当前界面语言显示；i18n 还没初始化时原样返回中文。
+
+    单独包一层是因为 `_i18n_tip()` 在 `set_lang()` **之前**就可能被调用（第一句提示
+    在语言初始化前发出）—— 那时 `i18n.tr()` 返回的还是中文原文，属于预期行为，
+    绝不能为了「第一句也翻」把语言初始化提到 `QApplication` 之前去。
+    """
+    try:
+        import i18n
+        return i18n.tr(text)
+    except Exception:
+        return text
+
+
 def main():
     applog.setup()                   # v1.13.0：先把「全部运行记录」的日志系统挂上
     applog.install_excepthook()      # 未捕获异常也写进日志（打包后没有控制台）
@@ -83,30 +97,41 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(ver.APP_NAME)
     app.setApplicationVersion(ver.VERSION)
-    logo = _app_resource("logo.png")
+    logo = _app_resource("logo-3.png")   # v1.35.0：新品牌图标（金色胶片 LumaCrate）
     if logo:
         app.setWindowIcon(QIcon(logo))        # v1.22.0（反馈 3）：logo 作为窗口/任务栏图标
 
     sp = splash_mod.make_splash(logo)
     if sp is not None:
         sp.fade_in(520)
-        sp.setProgress(8, "正在检查运行环境…")
+        sp.setProgress(8, _i18n_tip("正在检查运行环境…"))
+
+    # v1.32.0（反馈 3）：界面语言要在**建任何界面之前**生效 ——
+    # 主窗、启动画面、设置窗都会读 i18n.tr()，晚一步就会先渲染一遍中文再被覆盖。
+    try:
+        import config as _cfg
+        import i18n as _i18n
+        _lang = _cfg.get_settings().language()
+        _i18n.set_lang(_lang)
+        applog.log("界面语言：%s（%s）" % (_lang, _i18n.cn_name(_lang)))
+    except Exception as e:
+        applog.log("读取界面语言失败，按基准语言启动：%s" % e)
 
     db.init_db()
     if sp is not None:
-        sp.setProgress(34, "正在打开媒体索引…")
+        sp.setProgress(34, _i18n_tip("正在打开媒体索引…"))
     applog.log("数据库就绪")
 
     load_style(app)
     if sp is not None:
-        sp.setProgress(62, "正在载入界面样式…")
+        sp.setProgress(62, _i18n_tip("正在载入界面样式…"))
 
     win = MainWindow(logo_path=logo)
     if sp is not None:
-        sp.setProgress(86, "正在统计媒体库…")
+        sp.setProgress(86, _i18n_tip("正在统计媒体库…"))
     win.show()
     if sp is not None:
-        sp.setProgress(100, "准备就绪")
+        sp.setProgress(100, _i18n_tip("准备就绪"))
         sp.fade_out(win, 420)
         applog.log("启动画面结束，主窗口显示")
 

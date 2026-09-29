@@ -31,6 +31,7 @@ from PySide6.QtGui import (QPixmap, QPainter, QColor, QPen, QFont, QLinearGradie
 from PySide6.QtWidgets import QSplashScreen, QApplication
 
 import version as ver
+import i18n      # v1.32.0：Slogan 与启动提示语跟随界面语言（叶子模块）
 
 # —— 蓝色主题（主色调）——————————————————————————————————————
 _BG_TOP = QColor("#101b2e")        # 深蓝（上）
@@ -248,7 +249,7 @@ class SplashScreen(QSplashScreen):
         fs.setLetterSpacing(QFont.AbsoluteSpacing, 1.2)
         p.setFont(fs)
         p.drawText(QRectF(24, R["slogan"], W - 48, self._SLOGAN_H),
-                   Qt.AlignHCenter | Qt.AlignVCenter, ver.SLOGAN_CN)
+                   Qt.AlignHCenter | Qt.AlignVCenter, i18n.tr_slogan())
 
         # 6) 进度条（含百分比）
         self._draw_bar(p, W)
@@ -323,7 +324,7 @@ class SplashScreen(QSplashScreen):
 
 
 def _default_logo_path():
-    """开发期 / 打包期都能找到 logo.png（与 main.py::_app_resource 同一套候选）。"""
+    """开发期 / 打包期都能找到 logo-3.png（与 main.py::_app_resource 同一套候选）。"""
     here = os.path.dirname(os.path.abspath(__file__))
     cands = []
     if getattr(sys, "frozen", False):
@@ -334,7 +335,7 @@ def _default_logo_path():
         cands.append(os.path.dirname(here))
     for c in cands:
         if c:
-            path = os.path.join(c, "logo.png")
+            path = os.path.join(c, "logo-3.png")
             if os.path.exists(path):
                 return path
     return None

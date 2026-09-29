@@ -85,6 +85,30 @@ QPushButton#Ghost {
 QPushButton#Ghost:hover {
     border-color: rgba(__ACCENT__, 0.75); color: #f7e3b4; background: rgba(255, 255, 255, 0.10);
 }
+/* ---------- 智能推荐「已生效的引导向量」chip（v1.34.0 需求 2） ----------
+   chip 是个普通 QWidget 容器 —— 普通 QWidget **不绘制** QSS 背景（paintEvent 为空），
+   所以代码里对它 setAttribute(Qt.WA_StyledBackground, True) 才吃这条规则。 */
+QWidget#GuideChip {
+    background: rgba(__ACCENT__, 0.16);
+    border: 1px solid rgba(__ACCENT_LIGHT__, 0.55);
+    border-radius: 9px;
+}
+QWidget#GuideChip:hover { border-color: __ACCENT_LIGHT__; }
+/* ---------- 「关于」里的联系图标按钮（v1.33.0 反馈 4） ----------
+   固定 34x30，**必须显式 padding:0** —— 全局 QPushButton 的 padding:7px 14px 会把
+   内容区压成负数，图标整个被裁掉（v1.11.1「箭头按钮看不见」同款坑）。
+   也**绝不能加 min-width**（会盖掉 setFixedSize）。 */
+QPushButton#ContactIcon {
+    padding: 0; margin: 0;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 7px;
+}
+QPushButton#ContactIcon:hover {
+    background: rgba(__ACCENT__, 0.22);
+    border-color: rgba(__ACCENT_LIGHT__, 0.85);
+}
+QPushButton#ContactIcon:pressed { background: rgba(__ACCENT_DARK__, 0.85); }
 
 /* ---------- 详情页操作按钮（v1.20.0） ----------
    「收藏 / 评分 / 刷新 / 更多」叠在详情页的 fanart 横幅上，底色是明亮杂乱的剧照。
@@ -189,13 +213,68 @@ QLineEdit:focus { border-color: rgba(__ACCENT__, 0.9); background: rgba(255, 255
    下拉框/列表格格不入（v1.13.0 反馈「名称框和其他框样式一致」）。 */
 QDialog QLineEdit { border-radius: 8px; padding: 5px 10px; }
 
-QComboBox, QTimeEdit, QSpinBox {
+QComboBox, QTimeEdit, QSpinBox, QDoubleSpinBox {
     background: rgba(255, 255, 255, 0.06); color: #ece5d8;
     border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 8px; padding: 5px 10px;
 }
-QComboBox:hover, QTimeEdit:hover, QSpinBox:hover { border-color: rgba(255, 255, 255, 0.18); }
-QComboBox:focus, QTimeEdit:focus, QSpinBox:focus { border-color: rgba(__ACCENT__, 0.9); }
+QComboBox:hover, QTimeEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: rgba(255, 255, 255, 0.18); }
+QComboBox:focus, QTimeEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: rgba(__ACCENT__, 0.9); }
 QComboBox::drop-down { border: none; width: 22px; }
+
+/* ---------- 数值框的上下微调箭头（v1.34.1） ----------
+   只给容器写了 padding/border 时，Qt 在 `::up-button` / `::down-button` 上
+   仍按**系统默认**绘制 —— 本机暗色主题下箭头是深灰、几乎看不出图形，
+   视觉上就只剩「一块空的灰底」，用户会觉得这个数值框是坏的。
+   这里显式给箭头区配色，并用 `image: none` 去掉系统小三角占位后画自绘箭头。
+   注意：**绝不能给这两个子控件写 width/height 之外的几何约束**，
+   也不要写 min-width（会盖掉 QSpinBox 自己的按钮宽度计算）。 */
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QTimeEdit::up-button {
+    subcontrol-origin: border; subcontrol-position: top right;
+    width: 18px; margin: 1px 1px 0 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.10);
+    border-top-right-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button,
+QTimeEdit::down-button {
+    subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 18px; margin: 0 1px 1px 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.10);
+    border-bottom-right-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QTimeEdit::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover,
+QTimeEdit::down-button:hover {
+    background: rgba(__ACCENT__, 0.35);
+}
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QTimeEdit::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed,
+QTimeEdit::down-button:pressed {
+    background: rgba(__ACCENT_DARK__, 0.75);
+}
+/* 箭头图形（v1.34.1 实测结论）：
+   ⚠️ **不要**试图用 `border-*: transparent` 拼三角形 —— Qt 的 QSS 渲染路径
+      **不支持**「宽高 0 + 透明边框」那套浏览器 CSS 技巧，实测只会画出实心小方块。
+   ⚠️ 也**不要**写 `image: none` —— 那会把系统自带的箭头图形一起去掉，只剩空白。
+   正确做法：保留 Qt 原生箭头（它本身就是对的三角形），只调整**尺寸**与**着色**。
+   原生箭头是单色位图，用 `color` 就能重新着色（跟随暗色主题的米金色）。 */
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow, QTimeEdit::up-arrow,
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow, QTimeEdit::down-arrow {
+    width: 9px; height: 9px;
+    color: #c9bda7;
+}
+QSpinBox::up-arrow:hover, QDoubleSpinBox::up-arrow:hover,
+QSpinBox::down-arrow:hover, QDoubleSpinBox::down-arrow:hover {
+    color: #ffffff;
+}
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {
+    color: #6a6256;
+}
 QComboBox QAbstractItemView {
     background: rgba(28, 24, 19, __DLG__); color: #ece5d8; outline: none;
     border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px;
@@ -209,6 +288,11 @@ QFrame#Card {
 }
 QFrame#Card:hover {
     border-color: rgba(__ACCENT__, 0.7); background: rgba(255, 255, 255, 0.10);
+}
+/* 按钮行内的分组竖线（v1.33.1）：1px 高 18px，纯装饰不响应鼠标 */
+QFrame#VRule {
+    background: rgba(255, 255, 255, 0.14);
+    border: none; border-radius: 0px;
 }
 /* 字号/字重在 main_window.PosterCard 里用 setFont 定死（便于用 fontMetrics 精确排版），
    此处只保留颜色，避免 QSS 覆盖 setFont 导致标题行数算错。 */

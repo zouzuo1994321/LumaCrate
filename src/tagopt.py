@@ -737,3 +737,88 @@ __all__ = ["TagOptimizer", "JA2ZH", "JA2ZH_CONFLICTS", "to_zh", "has_kana", "cle
            "is_tech",
            "split_genres", "tags_from_title", "library_tag_stats",
            "suggested_from_cooccur", "ai_suggest", "nfo_for_video", "PREFIXES"]
+
+
+# =====================================================================
+# v1.33.0（反馈 1）：扫描结果导出 / 导入
+# ---------------------------------------------------------------------
+# 「标签优化」的扫描结果 = `TagOptimizer.plan_one` 出来的 plan 列表。全库 nfo 逐个
+# 读一遍（还要跑共现统计与可选 AI），扫一次不便宜。导出成文件后，第二天导入即可
+# **直接点「执行写入」**，不必重新扫。
+# 信封格式与 duplicates.py / imagedetect.py / actorcheck.py 完全一致。
+# =====================================================================
+EXPORT_FORMAT = 1
+
+
+def _plain(v):
+    """把 plan 里任意值转成可 JSON 化的形态。
+
+    原实现只对「一层 list/tuple」做元素级 str 兜底，于是 `translated` 这种
+    **嵌套的二元组** `("中出し", "中出")` 直接掉进 `str(v)` 分支，落盘变成字符串
+    `"('中出し', '中出')"`；导入回来界面再按 `a, b = x` 解包就会解成 13 个字符。
+    这里改成递归：list/tuple → list，标量原样，其余 str()。
+    """
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _plain(x) for k, x in v.items()}
+    return str(v)
+
+
+def export_json(plans, path: str) -> str:
+    """把扫描出来的 plan 列表导出为 JSON。只收可序列化的字段。"""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    clean = []
+    for p in list(plans or []):
+        if not isinstance(p, dict):
+            continue
+        clean.append({str(k): _plain(v) for k, v in p.items()})
+    payload = {"_app": "LumaCrate", "_kind": "tagopt",
+               "_format": EXPORT_FORMAT, "plans": clean}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+    return path
+
+
+def import_json(path: str) -> list:
+    """从 `export_json` 产出的文件恢复 plan 列表（v1.33.0 反馈 1）。
+
+    兼容两代：带信封的新格式，以及裸列表 / `{"plans": [...]}`。
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if isinstance(raw, list):
+        plans = raw
+    elif isinstance(raw, dict):
+        if "_kind" in raw:
+            if raw.get("_kind") != "tagopt":
+                raise ValueError("这不是「标签优化」的结果文件（_kind=%r）"
+                                 % raw.get("_kind"))
+            if int(raw.get("_format") or 0) > EXPORT_FORMAT:
+                raise ValueError("结果文件来自更新的版本（格式 %s），请升级软件后再导入"
+                                 % raw.get("_format"))
+            plans = raw.get("plans") or []
+        else:
+            plans = raw.get("plans") or []
+    else:
+        raise ValueError("文件内容不是 JSON 列表或对象")
+    if not isinstance(plans, list) or not plans:
+        raise ValueError("文件里没有扫描结果（plans 为空）")
+    out = []
+    for p in plans:
+        if not isinstance(p, dict):
+            continue
+        # `translated` 在 JSON 里是 [[a,b], …]，但内存里是 [(a,b), …] —— 界面
+        # 用 ``"%s → %s" % (a, b)`` 解包，两者都能用；统一成 tuple 更保险。
+        if isinstance(p.get("translated"), list):
+            p["translated"] = [tuple(x) if isinstance(x, (list, tuple)) and len(x) == 2
+                               else x for x in p["translated"]]
+        p.setdefault("before", [])
+        p.setdefault("after", [])
+        p.setdefault("added", [])
+        out.append(p)
+    return out

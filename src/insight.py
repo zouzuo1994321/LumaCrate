@@ -27,6 +27,15 @@ from collections import Counter
 
 import database as db
 
+# v1.34.2（用户反馈 2）：「取前 N 个」上限提到 999，画像高频榜长度必须与之对齐，
+# 否则面板填 999、实际只写 30 条（原来 actors/directors/... most_common(30) 截断）。
+# 这里统一从 config.AUTOFILL_TOP_RANGE[1] 取上限，避免两处各写一个数、改了不联动。
+try:
+    from config import Settings as _Settings
+    PORTRAIT_TOP = int(_Settings.AUTOFILL_TOP_RANGE[1])
+except Exception:
+    PORTRAIT_TOP = 999
+
 # genres 里的伪标签前缀（全角/半角冒号都要认）
 _PREFIXES = ("片商", "发行", "系列", "导演", "導演", "演员", "演員", "標籤", "标签")
 _PREFIX_RE = re.compile(r"^(" + "|".join(_PREFIXES) + r")\s*[:：]\s*(.+)$")
@@ -157,7 +166,9 @@ class Portrait:
         data = p.build(progress=lambda i, n, msg: ...)
     """
 
-    MAX_TAGS = 600          # 高频标签榜长度上限（雷达「标签广度」按 300 归一）
+    # v1.34.2（用户反馈 2）：上限提到 999，榜单至少要装得下 999 条，
+    # 否则「取前 N 个」填 999 仍被截到 600。这里从 600 提到 1200 留余量。
+    MAX_TAGS = 1200         # 高频标签榜长度上限（雷达「标签广度」按 300 归一）
 
     def __init__(self, library: str = None, favorites_only: bool = False):
         self.library = library or None
@@ -320,11 +331,11 @@ class Portrait:
             "overview": overview,
             "radar": radar,
             "tags": tag_c.most_common(self.MAX_TAGS),
-            "actors": act_c.most_common(30),
-            "directors": dir_c.most_common(30),
-            "studios": stu_c.most_common(30),
-            "publishers": pub_c.most_common(20),
-            "series": ser_c.most_common(30),
+            "actors": act_c.most_common(PORTRAIT_TOP),
+            "directors": dir_c.most_common(PORTRAIT_TOP),
+            "studios": stu_c.most_common(PORTRAIT_TOP),
+            "publishers": pub_c.most_common(PORTRAIT_TOP),
+            "series": ser_c.most_common(PORTRAIT_TOP),
             "dist": {
                 "画质": q_c.most_common(),
                 "评分": [(_k, r_c[_k]) for _k in _RATING_ORDER if r_c.get(_k)],

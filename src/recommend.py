@@ -48,9 +48,230 @@ OLLAMA_HOST = "127.0.0.1:11434"
 # 的有 4.3 万条（nfo 里带的是来源评分，不是用户自己打的），拿 7.5 当门槛等于「全库都是喜欢的」。
 USER_RATING_LIKE = 8.5
 
+# v1.33.2（反馈：四位艺人霸屏）：收藏的艺人权重上限（相对「收藏作品贡献的最大值」）。
+# 与旧的恒定 1.2 相比，这里先给一个上限 1.2，再按**全库作品数**做稀有度折减，
+# 于是「作品数最多的头部艺人」不再自动垄断（见 _fav_person_weight）。
+FAV_PEOPLE_BASE = 1.2
+
+
+def _fav_person_weight(works: int) -> float:
+    """收藏的艺人/导演在画像里的权重 —— 按**全库作品数**折减（越稀有越吃香）。
+
+    旧逻辑恒定 +1.2，与「这位艺人在全库有多少作品」无关，于是作品数最多的几位
+    （实测 357/305/273/232 部是头部）在「单条贡献 × 候选池命中数」里完胜
+    作品数只有个位数的冷门收藏 → 推荐被这几位霸屏（top24 命中 15 部 = 63%）。
+
+    折减曲线（FAV_PEOPLE_BASE = 1.2 时，真实库实测）：
+
+        作品数   1 -> 0.709      37（中位）-> 0.259
+        100 -> 0.196            232 -> 0.186     357 -> 0.174
+
+    即「1 部作品的冷门艺人」拿到约 4 倍于「357 部头部艺人」的权重，
+    让 140 位收藏演员真正同台竞争，而不是被头部几位吃掉全部预算。
+    """
+    w = int(works or 0)
+    if w <= 0:
+        w = 1                                   # 没有关联作品也给一个基础权重
+    return FAV_PEOPLE_BASE / (1.0 + math.log(1.0 + w))
+
+
 
 def dim_cn(dim: str) -> str:
     return _DIM_CN.get(dim, dim)
+
+
+# ---------------------------------------------------------------- 引导向量（v1.34.0 需求 2）
+# 在智能推荐墙顶部输入一个词（艺人名 / 标签 / 片商 / 系列），让**这一次**推荐明显偏向它。
+# 与「向量编辑」的区别：
+#   - 向量编辑 = 长期偏好（写库 `vector_overrides` 表，所有轮次都生效）；
+#   - 引导向量 = 本次临时生效（不落库，只挂在这一次 `recommend()` 调用上）。
+GUIDE_HEAD = {"tag": "t", "actor": "a", "director": "d", "studio": "s", "series": "x"}
+# 输入一个词、没指定权重时给的默认权重。实测曲线（真机 5 万片 / 24 部一批，
+# 目标 = さつき芽衣，基线命中 1/24 = 4.2%）：
+#     w=0.5 → 16.7%   w=1.0 → 45.8%   w=1.5 → 58.3%
+#     w=2.0 → 66.7%   w=3.0 → 91.7%   w=4.0 → 100%
+# 取 2.0 = 「明显偏向但留出 1/3 给原本的画像」；想彻底霸屏自己往右拉即可。
+GUIDE_DEFAULT_WEIGHT = 2.0
+GUIDE_MIN_WEIGHT = 0.5
+GUIDE_MAX_WEIGHT = 10.0
+
+
+def _norm_key(s) -> str:
+    """归一化用于「模糊命中」的键：去空白 / 全角空格，转小写。"""
+    return re.sub(r"[\s　]+", "", str(s or "")).strip().lower()
+
+
+def resolve_guide_token(text, dim=None, library=None, rows=None, actors=None,
+                        directors=None):
+    """把一个用户输入的词**自动识别**成引导向量 token。
+
+    返回 ``(token, dim, matched_name)``；完全不认识时返回 ``(None, None, "")``。
+    ``token`` 形如 ``a:さつき芽衣`` / ``t:巨乳`` / ``s:MOODYZ`` / ``x:系列名``。
+
+    识别顺序：**先找人（people 表）→ 再找标签 / 片商 / 系列（从取数行现算）**。
+    每一级内部：完全相等 > 前缀 > 被包含，同级再看词长（越接近用户输入越长越好）、
+    最后看流行度（作品数 / 出现次数）。
+
+    防误命中的两道闸（真机探针查出来的）：
+    - 「人」**不做「被包含」匹配** —— 真机有位演员叫
+      「自己肯定感低めの色白巨乳立ちんぼ·N」，否则输入「巨乳」会被她抢走；
+    - 前缀 / 包含都要求输入 **≥2 字**（包含 ≥3 字）—— 否则输入「S」会把
+      所有 S 开头的人、以及片商「S1 NO.1 STYLE」一起拉进来。
+
+    明确传了 ``dim`` 时只在那个维度里找（UI 的「手动指定维度」走这条路）。
+    """
+    want = _norm_key(text)
+    if not want:
+        return None, None, ""
+    dim = str(dim or "").strip().lower() or None
+    if dim not in GUIDE_HEAD:
+        dim = None
+
+    # ---------- 1) 人：演员 / 导演（people 表最权威，且有 role_type） ----------
+    # ⚠️ v1.34.0 探针查出的**真缺陷**：不能对「人」做「被包含」匹配。
+    # 真机 people 表里有一位演员叫「自己肯定感低めの色白巨乳立ちんぼ·N」，
+    # 于是用户输入「巨乳」（想找标签）时会被这位演员**抢先命中**成 `a:`。
+    # 所以这里只用两级：完全相等 / 前缀（且要求用户输入足够长，否则
+    # 「S」这种一个字母会把所有 S 开头的人全拉进来）。
+    if dim in (None, "actor", "director"):
+        people = []
+        for role in ("Actor", "Director"):
+            if dim == "actor" and role != "Actor":
+                continue
+            if dim == "director" and role != "Director":
+                continue
+            try:
+                people.extend(db.all_people_ordered(role) or [])
+            except Exception:
+                pass
+        exact = None
+        prefix = None
+        for p in people:
+            role = str(p.get("role_type") or "").lower()
+            head = "d" if role.startswith("direct") else "a"
+            if dim and GUIDE_HEAD.get(dim) != head:
+                continue
+            nm = str(p.get("name") or "").strip()
+            if not nm or insight.is_junk_person(nm):
+                continue
+            nk = _norm_key(nm)
+            if nk == want:
+                score = 2
+            elif len(want) >= 2 and (nk.startswith(want) or want.startswith(nk)):
+                score = 1
+            else:
+                continue
+            try:
+                works = int(p.get("works") or 0)
+            except (TypeError, ValueError):
+                works = 0
+            cand = (score, works, -len(nm), head, nm)
+            if score == 2:
+                if exact is None or cand > exact:
+                    exact = cand
+            else:
+                if prefix is None or cand > prefix:
+                    prefix = cand
+        best = exact or prefix
+        if best is not None:
+            _s, _w, _neg, head, nm = best
+            return head + ":" + nm, ("director" if head == "d" else "actor"), nm
+
+    # ---------- 2) 标签 / 片商 / 系列：从取数行里现算 ----------
+    if dim in (None, "tag", "studio", "series"):
+        if rows is None:
+            try:
+                rows = db.media_for_insight(library)
+            except Exception:
+                rows = []
+        pools = {"t": Counter(), "s": Counter(), "x": Counter()}
+        for r in rows or []:
+            tags, studios, pubs, series = insight.split_tags(r.get("genres"))
+            for t in tags:
+                if t and not str(t).startswith("配信"):
+                    pools["t"][str(t).strip()] += 1
+            for s in list(studios) + list(pubs):
+                if s:
+                    pools["s"][str(s).strip()] += 1
+            if r.get("studio"):
+                pools["s"][str(r["studio"]).strip()] += 1
+            if r.get("collection"):
+                pools["x"][str(r["collection"]).strip()] += 1
+            for s in series:
+                if s:
+                    pools["x"][str(s).strip()] += 1
+        order = [("t", "tag"), ("s", "studio"), ("x", "series")]
+        if dim:
+            order = [(h, d) for h, d in order if d == dim]
+        best = None
+        for head, dname in order:
+            for key in pools[head]:
+                kk = _norm_key(key)
+                # ⚠️ v1.34.0 探针查出的**真缺陷**（两处）：
+                # ① 原排序键 (score, count, -len, …) 会让「count 更高的短词」
+                #    赢过「更接近输入的完整词」→ 改成按「词长与输入的接近度」排。
+                # ② 「被包含」从任意长度收紧到 ≥3 字（否则输入「S」命中 S1）。
+                # 「接近度」= min(len(key), len(want)) —— 用户输入的字符数里，
+                # 有多少落在了候选词上：输入「S1」时 "S1"(2 字全中) > "S1×TAMEIKE…"(1 字中)，
+                # 输入「巨乳」时 "巨乳"(2) > "超巨乳"(2) > "爆乳"(1)，符合直觉。
+                if kk == want:
+                    score, near = 3, len(want)
+                elif len(want) >= 2 and (kk.startswith(want) or want.startswith(kk)):
+                    score, near = 2, min(len(kk), len(want))
+                elif len(want) >= 3 and want in kk:
+                    score, near = 1, len(want)
+                else:
+                    continue
+                # 同分时：接近度 > 流行度（出现次数）> 字典序（保证可复现）
+                cand = (score, near, pools[head][key], head, key)
+                if best is None or cand > best:
+                    best = cand
+        if best is not None:
+            _s, _l, _c, head, key = best
+            dname = {"t": "tag", "s": "studio", "x": "series"}[head]
+            return head + ":" + key, dname, key
+    if text is not None:
+        try:
+            import applog
+            applog.log(f"[引导向量] 没找到「{str(text)[:40]}」对应的艺人 / 标签 / "
+                       f"片商 / 系列（可在界面上手动指定维度）")
+        except Exception:
+            pass
+    return None, None, ""
+
+
+def _apply_guides(prof: dict, guides) -> list:
+    """把引导向量按**绝对权重**注入画像，返回生效项 ``[(token, w, dim, key), ...]``。
+
+    ⚠️ 注入位置很关键：`build_profile` 的末尾会把画像归一化到 max=1，
+    所以「高权重引导」**必须**在归一化之后做，否则会被一起缩放、拉不开差距。
+    """
+    out = []
+    for g in (guides or ()):
+        if isinstance(g, dict):
+            tok = str(g.get("token") or "").strip()
+            try:
+                w = float(g.get("weight", 1.0))
+            except (TypeError, ValueError):
+                w = 1.0
+        elif isinstance(g, (list, tuple)) and len(g) >= 2:
+            tok = str(g[0]).strip()
+            try:
+                w = float(g[1])
+            except (TypeError, ValueError):
+                w = 1.0
+        else:
+            tok = str(g).strip()
+            w = GUIDE_DEFAULT_WEIGHT
+        if not tok or ":" not in tok or w == 0:
+            continue
+        head, key = tok[0], tok[2:]
+        if head not in DIMS or not key:
+            continue
+        w = max(-GUIDE_MAX_WEIGHT, min(GUIDE_MAX_WEIGHT, w))
+        prof[tok] = prof.get(tok, 0.0) + w
+        out.append((tok, w, DIMS[head][0], key))
+    return out
 
 
 # ---------------------------------------------------------------- AI 引擎探测
@@ -131,6 +352,134 @@ def ai_status():
     return {"engine": "ollama", "label": f"本地 Ollama（{use}）{tail}",
             "detail": f"离线扩词已启用：会把偏好种子词交给本地模型做语义扩展，全程不出网。\n"
                       f"本机已装 {len(names)} 个模型：{shown}{more}。"}
+
+
+def launch_ollama(timeout=20.0):
+    """尝试用 powershell 拉起本机 Ollama 服务（`ollama serve`）。
+
+    v1.35.0（需求 1）：用户在「AI引擎设置」页可以点「立即启动」，或在开关打开时
+    随软件启动自动拉起。先探测是否已经在跑，没跑才用 ``Start-Process ollama serve``
+    后台拉起（不弹控制台窗口），再用 :func:`list_models` 轮询确认服务真的起来了。
+
+    返回 ``(ok: bool, message: str)``；没装 Ollama 时 ``ok=False`` 但**不抛异常**
+    （自动拉起失败时静默降级，绝不卡住软件启动）。
+    """
+    try:
+        if list_models():
+            return True, "Ollama 已经在运行（无需拉起）。"
+        try:
+            import subprocess
+            flags = 0
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                flags = subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-Command",
+                 "Start-Process ollama -ArgumentList 'serve' -WindowStyle Hidden"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=flags)
+        except Exception as e:
+            return False, "拉起命令发送失败：%s" % e
+        import time
+        deadline = time.time() + float(timeout)
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                if list_models(timeout=1.0):
+                    return True, "Ollama 已成功拉起。"
+            except Exception:
+                pass
+        return False, "拉起命令已发送，但 %.0f 秒内没探测到 Ollama 服务（可能没安装，" \
+                      "或需手动启动）。" % float(timeout)
+    except Exception as e:
+        return False, "拉起失败：%s" % e
+
+
+def resolve_guide_tokens_fuzzy(text, dim=None, library=None, rows=None):
+    """引导向量**模糊**解析（v1.35.0 需求 3）。
+
+    与 :func:`resolve_guide_token`（只返回「最像的一个」）不同，这里返回**所有命中项**：
+
+    - 人（actor / director）：完全相等或前缀（≥2 字），**不做包含**匹配
+      （沿用真机踩过的坑 —— 避免输入「巨乳」被「自己肯定感低めの色白巨乳…·N」抢走）；
+    - 标签 / 片商 / 系列：所有**包含输入子串**的现成 token（≥2 字），外加完全相等 / 前缀。
+
+    返回 ``[(token, dim, key), ...]``（按现有顺序、token 去重、最多 300 条）。
+
+    用途：输入「巨乳」→ 把「巨乳 / 超巨乳 / 作品名里带巨乳」这类真正含「巨乳」的
+    标签全部加强，而不必精确命中某一个 tag。
+    """
+    want = _norm_key(text)
+    if not want or len(want) < 2:
+        return []
+    dim = str(dim or "").strip().lower() or None
+    if dim not in GUIDE_HEAD:
+        dim = None
+    out = []
+
+    # ---------- 1) 人：演员 / 导演（精确 / 前缀，不做包含） ----------
+    if dim in (None, "actor", "director"):
+        for role in ("Actor", "Director"):
+            if dim == "actor" and role != "Actor":
+                continue
+            if dim == "director" and role != "Director":
+                continue
+            try:
+                people = db.all_people_ordered(role) or []
+            except Exception:
+                people = []
+            for p in people:
+                role_t = str(p.get("role_type") or "").lower()
+                head = "d" if role_t.startswith("direct") else "a"
+                if dim and GUIDE_HEAD.get(dim) != head:
+                    continue
+                nm = str(p.get("name") or "").strip()
+                if not nm or insight.is_junk_person(nm):
+                    continue
+                nk = _norm_key(nm)
+                if nk == want or (len(want) >= 2
+                                  and (nk.startswith(want) or want.startswith(nk))):
+                    out.append((head + ":" + nm, "director" if head == "d" else "actor", nm))
+
+    # ---------- 2) 标签 / 片商 / 系列：所有包含输入子串的 ----------
+    if dim in (None, "tag", "studio", "series"):
+        if rows is None:
+            try:
+                rows = db.media_for_insight(library)
+            except Exception:
+                rows = []
+        pools = {"t": Counter(), "s": Counter(), "x": Counter()}
+        for r in rows or []:
+            tags, studios, pubs, series = insight.split_tags(r.get("genres"))
+            for t in tags:
+                if t and not str(t).startswith("配信"):
+                    pools["t"][str(t).strip()] += 1
+            for s in list(studios) + list(pubs):
+                if s:
+                    pools["s"][str(s).strip()] += 1
+            if r.get("studio"):
+                pools["s"][str(r["studio"]).strip()] += 1
+            if r.get("collection"):
+                pools["x"][str(r["collection"]).strip()] += 1
+            for s in series:
+                if s:
+                    pools["x"][str(s).strip()] += 1
+        order = [("t", "tag"), ("s", "studio"), ("x", "series")]
+        if dim:
+            order = [(h, d) for h, d in order if d == dim]
+        for head, dname in order:
+            for key in pools[head]:
+                kk = _norm_key(key)
+                if want in kk or kk.startswith(want) or want.startswith(kk):
+                    out.append((head + ":" + key, dname, key))
+
+    seen = set()
+    uniq = []
+    for tok, d, k in out:
+        if tok in seen:
+            continue
+        seen.add(tok)
+        uniq.append((tok, d, k))
+    return uniq[:300]
 
 
 def _ollama_expand(seed_terms, limit=40, timeout=25, model=None):
@@ -236,8 +585,14 @@ class Recommender:
                 for d, vals in snap.items() if isinstance(vals, dict)}
 
     # ------------------------------------------------ 偏好向量
-    def build_profile(self, rows=None, actors=None, directors=None, progress=None):
-        """返回 (profile: {token: weight}, meta: {...})。"""
+    def build_profile(self, rows=None, actors=None, directors=None, progress=None,
+                      guides=None):
+        """返回 (profile: {token: weight}, meta: {...})。
+
+        ``guides``（v1.34.0 需求 2）= 本次临时的引导向量，形如
+        ``[{"token": "a:さつき芽衣", "weight": 3.0}]`` 或 ``[("a:さつき芽衣", 3.0)]``，
+        在**归一化之后**按绝对权重注入（保证「明显加强」而不是被缩放抹平）。
+        """
         rows = rows if rows is not None else self._load()[0]
         actors = actors if actors is not None else self._load()[1]
         directors = directors if directors is not None else self._load()[2]
@@ -266,28 +621,58 @@ class Recommender:
                     for t, c in self._tokens(r, actors, directors).items():
                         prof[t] += DIMS.get(t[0], ("", 1.0))[1] * 0.35
 
-        # **归一化**：收藏贡献先缩到 max=1，否则 101 部收藏累加出来的标签权重（数百）
-        # 会把「收藏的演员」（个位数权重）彻底淹没 —— 实测踩到：4 位收藏演员对结果毫无影响。
-        if prof:
-            mx = max(prof.values()) or 1.0
-            for t in list(prof):
-                prof[t] /= mx
+        # ---- v1.33.2（反馈：四位艺人霸屏）根因 A + B 修复 ----
+        # 旧逻辑是「① 收藏作品累加 → ② 归一化到 max=1 → ③ 收藏人 += 1.2」，
+        # 于是 1.2 拿「归一化后的标签最大 1.0」当参照 → 演员维度天然是标签的 1.2 倍，
+        # 再叠加「作品数最多的几位」→ 推荐被头部艺人垄断（实测 top24 命中 15 部 = 63%）。
+        #
+        # 修法 A（顺序）：先把 142 位「收藏的人」折进 prof，**再一起归一化**。这样
+        #   「收藏的人」与「收藏作品贡献的标签」是同一个尺度，不再有 1.2 的绝对优势。
+        # 修法 B（稀有度）：收藏人的权重不再恒定 1.2，而是按全库作品数折减 ——
+        #   作品越多（越"大众脸"）权重越低，让 3 部作品的冷门收藏演员也有话语权。
+        #   公式 fav_w(t) = FAV_PEOPLE_BASE / (1 + ln(1 + works))，再乘维度基础权重。
+        #   实测：1 部 → 0.709；37 部（中位）→ 0.259；357 部 → 0.174。
+        work_counts = {}
+        if use_actors or use_directors:
+            try:
+                work_counts = db.person_work_counts()
+            except Exception:
+                work_counts = {}
 
-        # 演员库里收藏的演员 / 导演：**最强信号**（用户明确表过态，权重高于任何标签）
+        fav_people_w = {}
         for p in db.favorite_people():
             name = str(p.get("name") or "").strip()
             if insight.is_junk_person(name):
                 continue
             role = (p.get("role_type") or "").lower()
-            if role.startswith("direct"):
-                prof["d:" + name] += 1.2
-            else:
-                prof["a:" + name] += 1.2
+            head = "d" if role.startswith("direct") else "a"
+            if head == "a" and not use_actors:
+                continue
+            if head == "d" and not use_directors:
+                continue
+            w = _fav_person_weight(work_counts.get(name, 0))
+            prof[head + ":" + name] += w
+            fav_people_w[name] = w
             used_fav_people.append((name, p.get("role_type") or "Actor"))
+
+        # **归一化**：把「收藏作品 + 收藏的人」的合计贡献一起缩到 max=1。
+        # 归一化必须在收藏人折入**之后**（修法 A），否则收藏人会被当成超过 1.0 的异类。
+        if prof:
+            mx = max(prof.values()) or 1.0
+            for t in list(prof):
+                prof[t] /= mx
 
         if progress:
             progress(3, 5, f"个人画像：{len(fav_ids)} 部收藏 / {len(like_ids)} 部高分 / "
                            f"{len(used_fav_people)} 位收藏人")
+
+        # ---- v1.34.0（需求 2）引导向量：本次临时加权 ----
+        # 位置必须在归一化**之后**：归一化按 max 缩放，若在它之前注入，
+        # 引导项会连同整个画像一起被缩小（引导权重 3.0 与画像最大项 1.0 的
+        # 相对关系虽然保住了，但用户会看到「输入了却没什么变化」—— 因为
+        # 归一化后又把最大项压回 1，其余项被拉低，实际是「削弱其他项」而不是
+        # 「加强这一项」）。放在之后 = 真正的「在既有画像之上加一根高柱子」。
+        applied_guides = _apply_guides(prof, guides)
 
         # 开关：关掉的维度整类剔掉
         for t in list(prof):
@@ -328,13 +713,21 @@ class Recommender:
             "fav_people": used_fav_people[:40],
             "fav_people_n": len(used_fav_people),
             "vector_applied": applied,
+            "guides": [{"token": t, "weight": w, "dim": d, "key": k}
+                       for t, w, d, k in applied_guides],
         }
         return dict(prof), meta
 
     # ------------------------------------------------ IDF
     @staticmethod
     def _idf(profile, item_tokens, n_items):
-        """df(token) 从候选作品里数；idf = log(N/df) + 1（有下界，避免爆权重）。"""
+        """df(token) 从候选作品里数；idf = log(N/df) + 1（有下界，避免爆权重）。
+
+        v1.33.2 备注：曾试过「去掉 +1 下界 + 对高 df token 打折」来修根因 C，
+        **实测反而更糟**（四位占比 10.9% → 20.3%）。原因：去掉下界后**泛化标签**
+        （如「单体作品」占候选池 47%）被压得比演员还低，演员维度相对权重回升。
+        结论：idf 不动，A（归一化顺序）+ B（稀有度权重）已足够。
+        """
         df = Counter()
         for toks in item_tokens:
             for t in toks:
@@ -345,6 +738,7 @@ class Recommender:
             d = df.get(t, 0)
             out[t] = (math.log((n_items + 1) / (d + 1)) + 1.0)
         return out
+
 
     # ------------------------------------------------ 联想扩展（AI 模式）
     @staticmethod
@@ -387,8 +781,11 @@ class Recommender:
     # ------------------------------------------------ 主入口
     def recommend(self, limit=24, algo="normal", library=None, exclude_ids=(),
                   explore=0.25, diversity=None, progress=None, with_reasons=True,
-                  ai_model=None):
-        """返回 {'picks': [row + score/reason], 'meta': {...}, 'algo': ...}。"""
+                  ai_model=None, guides=None):
+        """返回 {'picks': [row + score/reason], 'meta': {...}, 'algo': ...}。
+
+        ``guides``（v1.34.0 需求 2）：本次**临时**的引导向量，不落库。
+        """
         rec = dict(self.s.recommend or {})
         limit = int(limit or rec.get("count", 24))
         limit = max(6, min(120, limit))
@@ -406,7 +803,8 @@ class Recommender:
         if progress:
             progress(0, 5, "正在准备候选池…")
         rows, actors, directors = self._load(library, progress)
-        profile, meta = self.build_profile(rows, actors, directors, progress)
+        profile, meta = self.build_profile(rows, actors, directors, progress,
+                                           guides=guides)
         if not profile:
             return {"picks": [], "meta": meta, "algo": algo, "engine": "none",
                     "empty": "还没有任何收藏 / 打分数据 —— 先给几部片子点星标，"
@@ -593,13 +991,16 @@ def _jaccard(a, b) -> float:
 
 
 # ---------------------------------------------------------------- 便捷入口
-def recommend(page=1, limit=24, algo=None, library=None, progress=None):
+def recommend(page=1, limit=24, algo=None, library=None, progress=None, guides=None):
     """给 UI 用的一步函数：`page` 递增 = 换一批。
 
     v1.25.0（反馈 3）：避让范围从「只看上一批」改成「最近 N 轮」—— N 由
     「工具 → 智能推荐 → 推荐范围与偏好 → 已经推荐的 N 轮内不再出现」决定
     （0 = 不限制）。另外**不管第几页都会避让**：v1.24.x 只在 page > 1 时避让，
     于是重新进推荐页（page 回到 1）永远看到同一批。
+
+    v1.34.0（需求 2）：``guides`` = 本次临时的引导向量（推荐墙顶部输入框），
+    形如 ``[{"token": "a:さつき芽衣", "weight": 3.0}]``，**不落库、不退出本次会话**。
     """
     s = cfg.get_settings()
     algo = algo or (s.recommend or {}).get("algo", "normal")
@@ -607,7 +1008,8 @@ def recommend(page=1, limit=24, algo=None, library=None, progress=None):
     r = Recommender(s)
     res = r.recommend(limit=limit, algo=algo, library=library,
                       exclude_ids=excl, progress=progress,
-                      ai_model=(s.recommend or {}).get("ai_model"))
+                      ai_model=(s.recommend or {}).get("ai_model"),
+                      guides=guides)
     ids = [p["id"] for p in res.get("picks", [])]
     if ids:
         s.push_smart_round(ids)
@@ -618,4 +1020,6 @@ def recommend(page=1, limit=24, algo=None, library=None, progress=None):
 
 __all__ = ["Recommender", "recommend", "ai_status", "probe_ollama", "list_models",
            "resolve_model", "configured_model", "DIMS", "dim_cn",
+           "resolve_guide_token", "GUIDE_HEAD", "GUIDE_DEFAULT_WEIGHT",
+           "GUIDE_MIN_WEIGHT", "GUIDE_MAX_WEIGHT",
            "OLLAMA_URL", "OLLAMA_HOST"]

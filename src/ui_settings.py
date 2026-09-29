@@ -2,10 +2,11 @@
 """
 设置界面（参考截图 2–7）
 ========================
-- 个性化设置：导航菜单(开关 + 上下排序) / 首页管理(模块开关) / 内容卡片(显示评分·分辨率·悬停预告片)
+- 个性化设置：导航菜单(开关 + 上下排序) / 首页管理(模块开关) / 内容卡片(显示评分·分辨率·演员·导演)
 - 服务管理：媒体库(新建 / 列表 / 扫描全部 —— 全部由用户自己命名，无内置库) / 后台任务管理(启用 / 库 / 时间 / 频率)
 自绘 ToggleSwitch（无额外图片依赖）。
 """
+import json
 import os
 import math
 import re
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QListWidget,
     QListWidgetItem, QStackedWidget, QFrame, QLineEdit, QComboBox, QTimeEdit,
     QFileDialog, QWidget, QAbstractButton, QAbstractItemView, QGroupBox,
-    QFormLayout, QGridLayout, QMessageBox, QCheckBox, QRadioButton,
+    QFormLayout, QGridLayout, QMessageBox, QCheckBox, QRadioButton, QInputDialog,
     QSpinBox, QProgressBar, QPlainTextEdit, QApplication, QSlider, QSizePolicy,
     QTableWidget, QTableWidgetItem, QHeaderView, QTreeWidget, QTreeWidgetItem,
     QDoubleSpinBox,
@@ -35,6 +36,10 @@ import scraper as scraper_mod
 import applog
 import backup as backup_mod
 import tagopt as tagopt_mod
+import ui_imagedetect              # v1.30.0 反馈 2：图像检测
+import ui_manualedit               # v1.30.0 反馈 3：手动修改
+import ui_actorcheck               # v1.31.0 反馈 3：演员检测
+import i18n                        # v1.32.0 反馈 3：界面语言（19 种）
 from ui_hero import compact_button
 
 # v1.13.0：拉大行距，避免列表里内容被裁（反馈 1/2）；导航菜单列表高度改为按条目数自适应（反馈 7）
@@ -233,18 +238,27 @@ class TestSourceWorker(QThread):
 
 # ---------- 重复检测线程（v1.23.0） ----------
 class DedupeWorker(QThread):
-    """跨目录重复影片检测（在后台线程跑，避免 5 万片规模下卡界面）。"""
+    """跨目录重复影片检测（在后台线程跑，避免 5 万片规模下卡界面）。
+
+    v1.32.0（反馈 1）：接入「普通算法 / AI 算法」双模式 —— 普通算法跑完
+    `find_duplicates()` 后，若选的是 AI 算法且本机 Ollama 可用，再让本地模型
+    逐组复核（**只加一列建议，不动任何文件**）。
+    """
     progress = Signal(int, int, str)
     done = Signal(object)          # DupReport 或 None（失败）
 
     def __init__(self, library, min_confidence, exclude_multipart=True,
-                 verify_exists=True):
+                 verify_exists=True, algo="normal", model="", fast=True):
         super().__init__()
         self.library = library or None
         self.min_confidence = min_confidence
         # v1.24.0（反馈 1/2）：分片排除开关 + 磁盘存在性校验
         self.exclude_multipart = bool(exclude_multipart)
         self.verify_exists = bool(verify_exists)
+        # v1.32.0（反馈 1）：算法与 AI 复核参数
+        self.algo = "ai" if algo == "ai" else "normal"
+        self.model = model or ""
+        self.fast = bool(fast)
 
     def run(self):
         try:
@@ -253,10 +267,23 @@ class DedupeWorker(QThread):
                 exclude_multipart=self.exclude_multipart,
                 verify_exists=self.verify_exists,
                 progress=lambda a, b, m: self.progress.emit(a, b, m))
-            self.done.emit(rep)
         except Exception as e:
             applog.log(f"[重复检测] 失败：{type(e).__name__}: {e}")
             self.done.emit(None)
+            return
+        if self.algo == "ai" and rep is not None:
+            try:
+                dup_mod.review_with_ai(
+                    rep, model=self.model or None, fast=self.fast,
+                    progress=lambda a, b, m: self.progress.emit(a, b, m),
+                    stop=self.isInterruptionRequested)
+            except Exception as e:
+                # 复核失败**绝不能吞掉普通算法的结果** —— 报告照发，只补一条说明
+                applog.log(f"[重复检测] AI 复核异常：{type(e).__name__}: {e}")
+                rep.ai = {"ai": False, "done": 0, "failed": 0, "skipped": 0,
+                          "jobs": 0, "fast": self.fast,
+                          "note": "AI 复核出错（%s），以下为普通算法结果。" % e}
+        self.done.emit(rep)
 
 
 # ---------- 玻璃对话框基类 ----------
@@ -391,6 +418,24 @@ class AiModelsWorker(QThread):
         self.done.emit(list(names or []))
 
 
+class OllamaLaunchWorker(QThread):
+    """用 powershell 拉起本机 Ollama（v1.35.0 需求 1）。
+
+    后台跑 `recommend.launch_ollama()`：先探测是否已经在跑，没跑就
+    `Start-Process ollama serve` 后台拉起，再用 /api/tags 轮询确认起来了。
+    避免把软件启动 / 设置窗口卡在 Ollama 的启动等待上。
+    """
+
+    done = Signal(bool, str)
+
+    def run(self):
+        try:
+            ok, msg = rec_mod.launch_ollama()
+        except Exception as e:
+            ok, msg = False, f"{type(e).__name__}: {e}"
+        self.done.emit(bool(ok), str(msg))
+
+
 class TagOptScanWorker(QThread):
     """标签优化：扫描 + 出计划（**只读盘、只算，绝不写盘**）（v1.25.0 反馈 4）。
 
@@ -517,8 +562,15 @@ class VectorEditorDialog(QDialog):
         btns = QHBoxLayout()
         b_fill = QPushButton("从画像自动填充…")
         b_fill.setObjectName("Ghost")
-        b_fill.setToolTip("按「画像概览」里权重最高的标签 / 片商 / 演员自动生成一批权重")
+        b_fill.setToolTip("按「画像概览」里权重最高的标签 / 片商 / 演员自动生成一批权重。\n"
+                          "会先弹面板让你选统计范围（全部 / 我的收藏 / 某个媒体库）、\n"
+                          "每个维度取前多少个、每个维度给多少权重，选完记住。")
         b_fill.clicked.connect(self._autofill)
+        b_fav = QPushButton("从收藏的演员自动填充")
+        b_fav.setObjectName("Ghost")
+        b_fav.setToolTip("把你「演员库 / 导演库」里**收藏（★）**的演员与导演，\n"
+                         "一键写成向量权重，让智能推荐明显偏向他们。")
+        b_fav.clicked.connect(self._autofill_fav)
         b_del = QPushButton("删除选中")
         b_del.setObjectName("Ghost")
         b_del.clicked.connect(self._delete)
@@ -526,6 +578,7 @@ class VectorEditorDialog(QDialog):
         b_clr.setObjectName("Ghost")
         b_clr.clicked.connect(self._clear)
         btns.addWidget(b_fill)
+        btns.addWidget(b_fav)
         btns.addWidget(b_del)
         btns.addStretch(1)
         btns.addWidget(b_clr)
@@ -619,34 +672,66 @@ class VectorEditorDialog(QDialog):
             self.on_saved()
 
     def _autofill(self):
-        """按画像的高频项生成一批权重（标签 / 片商 / 系列 / 演员 / 导演 各取前几名）。"""
-        if QMessageBox.question(
-                self, "自动填充",
-                "会按「画像概览」统计出的高频项写入一批权重（标签前 30、片商前 10、"
-                "系列前 10、演员前 10、导演前 10，权重 1.5 / 1.3 / 1.2）。\n"
-                "已有的同名条目会被覆盖。继续？") != QMessageBox.Yes:
+        """打开参数面板，按「画像概览」的高频项生成一批权重。
+
+        v1.34.0（需求 1）：原来这里是**硬编码**的计划（标签前 30 / 其余各前 10，
+        权重 1.5/1.3/1.2，统计范围固定全库）。现在改成先弹 `AutoFillDialog`
+        让用户自己选 **统计范围 / 每维度前 N / 每维度权重**，选完记住偏好。
+        """
+        dlg = AutoFillDialog(self)
+        if dlg.exec() != QDialog.Accepted:
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            data = insight_mod.Portrait().build()
-        finally:
-            QApplication.restoreOverrideCursor()
-        plan = (("tag", data.get("tags", [])[:30], 1.5),
-                ("studio", data.get("studios", [])[:10], 1.3),
-                ("series", data.get("series", [])[:10], 1.2),
-                ("actor", data.get("actors", [])[:10], 1.3),
-                ("director", data.get("directors", [])[:10], 1.2))
-        n = 0
-        for dim, items, w in plan:
-            for key, _c in items:
-                if not str(key).strip():
-                    continue
-                db.set_vector_override(dim, key, w)
-                self.s.set_vector_weight(dim, key, w)
-                n += 1
-        applog.log(f"[向量编辑] 自动填充 {n} 条")
+        # 面板确认时已经写完库、也存好偏好 —— 这里只负责刷新列表
         self.reload()
-        self.status.setText(f"已自动填充 {n} 条（标签 / 片商 / 系列 / 演员 / 导演）。")
+        n = len(db.vector_overrides())
+        self.status.setText(f"已按所选参数自动填充，现在共 {n} 条手动权重。")
+        if self.on_saved:
+            self.on_saved()
+
+    def _autofill_fav(self):
+        """从收藏的演员 / 导演自动填充（v1.35.0 需求 2）。
+
+        把「演员库 / 导演库」里 **收藏（favorite=1）** 的人，一键写成向量权重
+        （actor / director 维度），让智能推荐明显偏向他们。权重用同一个量级
+        （默认 1.5，0~5 可选）。
+        """
+        try:
+            favs = db.favorite_people() or []
+        except Exception as e:
+            QMessageBox.warning(self, "读取失败", f"读取收藏的演员失败：{e}")
+            return
+        picks = []
+        for p in favs:
+            role = str(p.get("role_type") or "").lower()
+            if role.startswith("direct"):
+                dim = "director"
+            elif role.startswith("actor"):
+                dim = "actor"
+            else:
+                continue
+            picks.append((dim, str(p.get("name") or "").strip()))
+        picks = [(d, n) for d, n in picks if n]
+        if not picks:
+            QMessageBox.information(
+                self, "没有可填充的",
+                "你还没有在「演员库 / 导演库」里收藏（★）任何演员或导演。\n"
+                "先去收藏几位，再来这里一键填充。")
+            return
+        w, ok = QInputDialog.getDouble(
+            self, "从收藏的演员自动填充",
+            f"将你收藏的 {len(picks)} 位演员 / 导演写成向量权重，\n"
+            "权重越大越偏向他们（1 = 默认，2 = 明显偏向）：",
+            1.5, 0.0, 5.0, 1)
+        if not ok:
+            return
+        for dim, name in picks:
+            db.set_vector_override(dim, name, w)
+            self.s.set_vector_weight(dim, name, w)
+        applog.log(f"[向量编辑] 从收藏的演员自动填充 {len(picks)} 位，权重 {w:g}")
+        self.reload()
+        self.status.setText(
+            f"已从收藏的演员自动填充 {len(picks)} 位（权重 {w:g}），"
+            f"现在共 {len(db.vector_overrides())} 条手动权重。")
         if self.on_saved:
             self.on_saved()
 
@@ -664,6 +749,343 @@ class GlassDialog(QDialog):
 
 
 # ---------- 媒体库编辑 / 新建对话框：名称 / 类型 / 媒体文件夹 ----------
+
+class AutoFillDialog(GlassDialog):
+    """「从画像自动填充」的参数面板（v1.34.0 需求 1）。
+
+    需求原文：「从画像自动填充功能中，加入自己选用哪个统计范围的画像。然后标签前多少、
+    片商前多少、演员前多少、导演前多少、默认每项给到多少权重，都可以自己选择范围。」
+
+    所以这里把原来**硬编码**的那套（`Portrait().build()` + 固定的
+    `(:30, 1.5) / (:10, 1.3) / (:10, 1.2)` 计划）全部变成可调项：
+
+    - **统计范围**：全部媒体库 / 只算「我的收藏」/ 指定某个媒体库（复用 `insight.Portrait`）；
+    - **每维度「取前 N」**：1~999，取消勾选 = 不用这个维度；
+    - **每维度「权重」**：0~5（跟向量编辑的手动权重同一量纲）；
+    - **每维度启用勾选**：一键跳过不想要的维度。
+
+    参数「记住偏好」：确认后落 `config.Settings.autofill`，下次打开还是上次那套。
+    """
+
+    DIMS = [("tag", "标签", "收藏影片里出现最多的题材词"),
+            ("studio", "片商", "「片商:」开头的厂牌 / 制作商"),
+            ("series", "系列", "「系列:」开头的作品系列"),
+            ("actor", "演员", "演员库里出现最多的演员"),
+            ("director", "导演", "导演库里出现最多的导演")]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("从画像自动填充 · 参数")
+        self.s = cfg.get_settings()
+        self._prefs = json.loads(json.dumps(self.s.autofill or {}))
+        self._build()
+        # v1.34.1 修复（用户反馈 2「切『我的收藏』时高度不一致 / 与说明块重叠」）：
+        # 原来写死 `resize(660, 560)`，但本面板的 sizeHint 会随**内容**变化 ——
+        # 切到「我的收藏」时范围提示文字从 1 行变 2 行，sizeHint 从 598 涨到 628，
+        # 而窗口还是 560 → 布局被压缩，QGroupBox 被挤到比 sizeHint 矮 30px，
+        # 里面的 SpinBox 溢出、和下面的说明块叠在一起。
+        # 修法：宽度给一个舒服的定值，**高度按 sizeHint 自适应**（并给上下限兜底），
+        # 这样无论哪个范围、什么字体，都不会再被压缩。
+        self._fit_height()
+
+    def _fit_height(self):
+        """按当前内容的真实高度定高（宽度固定 660，居中）。"""
+        w = max(660, self.sizeHint().width())
+        h = self.sizeHint().height()
+        h = max(h, 420)                       # 下限兜底，太矮会 clipping
+        h = min(h, 900)                       # 上限兜底，防止超大字体撑爆屏幕
+        self.resize(w, h)
+
+
+    # ---------- 构建 ----------
+    def _build(self):
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+
+        hint = QLabel(rich(
+            "按「画像概览」的统计结果，把 **高频项** 批量写成向量权重（写进 "
+            "`vector_overrides` 表，立刻对智能推荐生效）。\n"
+            "同名条目会被**覆盖**；这里选的参数会记住，下次打开还是这套。"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        v.addWidget(hint)
+
+        # ---- 统计范围 ----
+        g1 = QGroupBox("统计范围")
+        # v1.34.2（用户反馈 1）：组框钉成 Fixed，不被外层布局拉伸去吃白，
+        # 内部边距/行距也收紧，避免「统计范围」组框下方留一大块空白。
+        g1.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        f1 = QFormLayout(g1)
+        f1.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f1.setContentsMargins(10, 8, 10, 8)
+        f1.setVerticalSpacing(6)
+        f1.setHorizontalSpacing(10)
+        self.cb_scope = QComboBox()
+        self.cb_scope.addItem("全部媒体库", "")
+        self.cb_scope.addItem("我的收藏（只统计收藏的影片）", "__FAV__")
+        try:
+            for lib in (self.s.libraries or []):
+                nm = str(lib.get("name") or "").strip()
+                if nm:
+                    self.cb_scope.addItem(f"媒体库：{nm}", nm)
+        except Exception:
+            pass
+        # ⚠️ 恢复时要**先看 favorites_only**：`findData("")` 会命中第 0 项
+        # （「全部媒体库」的 data 就是空串），于是「上次选的是我的收藏」永远恢复不回来。
+        saved_scope = str(self._prefs.get("scope") or "")
+        if self._prefs.get("favorites_only"):
+            idx = self.cb_scope.findData("__FAV__")
+        else:
+            idx = self.cb_scope.findData(saved_scope)
+        self.cb_scope.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cb_scope.setToolTip(
+            "用哪个范围的画像来生成权重。\n"
+            "「我的收藏」适合「我就是想找跟已收藏很像的」；\n"
+            "某个媒体库适合「这个库我口味不一样」。")
+        f1.addRow("统计", self.cb_scope)
+        self.lb_scope_tip = QLabel("—")
+        self.lb_scope_tip.setStyleSheet("color:#8c8071;font-size:11px;")
+        # v1.34.2（用户反馈 1）根因修复：wordWrap=True 时 QLabel 的 sizeHint 会按多行
+        # 估算高度，QFormLayout 把它拉伸到约 3 行高（实测 v1.34.1 tip 高 60px、v1.34.2 初版
+        # 仍 45px，而文本只有 1 行 ~17px）—— 这正是「统计范围组框下方留白太多」的真因。
+        # 关闭换行 + 定死 1 行高；三档文案已在 _refresh_est 压成单行，故不会裁字。
+        self.lb_scope_tip.setWordWrap(False)
+        self.lb_scope_tip.setFixedHeight(
+            self.lb_scope_tip.fontMetrics().lineSpacing() + 3)
+        f1.addRow("", self.lb_scope_tip)
+        v.addWidget(g1)
+
+        # ---- 各维度 前 N + 权重 + 启用 ----
+        g2 = QGroupBox("每个维度取多少 · 给多少权重")
+        # v1.34.2（用户反馈 1）：同 g1，钉 Fixed 不被拉伸。
+        g2.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        gl = QGridLayout(g2)
+        gl.setHorizontalSpacing(10)
+        gl.setVerticalSpacing(8)
+        for c, h in enumerate(("维度", "启用", "取前 N 个", "权重", "说明")):
+            lb = QLabel(h)
+            lb.setStyleSheet("color:#a2967f;font-size:11px;")
+            gl.addWidget(lb, 0, c)
+        self.dim_rows = {}
+        dims_cfg = (self._prefs.get("dims") or {})
+        for r, (key, cn, tip) in enumerate(self.DIMS, start=1):
+            cur = dict(dims_cfg.get(key) or {})
+            dflt = cfg.DEFAULT_AUTOFILL["dims"].get(key) or {"on": True, "top": 10, "w": 1.0}
+            ck = QCheckBox()
+            ck.setChecked(bool(cur.get("on", dflt["on"])))
+            ck.setToolTip(f"不勾选就跳过「{cn}」")
+            gl.addWidget(ck, r, 1, Qt.AlignCenter)
+            sp_top = QSpinBox()
+            sp_top.setRange(*cfg.Settings.AUTOFILL_TOP_RANGE)
+            # v1.34.2（用户反馈 2）：去掉「 个」后缀 —— 带后缀时「999 个」比「999」宽，
+            # 在 SPIN_MAX_W 限宽下第 3 位会被吞（实测原来只能写 99）。去掉后缀后
+            # 三位数字「999」能完整显示，上限 999 才真正填得进去。
+            sp_top.setValue(int(cur.get("top", dflt["top"])))
+            # v1.34.1 修复：原来是 setFixedWidth(96)，但 QSS 的 padding 5px 10px
+            # 加上「200 个」+ 上下箭头后 `minimumSizeHint().width()` 会超过 96，
+            # 结果数字被挤到贴边、与上下边框「重叠」。改成给足 + 允许伸展。
+            sp_top.setMinimumWidth(cfg.SPIN_MIN_W)
+            sp_top.setMaximumWidth(cfg.SPIN_MAX_W)
+            sp_top.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            gl.addWidget(sp_top, r, 2)
+            sp_w = QDoubleSpinBox()
+            sp_w.setRange(*cfg.Settings.AUTOFILL_W_RANGE)
+            sp_w.setSingleStep(0.1)
+            sp_w.setDecimals(2)
+            sp_w.setValue(float(cur.get("w", dflt["w"])))
+            sp_w.setMinimumWidth(cfg.SPIN_MIN_W)
+            sp_w.setMaximumWidth(cfg.SPIN_MAX_W)
+            sp_w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            gl.addWidget(sp_w, r, 3)
+            gl.addWidget(QLabel(f"{cn} · {tip}"), r, 4)
+            # 关掉勾选时把两个输入框置灰（视觉上一眼看出被跳过）
+            sp_top.setEnabled(ck.isChecked())
+            sp_w.setEnabled(ck.isChecked())
+            ck.toggled.connect(sp_top.setEnabled)
+            ck.toggled.connect(sp_w.setEnabled)
+            self.dim_rows[key] = (ck, sp_top, sp_w)
+        gl.setColumnStretch(4, 1)
+        v.addWidget(g2)
+
+        note = QLabel(rich(
+            "权重含义与「向量编辑」一致：**>1 加强**、1 = 默认、0~1 减弱、**0 = 屏蔽**。\n"
+            "自动填充是**覆盖写**，不会替你删掉别的条目 —— 想清干净先点「全部清空」。"))
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#8c8071;font-size:11px;")
+        v.addWidget(note)
+
+        self.lb_est = QLabel("—")
+        self.lb_est.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.lb_est.setWordWrap(True)
+        v.addWidget(self.lb_est)
+
+        foot = QHBoxLayout()
+        b_prev = QPushButton("预览将写入的条目…")
+        b_prev.setObjectName("Ghost")
+        b_prev.setToolTip("先看要写哪些关键词，不写库")
+        b_prev.clicked.connect(lambda: self._run(dry=True))
+        b_reset = QPushButton("恢复默认")
+        b_reset.setObjectName("Ghost")
+        b_reset.clicked.connect(self._reset)
+        foot.addWidget(b_prev)
+        foot.addWidget(b_reset)
+        foot.addStretch(1)
+        b_cancel = QPushButton("取消")
+        b_cancel.clicked.connect(self.reject)
+        self.b_ok = QPushButton("填充")
+        self.b_ok.setObjectName("Primary")
+        self.b_ok.clicked.connect(lambda: self._run(dry=False))
+        foot.addWidget(b_cancel)
+        foot.addWidget(self.b_ok)
+        v.addLayout(foot)
+
+        self.cb_scope.currentIndexChanged.connect(self._refresh_est)
+        for key, _cn, _t in self.DIMS:
+            ck, sp_top, sp_w = self.dim_rows[key]
+            ck.toggled.connect(self._refresh_est)
+            sp_top.valueChanged.connect(self._refresh_est)
+            sp_w.valueChanged.connect(self._refresh_est)
+        QTimer.singleShot(0, self._refresh_est)
+
+    # ---------- 状态 ----------
+    def _scope(self):
+        """当前统计范围 → (library, favorites_only, 人话)。"""
+        data = self.cb_scope.currentData()
+        if data == "__FAV__":
+            return "", True, "我的收藏"
+        return str(data or ""), False, str(self.cb_scope.currentText() or "全部媒体库")
+
+    def _plan(self):
+        """当前参数 → [(dim, top, weight), ...]（只含启用且 top>0 的维度）。"""
+        out = []
+        for key, cn, _t in self.DIMS:
+            ck, sp_top, sp_w = self.dim_rows[key]
+            if not ck.isChecked():
+                continue
+            top = int(sp_top.value())
+            if top <= 0:
+                continue
+            out.append((key, cn, top, float(sp_w.value())))
+        return out
+
+    def _refresh_est(self, *_):
+        lib, fav, cn = self._scope()
+        plan = self._plan()
+        n = sum(t for _k, _c, t, _w in plan)
+        bits = "、".join(f"{c}前 {t}（权重 {w:g}）" for _k, c, t, w in plan)
+        # ⚠️ 先设格式再设文本：`setTextFormat` 只影响**之后**的 setText。
+        # 反过来的话（先 setText 再设 RichText）Qt 会按上一次的格式重新解析，
+        # 文案里的 `<` / `&` 会被当成标签吃掉。
+        for w in (self.lb_est, self.lb_scope_tip):
+            w.setTextFormat(Qt.RichText)
+        self.lb_est.setText(
+            f"将统计「{cn}」的画像，预计最多写入 <b>{n}</b> 条：{bits or '（没有启用任何维度）'}")
+        self.b_ok.setEnabled(bool(plan))
+        # v1.34.2（用户反馈 1）：三档文案压成单行（lb_scope_tip 已锁 1 行高），
+        # 高度恒定、不再随范围切换上下跳。
+        if fav:
+            self.lb_scope_tip.setText(
+                "只统计已收藏的影片 —— 生成的权重要跟收藏口径一致时选这个（收藏少则更聚焦你的口味）。")
+        elif lib:
+            _ln = lib if len(lib) <= 12 else lib[:11] + "…"
+            self.lb_scope_tip.setText(
+                f"只统计媒体库「{_ln}」里的作品（适合这个库口味不一样时，权重不串库）。")
+        else:
+            self.lb_scope_tip.setText(
+                "统计索引里的全部作品（范围最广，适合按整体口味找片）。")
+        # v1.34.1：文案长度变了 → 允许的**最小高度**也会跟着变，立刻重新适配，
+        # 否则切到「我的收藏」（提示多占一行）时窗口高度不够、内容被压到重叠。
+        # 用 QTimer.singleShot(0, ...) 是因为此刻布局还没把新文案算完，
+        # 直接量 sizeHint 会拿到旧值。
+        QTimer.singleShot(0, self._fit_height)
+
+    def _reset(self):
+        d = cfg.DEFAULT_AUTOFILL
+        self.cb_scope.setCurrentIndex(0)
+        for key, _cn, _t in self.DIMS:
+            ck, sp_top, sp_w = self.dim_rows[key]
+            base = d["dims"].get(key) or {"on": True, "top": 10, "w": 1.0}
+            ck.setChecked(bool(base["on"]))
+            sp_top.setValue(int(base["top"]))
+            sp_w.setValue(float(base["w"]))
+        self._refresh_est()
+
+    # ---------- 执行 ----------
+    def _run(self, dry=False):
+        lib, fav, cn = self._scope()
+        plan = self._plan()
+        if not plan:
+            QMessageBox.information(self, "提示", "至少要启用一个维度。")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data = insight_mod.Portrait(library=lib or None,
+                                        favorites_only=fav).build()
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            applog.log(f"[向量编辑] 自动填充取画像失败：{type(e).__name__}: {e}", "error")
+            QMessageBox.warning(self, "失败", f"取画像失败：{type(e).__name__}: {e}")
+            return
+        finally:
+            try:
+                QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+
+        # 维度名 → Portrait 里的键
+        src_key = {"tag": "tags", "studio": "studios", "series": "series",
+                   "actor": "actors", "director": "directors"}
+        picked = []
+        for dim, dim_cn, top, w in plan:
+            items = data.get(src_key.get(dim, dim + "s")) or []
+            for key, _c in items[:top]:
+                k = str(key or "").strip()
+                if not k:
+                    continue
+                picked.append((dim, dim_cn, k, w))
+
+        if dry:
+            self._show_preview(cn, picked)
+            return
+
+        n = 0
+        for dim, _dim_cn, key, w in picked:
+            db.set_vector_override(dim, key, w)
+            self.s.set_vector_weight(dim, key, w)
+            n += 1
+        # 记住这套参数
+        self.s.set_autofill(
+            scope=("" if fav else lib),
+            favorites_only=fav,
+            dims={k: {"on": self.dim_rows[k][0].isChecked(),
+                      "top": int(self.dim_rows[k][1].value()),
+                      "w": float(self.dim_rows[k][2].value())}
+                  for k, _c, _t in self.DIMS})
+        applog.log(f"[向量编辑] 自动填充 {n} 条（范围={cn}）")
+        self.accept()
+
+    def _show_preview(self, scope_cn, picked):
+        head = f"统计范围「{scope_cn}」，共 {len(picked)} 条：\n\n"
+        by = {}
+        for dim, dim_cn, key, w in picked:
+            by.setdefault(dim_cn, []).append(f"{key}({w:g})")
+        body = "\n\n".join(f"【{d}】{len(v)} 条：{'、'.join(v[:24])}"
+                           + ("…" if len(v) > 24 else "") for d, v in by.items())
+        dlg = QDialog(self)
+        dlg.setWindowTitle("预览（不会写入）")
+        dlg.resize(620, 460)
+        v = QVBoxLayout(dlg)
+        lb = QLabel(head + body)
+        lb.setWordWrap(True)
+        ta = QPlainTextEdit(head + body)
+        ta.setReadOnly(True)
+        v.addWidget(ta, 1)
+        row = QHBoxLayout(); row.addStretch(1)
+        b = QPushButton("关闭"); b.clicked.connect(dlg.accept)
+        row.addWidget(b); v.addLayout(row)
+        dlg.exec()
+
+
 class LibraryEditDialog(GlassDialog):
     """唯一的媒体库编辑对话框（v1.12.0 起「新建」与「编辑」共用，只差标题）。
 
@@ -794,41 +1216,34 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        nav = QFrame()
-        nav.setObjectName("Sidebar")
-        nav.setFixedWidth(150)
-        nl = QVBoxLayout(nav)
-        nl.setContentsMargins(8, 12, 8, 10)
-        nl.setSpacing(4)
-        self.sub_btns = {}
-        # v1.24.0（反馈 6/8）：画像概览插到「个性化设置」之后、「演员刮削」之前；
-        # 智能推荐（含向量编辑）作为独立一页。
-        # v1.25.0（反馈 4）：「标签优化」跟在「智能推荐」后面 —— 它俩同源
-        # （都用「普通智能算法 / AI 智能算法」那套本地离线能力），放在一起好找。
-        self.ORDER = ["个性化设置", "画像概览", "演员刮削", "智能推荐", "标签优化",
-                      "服务管理", "重复检测", "数据与日志"]
-        for key in self.ORDER:
-            b = QPushButton(key)
-            b.setObjectName("Nav")
-            b.clicked.connect(lambda _c, k=key: self._show(k))
-            nl.addWidget(b)
-            self.sub_btns[key] = b
-        nl.addStretch(1)
-        root.addWidget(nav)
+        self.nav_frame = QFrame()
+        self.nav_frame.setObjectName("Sidebar")
+        self.nav_frame.setFixedWidth(150)
+        root.addWidget(self.nav_frame)
+        self._rebuild_nav_buttons(build=True)
 
         self.stack = QStackedWidget()
         self._pg_personal = self._page_scroll(self._build_personal())
         # v1.24.0：画像概览内容很高（雷达 + 概览 + 高频榜 + 分布 + 共现），**必须套滚动** ——
         # 不套的话它会把整窗最小高度顶到 1733px（真机 1080p 屏幕上底部够不着，live_verify 抓到过）。
+        # v1.30.0：手动修改（左列表 + 右表单，自带滚动）／图像检测（结果树，必须套滚动）
+        self._pg_manual = self._page_scroll(ui_manualedit.ManualEditPage())
         self._pg_insight = self._page_scroll(self._build_insight())
         self._pg_scraper = self._build_scraper()      # 紧凑布局，整页一屏、不套滚动
         self._pg_smart = self._page_scroll(self._build_smart())     # v1.24.0：智能推荐
         self._pg_tagopt = self._page_scroll(self._build_tagopt())   # v1.25.0：标签优化
         self._pg_service = self._page_scroll(self._build_service())
+        self._pg_aiengine = self._page_scroll(self._build_aiengine())  # v1.35.0：AI 引擎设置
         self._pg_dedupe = self._page_scroll(self._build_dedupe())   # v1.23.0：重复检测
+        # v1.31.0（反馈 3）：演员检测自带上下两块 + 内外滚动，**不再套 _page_scroll**
+        # （外面再包一层滚动区会让两个分隔条的高度互相打架）。
+        self._pg_actorcheck = ui_actorcheck.ActorCheckPage()
+        self._pg_imagedetect = self._page_scroll(ui_imagedetect.ImageDetectPage())
         self._pg_data = self._page_scroll(self._build_data())   # v1.13.0：数据 / 日志导出
-        for pg in (self._pg_personal, self._pg_insight, self._pg_scraper, self._pg_smart,
-                   self._pg_tagopt, self._pg_service, self._pg_dedupe, self._pg_data):
+        for pg in (self._pg_personal, self._pg_manual, self._pg_insight, self._pg_scraper,
+                   self._pg_smart, self._pg_tagopt, self._pg_service, self._pg_aiengine,
+                   self._pg_dedupe,
+                   self._pg_actorcheck, self._pg_imagedetect, self._pg_data):
             self.stack.addWidget(pg)
         root.addWidget(self.stack, 1)
 
@@ -850,18 +1265,98 @@ class SettingsDialog(QDialog):
         sc.setWidget(widget)
         return sc
 
+    @staticmethod
+    def _section(text):
+        """导航分组小标题。样式来自 `QLabel#Section`（与主页侧栏的「分类 / 媒体库」同一套）。"""
+        l = QLabel(i18n.tr(text))
+        l.setObjectName("Section")
+        return l
+
+    #: 导航分组（v1.31.0 反馈 4 定的四组）。**键是中文**，因为它是页面的身份
+    #: （`self.sub_btns` 的 key、`ORDER` 的元素、dev 脚本遍历的依据），
+    #: 翻译只发生在**显示**这一层 —— 换语言绝不能改身份，否则 `_show()` 会找不到页。
+    NAV_GROUPS = [
+        ("基础工具", ["个性化设置", "服务管理", "手动修改", "AI引擎设置"]),
+        ("数据优化", ["演员刮削", "智能推荐", "标签优化"]),
+        ("智能检测", ["重复检测", "演员检测", "图像检测"]),
+        ("数据分析", ["画像概览", "数据与日志"]),
+    ]
+
+    def _rebuild_nav_buttons(self, build=False):
+        """(重)建左侧导航按钮。换语言时会再调一次（`build=False`）。
+
+        v1.31.0（反馈 4）：导航按**用途分成四组**，与主页侧栏「分类 + 媒体库」同一套
+        分组写法（`QLabel#Section` 小标题）。10 来个平铺页签已经不好找了，分组后
+        「检测类工具在哪」一眼可见。
+
+        v1.32.0（反馈 3）：按钮文字走 `i18n.tr()`；`self.sub_btns` 的**键仍是中文**，
+        页面映射（`_show`）因此不受语言影响。
+        """
+        old = self.nav_frame.layout()
+        if old is None:
+            old = QVBoxLayout(self.nav_frame)
+        else:
+            # ⚠ 清空布局必须 `setParent(None)` —— 只 `takeAt()` + `deleteLater()`
+            # 不会立刻脱离父对象，旧按钮会在新按钮之前继续显示（v1.31.0 踩过。
+            # 见 skill 第 27.2 节）。
+            while old.count():
+                it = old.takeAt(0)
+                w = it.widget()
+                if w is not None:
+                    w.hide()
+                    w.setParent(None)
+                    w.deleteLater()
+        old.setContentsMargins(8, 12, 8, 10)
+        old.setSpacing(4)
+        self.sub_btns = {}
+        # `ORDER` 保持「扁平、按可见顺序」—— dev/ 下的 live_verify 与 render 脚本
+        # 都按它遍历页面，分组只是显示层的包装。
+        self.ORDER = [k for _g, keys in self.NAV_GROUPS for k in keys]
+        for group, keys in self.NAV_GROUPS:
+            old.addWidget(self._section(group))
+            for key in keys:
+                b = QPushButton(i18n.tr(key))
+                b.setObjectName("Nav")
+                b.setToolTip("%s · %s" % (i18n.tr(key), key))   # 悬停能看回原名，排查方便
+                b.clicked.connect(lambda _c, k=key: self._show(k))
+                old.addWidget(b)
+                self.sub_btns[key] = b
+        old.addStretch(1)
+        if build:
+            self._rebuild_nav_highlight()
+
+    def _rebuild_nav_highlight(self):
+        """把当前页的高亮重新画一遍（换语言重建按钮后必须补这一步）。
+
+        ⚠ 必须容忍 `self.stack` 还不存在 —— 首次 `_build()` 里是**先**建导航
+        （`_rebuild_nav_buttons(build=True)`）**后**建 `self.stack`（页面要按
+        `NAV_GROUPS` 的顺序逐个建，价格不菲，所以放在按钮之后）。这里若直接
+        `_show()` 就会 `AttributeError: no attribute 'stack'`，设置窗**完全打不开**。
+        `_show()` 是换页的**唯一**入口（`_current_key` 的写入点也在它里面），
+        所以这里只做「有能力就补画高亮」，真正的首次 `_show("个性化设置")` 由
+        `_build()` 末尾负责 —— 那时 stack 已经就绪。
+        """
+        if getattr(self, "stack", None) is None:
+            return
+        self._show(getattr(self, "_current_key", None) or self.ORDER[0])
+
     def _show(self, key):
+        self._current_key = key
         for k, b in self.sub_btns.items():
             b.setStyleSheet(
                 "background:rgba(255,255,255,0.12);color:#f7e3b4;" if k == key else "")
         self.stack.setCurrentWidget({
             "个性化设置": self._pg_personal,
+            "手动修改": self._pg_manual,
             "画像概览": self._pg_insight,
             "演员刮削": self._pg_scraper,
             "智能推荐": self._pg_smart,
             "标签优化": self._pg_tagopt,
             "服务管理": self._pg_service,
+            "AI引擎设置": self._pg_aiengine,
             "重复检测": self._pg_dedupe,
+            "演员检测": self._pg_actorcheck,
+            "图像检测": self._pg_imagedetect,
             "数据与日志": self._pg_data,
         }.get(key, self._pg_personal))
         # v1.24.0：画像概览第一次打开时自动分析一次（后续手动点「重新分析」）
@@ -899,7 +1394,24 @@ class SettingsDialog(QDialog):
         af = QFormLayout()
         af.addRow("主题模式", self.ap_mode)
         af.addRow("玻璃浓度", self.ap_level)
+        # v1.32.0（反馈 3）：界面语言（19 种）。下拉里显示**自称**
+        # （`English` / `日本語` / `العربية`）—— 用户认自己的字，不认别人的字母。
+        self.ap_lang = QComboBox()
+        for _code, _native in i18n.lang_names():
+            self.ap_lang.addItem("%s  ·  %s" % (_native, i18n.cn_name(_code)), _code)
+        _cur = self.s.language()
+        _idx = self.ap_lang.findData(_cur)
+        self.ap_lang.setCurrentIndex(_idx if _idx >= 0 else 0)
+        self.ap_lang.setMinimumWidth(240)
+        self.ap_lang.currentIndexChanged.connect(self._apply_language)
+        af.addRow("界面语言", self.ap_lang)
         g0v.addLayout(af)
+        # 语言说明（切到非基准语言时会写明「哪些已译、哪些仍是中文」）
+        self.ap_lang_hint = QLabel("")
+        self.ap_lang_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.ap_lang_hint.setWordWrap(True)
+        g0v.addWidget(self.ap_lang_hint)
+        self._refresh_lang_hint()
         self.ap_hint = QLabel("")
         self.ap_hint.setStyleSheet("color:#a2967f;font-size:11px;")
         self.ap_hint.setWordWrap(True)
@@ -998,8 +1510,7 @@ class SettingsDialog(QDialog):
                     ("show_year", "显示年份"),
                     ("show_quality", "显示分辨率 / 画质"),
                     ("show_actors", "显示演员"),
-                    ("show_directors", "显示导演"),
-                    ("hover_trailer", "悬停时显示预告片（预留）")]
+                    ("show_directors", "显示导演")]
         for key, label in card_map:
             sw = ToggleSwitch(checked=self.s.content_cards.get(key, True))
             sw.toggled.connect(lambda c, k=key: (self.s.content_cards.__setitem__(k, c), self.s.save()))
@@ -1126,6 +1637,45 @@ class SettingsDialog(QDialog):
         if self.on_changed:
             self.on_changed()
         self._refresh_backdrop_hint()
+
+    # ---------- 界面语言（v1.32.0 反馈 3） ----------
+    def _apply_language(self, *_):
+        """换界面语言：落盘 → 换 i18n 当前语言 → 让主窗重建界面。
+
+        ⚠ 两件事必须按这个顺序做，且**只在这里做**：
+        1. 先 `i18n.set_lang()`，再 `on_changed()` —— 主窗重建时会读 `i18n.tr()`，
+           顺序反了就会用旧语言重建一遍、再也没人触发第二次刷新。
+        2. 重建走的是主窗那一个入口（`_apply_settings`）。本项目 v1.27.0 踩过
+           「面板被 deleteLater 时把运行中的 QThread 一起销毁 → 进程 abort」的坑，
+           刷新界面**绝不能**在设置页里自己再写一套重建逻辑。
+        """
+        code = self.ap_lang.currentData() or i18n.DEFAULT_LANG
+        self.s.set_appearance(language=code)
+        i18n.set_lang(code)
+        applog.log("[设置] 界面语言切换为 %s（%s）" % (code, i18n.cn_name(code)))
+        if self.on_changed:
+            self.on_changed()
+        # 设置窗自己也要跟着重建导航（否则左侧还是旧语言的页名）
+        self._rebuild_nav_buttons()
+        self._show(self._current_key)
+        self._refresh_lang_hint()
+
+    def _refresh_lang_hint(self):
+        lb = getattr(self, "ap_lang_hint", None)
+        if lb is None:
+            return
+        code = i18n.get_lang()
+        if code == i18n.BASE_LANG:
+            lb.setText("界面语言：简体中文（基准语言）。切换后立即生效，无需重启。")
+            lb.setStyleSheet("color:#a2967f;font-size:11px;")
+            return
+        note = ("界面语言已切到 %s（%s）。导航与常用动作已本地化；"
+                "算法说明、免责声明等业务细节仍保留中文原文 —— "
+                "本项目界面文案量很大，逐条机器翻译反而会误导。" % (i18n.cn_name(code), code))
+        if i18n.is_rtl(code):
+            note += "　⚠ 该语言从右往左书写，但本软件版面仍是左起 —— 只译文字、未做镜像。"
+        lb.setText(note)
+        lb.setStyleSheet("color:#8c8071;font-size:11px;")
 
     # ---------- 演员刮削 ----------
     def _build_scraper(self):
@@ -1980,39 +2530,15 @@ class SettingsDialog(QDialog):
         self.ai_test.clicked.connect(self._refresh_ai_state)
         g1v.addWidget(self.ai_test, alignment=Qt.AlignLeft)
 
-        # v1.25.0（反馈 1）：默认用本机 Ollama，但**模型可以自己填**。
-        mrow = QHBoxLayout()
-        mrow.setSpacing(8)
-        mrow.addWidget(QLabel("调用模型"))
-        self.ed_ai_model = QLineEdit()
-        self.ed_ai_model.setPlaceholderText("留空 = 自动使用本机第一个模型")
-        self.ed_ai_model.setToolTip(
-            "填 Ollama 里的模型名（就是 `ollama list` 第一列那个名字，带标签）。\n"
-            "例：qwen2.5:7b / llama3.1:8b / qwen3:4b / muse-glimmer:latest")
-        self.ed_ai_model.setText(str(self.s.recommend.get("ai_model") or ""))
-        self.ed_ai_model.editingFinished.connect(self._on_ai_model_edited)
-        mrow.addWidget(self.ed_ai_model, 1)
-        self.btn_ai_models = QPushButton("读取本机模型")
-        self.btn_ai_models.setObjectName("Ghost")
-        self.btn_ai_models.setToolTip("读取本机 Ollama 的模型清单（等价于命令行 `ollama list`）")
-        self.btn_ai_models.clicked.connect(self._load_ai_models)
-        mrow.addWidget(self.btn_ai_models)
-        g1v.addLayout(mrow)
-        self.cb_ai_model = QComboBox()
-        self.cb_ai_model.setToolTip("读取到的本机模型；选一个即自动填入上面的输入框")
-        self.cb_ai_model.addItem("（还没读取 —— 点右边「读取本机模型」）", "")
-        self.cb_ai_model.currentIndexChanged.connect(self._pick_ai_model)
-        g1v.addWidget(self.cb_ai_model)
-        mhint = QLabel(rich(
-            "**怎么填**：先启动 Ollama，然后在命令行执行 `ollama list` 查看已经安装的模型，"
-            "把第一列的完整名字填进上面的输入框即可。\n"
-            "**输入示例**：qwen2.5:7b　/　llama3.1:8b　/　qwen3:4b　/　"
-            "gemma3:12b　/　muse-glimmer:latest　（冒号和标签都要带上）\n"
-            "留空 = 自动使用本机第一个模型；填了但本机没装，会自动降级为内置联想，"
-            "并在下面的检测结果里告诉你本机到底装了哪些。"))
-        mhint.setWordWrap(True)
-        mhint.setStyleSheet("color:#a2967f;font-size:11px;")
-        g1v.addWidget(mhint)
+        # v1.35.0（需求 1）：调用哪个模型、怎样自动拉起 Ollama，统一挪到
+        # 「基础工具 → AI引擎设置」页 —— 这里只留「选哪个算法 + 本地引擎是否可用」，
+        # 跟「重复检测 / 演员检测 / 图像检测」的检测方式分组保持一致。
+        g1_note = QLabel(rich(
+            "AI 智能算法要用到的**本地模型**与**自动拉起 Ollama** 的开关，"
+            "都放在左侧「基础工具 → <b>AI引擎设置</b>」页里统一管理。"))
+        g1_note.setWordWrap(True)
+        g1_note.setStyleSheet("color:#a2967f;font-size:11px;")
+        g1v.addWidget(g1_note)
         v.addWidget(g1)
 
         g2 = QGroupBox("推荐范围与偏好")
@@ -2110,6 +2636,206 @@ class SettingsDialog(QDialog):
         self._refresh_hist_label()
         return page
 
+    # ---------- AI 引擎设置（v1.35.0 需求 1） ----------
+    def _build_aiengine(self):
+        """「基础工具 → AI引擎设置」页：统一管理**调用哪个本地模型**与
+        **自动拉起 Ollama**。
+
+        v1.35.0（需求 1）：原来「调用模型 / 读取本机模型 / 下拉 / 怎么填」这些
+        具体设置堆在「智能推荐」页的「推荐算法」组里，和「重复检测 / 演员检测 /
+        图像检测」那套只放单选 + 状态 + 检测按钮的「检测方式」分组风格不一致。
+        现在「智能推荐」页只留算法单选（同检测方式分组），模型相关全部搬到这里，
+        让 AI 引擎配置有一个集中的去处。
+        """
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(14)
+
+        g1 = QGroupBox("本地 AI 引擎")
+        g1v = QVBoxLayout(g1)
+        hint = QLabel(rich(
+            "AI 智能算法会用到的本地模型（Ollama，127.0.0.1:11434，纯离线、不出网）。\n"
+            "留空 = 自动使用本机第一个已装模型；填了但本机没装则自动降级为内置联想。"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        g1v.addWidget(hint)
+
+        self.ae_state = QLabel("—")
+        self.ae_state.setWordWrap(True)
+        self.ae_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        g1v.addWidget(self.ae_state)
+        self.ae_test = QPushButton("检测本地 AI 引擎")
+        self.ae_test.setObjectName("Ghost")
+        self.ae_test.setToolTip(f"探测 {rec_mod.OLLAMA_HOST} 上是否有可用的 Ollama（纯本地）")
+        self.ae_test.clicked.connect(self._refresh_ae_state)
+        g1v.addWidget(self.ae_test, alignment=Qt.AlignLeft)
+
+        mrow = QHBoxLayout()
+        mrow.setSpacing(8)
+        mrow.addWidget(QLabel("调用模型"))
+        self.ae_ed_model = QLineEdit()
+        self.ae_ed_model.setPlaceholderText("留空 = 自动使用本机第一个模型")
+        self.ae_ed_model.setToolTip(
+            "填 Ollama 里的模型名（就是 `ollama list` 第一列那个名字，带标签）。\n"
+            "例：qwen2.5:7b / llama3.1:8b / qwen3:4b / muse-glimmer:latest")
+        self.ae_ed_model.setText(str(self.s.recommend.get("ai_model") or ""))
+        self.ae_ed_model.editingFinished.connect(self._on_ae_model_edited)
+        mrow.addWidget(self.ae_ed_model, 1)
+        self.ae_btn_models = QPushButton("读取本机模型")
+        self.ae_btn_models.setObjectName("Ghost")
+        self.ae_btn_models.setToolTip("读取本机 Ollama 的模型清单（等价于命令行 `ollama list`）")
+        self.ae_btn_models.clicked.connect(self._load_ae_models)
+        mrow.addWidget(self.ae_btn_models)
+        g1v.addLayout(mrow)
+
+        self.ae_cb_model = QComboBox()
+        self.ae_cb_model.setToolTip("读取到的本机模型；选一个即自动填入上面的输入框")
+        self.ae_cb_model.addItem("（还没读取 —— 点右边「读取本机模型」）", "")
+        self.ae_cb_model.currentIndexChanged.connect(self._pick_ae_model)
+        g1v.addWidget(self.ae_cb_model)
+
+        mhint = QLabel(rich(
+            "**怎么填**：先启动 Ollama，然后在命令行执行 `ollama list` 查看已经安装的模型，"
+            "把第一列的完整名字填进上面的输入框（或点「读取本机模型」后从下拉选）。\n"
+            "**输入示例**：qwen2.5:7b　/　llama3.1:8b　/　qwen3:4b　/　"
+            "gemma3:12b　/　muse-glimmer:latest　（冒号和标签都要带上）。\n"
+            "留空 = 自动使用本机第一个模型；填了但本机没装会自动降级为内置联想。"))
+        mhint.setWordWrap(True)
+        mhint.setStyleSheet("color:#a2967f;font-size:11px;")
+        g1v.addWidget(mhint)
+        v.addWidget(g1)
+
+        g2 = QGroupBox("自动拉起 Ollama")
+        g2v = QVBoxLayout(g2)
+        self.ae_autostart = QCheckBox("开机时自动拉起 Ollama（powershell 执行 `ollama serve`）")
+        self.ae_autostart.setChecked(bool(self.s.recommend.get("auto_start_ollama", False)))
+        self.ae_autostart.setToolTip(
+            "打开（默认关）：软件启动时自动用 powershell 后台拉起本机 Ollama 服务；\n"
+            "仅当本机没运行时才尝试，已运行则不重复拉起；没装 Ollama 时静默跳过。")
+        self.ae_autostart.toggled.connect(self._save_aiengine_prefs)
+        g2v.addWidget(self.ae_autostart)
+
+        self.ae_launch = QPushButton("立即启动")
+        self.ae_launch.setObjectName("Primary")
+        self.ae_launch.setToolTip("现在就用 powershell 拉起本机 Ollama（= `ollama serve`）")
+        self.ae_launch.clicked.connect(self._launch_ollama)
+        g2v.addWidget(self.ae_launch, alignment=Qt.AlignLeft)
+
+        self.ae_launch_state = QLabel("—")
+        self.ae_launch_state.setWordWrap(True)
+        self.ae_launch_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        g2v.addWidget(self.ae_launch_state)
+        v.addWidget(g2)
+
+        v.addStretch(1)
+        QTimer.singleShot(0, self._refresh_ae_state)
+        return page
+
+    def _refresh_ae_state(self):
+        """探测本机 Ollama，结果写进 AI引擎设置页的 ae_state（同 _refresh_ai_state 口径）。"""
+        w = getattr(self, "_ae_probe_worker", None)
+        if w is not None and w.isRunning():
+            return
+        self.ae_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.ae_state.setText(
+            f"正在检测本地 AI 引擎…　探测 {rec_mod.OLLAMA_HOST}（最多等 1 秒）")
+        self.ae_test.setEnabled(False)
+        self.ae_test.setText("检测中…")
+        self._ae_probe_worker = AiProbeWorker()
+        self._ae_probe_worker.done.connect(self._on_ae_probe)
+        self._ae_probe_worker.start()
+
+    def _on_ae_probe(self, st):
+        self.ae_test.setEnabled(True)
+        self.ae_test.setText("检测本地 AI 引擎")
+        st = st or {}
+        eng = st.get("engine")
+        ts = QTime.currentTime().toString("HH:mm:ss")
+        if eng == "ollama":
+            head = f"✅ 检测完成（{ts}）—— 引擎：<b>{html_esc(st.get('label'))}</b>"
+            color = "#9ecf8a"
+        elif eng == "error":
+            head = f"❌ 检测失败（{ts}）—— 引擎：<b>未知</b>"
+            color = "#e08a7a"
+        else:
+            head = f"⚠ 检测完成（{ts}）—— 未检测到本地 Ollama，当前引擎：<b>" \
+                   f"{html_esc(st.get('label'))}</b>"
+            color = "#e8d27a"
+        self.ae_state.setStyleSheet(f"color:{color};font-size:11px;")
+        self.ae_state.setText(f"{head}<br>{html_esc(st.get('detail'))}")
+        applog.log(f"[AI 引擎设置·检测] engine={eng} at {ts}")
+
+    def _save_aiengine_prefs(self, *_):
+        self.s.set_recommend(
+            ai_model=self.ae_ed_model.text().strip() if getattr(self, "ae_ed_model", None) else "",
+            auto_start_ollama=bool(getattr(self, "ae_autostart", None)
+                                   and self.ae_autostart.isChecked()))
+
+    def _on_ae_model_edited(self):
+        """模型输入框改完（回车 / 失焦）：落盘 + 重新检测，让页面结论立刻反映新模型。"""
+        self._save_aiengine_prefs()
+        self._refresh_ae_state()
+
+    def _load_ae_models(self):
+        w = getattr(self, "_ae_models_worker", None)
+        if w is not None and w.isRunning():
+            return
+        self.ae_btn_models.setEnabled(False)
+        self.ae_btn_models.setText("读取中…")
+        self._ae_models_worker = AiModelsWorker()
+        self._ae_models_worker.done.connect(self._on_ae_models)
+        self._ae_models_worker.start()
+
+    def _on_ae_models(self, names):
+        self.ae_btn_models.setEnabled(True)
+        self.ae_btn_models.setText("读取本机模型")
+        names = [str(x) for x in (names or []) if x]
+        self.ae_cb_model.blockSignals(True)
+        self.ae_cb_model.clear()
+        if not names:
+            self.ae_cb_model.addItem("（没读到模型：Ollama 没启动，或还没 pull 过任何模型）", "")
+        else:
+            self.ae_cb_model.addItem(f"本机已装 {len(names)} 个模型（点选即填入）", "")
+            for nm in names:
+                self.ae_cb_model.addItem(nm, nm)
+        self.ae_cb_model.setCurrentIndex(0)
+        self.ae_cb_model.blockSignals(False)
+        self._refresh_ae_state()
+
+    def _pick_ae_model(self, idx):
+        nm = self.ae_cb_model.itemData(idx) if idx is not None and idx >= 0 else None
+        if not nm:
+            return
+        self.ae_ed_model.setText(str(nm))
+        self._on_ae_model_edited()
+
+    def _launch_ollama(self):
+        """立即用 powershell 拉起本机 Ollama（按钮触发）。"""
+        w = getattr(self, "_ae_launch_worker", None)
+        if w is not None and w.isRunning():
+            return
+        self.ae_launch.setEnabled(False)
+        self.ae_launch.setText("拉起中…")
+        self.ae_launch_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.ae_launch_state.setText("正在用 powershell 拉起 Ollama 服务…（最多等 20 秒）")
+        self._ae_launch_worker = OllamaLaunchWorker()
+        self._ae_launch_worker.done.connect(self._on_ollama_launch)
+        self._ae_launch_worker.start()
+
+    def _on_ollama_launch(self, ok, msg):
+        self.ae_launch.setEnabled(True)
+        self.ae_launch.setText("立即启动")
+        color = "#9ecf8a" if ok else "#e8b76a"
+        self.ae_launch_state.setStyleSheet(f"color:{color};font-size:11px;")
+        self.ae_launch_state.setText(("✅ " if ok else "⚠ ") + msg)
+        applog.log(f"[AI 引擎设置·拉起] ok={ok} {msg}")
+        # 拉起成功后自动读取本机模型，把下拉填满
+        if ok:
+            self._load_ae_models()
+        else:
+            self._refresh_ae_state()
+
     def _refresh_ai_state(self):
         """探测本机 Ollama（v1.24.1 反馈 2）。
 
@@ -2177,44 +2903,7 @@ class SettingsDialog(QDialog):
         self.s.set_recommend(**kw)
         self._refresh_hist_label()
 
-    # ---------- v1.25.0（反馈 1）：模型选择 ----------
-    def _on_ai_model_edited(self):
-        """输入框改完（回车 / 失焦）：落盘 + 重新检测，让下面的结论立刻反映新模型。"""
-        self._save_smart_prefs()
-        self._refresh_ai_state()
-
-    def _load_ai_models(self):
-        w = getattr(self, "_ai_models_worker", None)
-        if w is not None and w.isRunning():
-            return
-        self.btn_ai_models.setEnabled(False)
-        self.btn_ai_models.setText("读取中…")
-        self._ai_models_worker = AiModelsWorker()
-        self._ai_models_worker.done.connect(self._on_ai_models)
-        self._ai_models_worker.start()
-
-    def _on_ai_models(self, names):
-        self.btn_ai_models.setEnabled(True)
-        self.btn_ai_models.setText("读取本机模型")
-        names = [str(x) for x in (names or []) if x]
-        self.cb_ai_model.blockSignals(True)
-        self.cb_ai_model.clear()
-        if not names:
-            self.cb_ai_model.addItem("（没读到模型：Ollama 没启动，或还没 pull 过任何模型）", "")
-        else:
-            self.cb_ai_model.addItem(f"本机已装 {len(names)} 个模型（点选即填入）", "")
-            for nm in names:
-                self.cb_ai_model.addItem(nm, nm)
-        self.cb_ai_model.setCurrentIndex(0)
-        self.cb_ai_model.blockSignals(False)
-        self._refresh_ai_state()
-
-    def _pick_ai_model(self, idx):
-        nm = self.cb_ai_model.itemData(idx) if idx is not None and idx >= 0 else None
-        if not nm:
-            return
-        self.ed_ai_model.setText(str(nm))
-        self._on_ai_model_edited()
+    # ---------- v1.35.0（需求 1）：模型选择已移至「AI引擎设置」页（_build_aiengine） ----------
 
     # ---------- v1.25.0（反馈 3）：推荐历史 ----------
     def _refresh_hist_label(self):
@@ -2275,6 +2964,46 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#a2967f;font-size:11px;")
         g1v.addWidget(hint)
+
+        # ---- v1.32.0（反馈 1）：算法模式（与「演员检测 / 标签优化」同一套写法）
+        alg = QGroupBox("检测方式")
+        algv = QVBoxLayout(alg)
+        algv.setContentsMargins(10, 8, 10, 8)
+        algv.setSpacing(6)
+        arow = QWidget()
+        arh = QHBoxLayout(arow)
+        arh.setContentsMargins(0, 0, 0, 0)
+        arh.setSpacing(14)
+        self.dd_rb_normal = QRadioButton("普通算法（本地规则，秒出结果）")
+        self.dd_rb_ai = QRadioButton("AI 算法（本地离线 AI 复核，较慢）")
+        self.dd_rb_normal.setChecked(True)
+        for rb in (self.dd_rb_normal, self.dd_rb_ai):
+            arh.addWidget(rb)
+        self.dd_fast = QCheckBox("极速模式：只复核普通算法拿不准的组")
+        self.dd_fast.setChecked(True)
+        self.dd_fast.setToolTip(
+            "打开（默认）：置信度「高 / 极高」且各份体积时长一致的组直接采纳普通算法结论，"
+            "只把有疑点的送去 AI —— 真机上能把复核量压掉大半。\n"
+            "关闭：全部重复组都让 AI 过一遍（结论更全，但可能要等几分钟）。")
+        arh.addWidget(self.dd_fast)
+        self.dd_ai_btn = QPushButton("检测本地 AI 引擎")
+        self.dd_ai_btn.setObjectName("Ghost")
+        self.dd_ai_btn.setCursor(Qt.PointingHandCursor)
+        self.dd_ai_btn.clicked.connect(lambda: self._probe_detect_ai(self.dd_ai_lbl))
+        arh.addWidget(self.dd_ai_btn)
+        arh.addStretch(1)
+        algv.addWidget(arow)
+        self.dd_ai_lbl = QLabel("选「AI 算法」时会自动探测本机 Ollama；"
+                                "用哪个模型跟「基础工具 → AI引擎设置」页共用同一项设置。")
+        self.dd_ai_lbl.setWordWrap(True)
+        self.dd_ai_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        algv.addWidget(self.dd_ai_lbl)
+        self.dd_rb_ai.toggled.connect(
+            lambda on: on and self._probe_detect_ai(self.dd_ai_lbl))
+        self.dd_rb_normal.toggled.connect(self._save_dedupe_prefs)
+        self.dd_rb_ai.toggled.connect(self._save_dedupe_prefs)
+        self.dd_fast.toggled.connect(self._save_dedupe_prefs)
+        g1v.addWidget(alg)
 
         opt = QHBoxLayout()
         opt.setSpacing(8)
@@ -2350,25 +3079,59 @@ class SettingsDialog(QDialog):
         tip7.setWordWrap(True)
         g2v.addWidget(tip7)
 
-        ex = QHBoxLayout()
-        self.dd_exp_csv = QPushButton("导出 CSV")
-        self.dd_exp_csv.setObjectName("Ghost")
-        self.dd_exp_csv.clicked.connect(lambda: self._export_dedupe("csv"))
-        self.dd_exp_json = QPushButton("导出 JSON")
-        self.dd_exp_json.setObjectName("Ghost")
-        self.dd_exp_json.clicked.connect(lambda: self._export_dedupe("json"))
-        ex.addWidget(self.dd_exp_csv)
-        ex.addWidget(self.dd_exp_json)
-        ex.addStretch(1)
-        g2v.addLayout(ex)
+        # v1.33.0（反馈 1）：结果文件导入 / 导出 —— 全库跑一次要 70 多秒，
+        # 当天没处理完的导出来，第二天导入接着处理，不必重新扫描。
+        # v1.33.1（反馈 2）：取消「导出 CSV」「导出 JSON」两枚按钮 ——
+        # 与「导出结果文件…」功能重叠且格式对用户无意义，只留可回灌的结果文件。
+        ex2 = QHBoxLayout()
+        self.dd_exp_result = QPushButton("导出结果文件…")
+        self.dd_exp_result.setObjectName("Ghost")
+        self.dd_exp_result.setToolTip("把本次检测结果存成一个 JSON，下次可导入继续处理（不必重新扫描）")
+        self.dd_exp_result.clicked.connect(self._export_dedupe_result)
+        self.dd_imp_result = QPushButton("导入结果文件…")
+        self.dd_imp_result.setObjectName("Ghost")
+        self.dd_imp_result.setToolTip("导入上次导出的检测结果，直接查看/导出/继续 AI 复核，无需重新扫描")
+        self.dd_imp_result.clicked.connect(self._import_dedupe_result)
+        ex2.addWidget(self.dd_exp_result)
+        ex2.addWidget(self.dd_imp_result)
+        ex2.addStretch(1)
+        g2v.addLayout(ex2)
         v.addWidget(g2)
 
         v.addStretch(1)
         return page
 
+    def _dedupe_algo(self):
+        """当前选的算法：`"ai"` / `"normal"`。"""
+        return "ai" if getattr(self, "dd_rb_ai", None) is not None \
+            and self.dd_rb_ai.isChecked() else "normal"
+
+    def _probe_detect_ai(self, label):
+        """探测本机 Ollama 并把结论写进 `label`（三个检测页共用一个实现）。
+
+        走 `aireview.ai_available()` 而不是自己再写一遍探测 —— 四个检测页必须
+        **口径完全一致**，否则会出现「演员检测说可用、图像检测说不可用」这种怪事。
+        """
+        try:
+            import aireview as ar
+            ok, note = ar.ai_available(self.s.ai_model() if hasattr(self.s, "ai_model") else "")
+        except Exception as e:
+            label.setText("探测失败：%s" % e)
+            label.setStyleSheet("color:#e8b76a;font-size:11px;")
+            return
+        if ok:
+            label.setText("✓ " + note)
+            label.setStyleSheet("color:#8fd18f;font-size:11px;")
+        else:
+            label.setText("✗ " + note)
+            label.setStyleSheet("color:#e8b76a;font-size:11px;")
+
     def _save_dedupe_prefs(self, *_):
         self.s.set_dedupe_prefs(exclude_multipart=self.dd_excl.isChecked(),
-                               min_confidence=self.dd_conf.currentText())
+                               min_confidence=self.dd_conf.currentText(),
+                               algo=self._dedupe_algo(),
+                               fast=bool(getattr(self, "dd_fast", None) is not None
+                                         and self.dd_fast.isChecked()))
 
     def _run_dedupe(self):
         if getattr(self, "_dd_worker", None) is not None and self._dd_worker.isRunning():
@@ -2379,15 +3142,27 @@ class SettingsDialog(QDialog):
         # v1.24.0（反馈 1）：**重检前先清空上次结果**（表格 / 树 / 汇总 / 导出用的报告），
         # 否则用户会看到「已经删掉的片子还在结果里」的旧数据。
         self._clear_dedupe_result()
+        algo = self._dedupe_algo()
         self.dd_run.setEnabled(False)
         self.dd_bar.setRange(0, 0)                 # 忙碌态
         self.dd_status.setText("正在读取作品元数据…")
         self._dd_worker = DedupeWorker(lib, self.dd_conf.currentText(),
                                        exclude_multipart=self.dd_excl.isChecked(),
-                                       verify_exists=self.dd_verify.isChecked())
+                                       verify_exists=self.dd_verify.isChecked(),
+                                       algo=algo,
+                                       model=self._ai_model_name(),
+                                       fast=bool(getattr(self, "dd_fast", None) is None
+                                                 or self.dd_fast.isChecked()))
         self._dd_worker.progress.connect(self._on_dedupe_progress)
         self._dd_worker.done.connect(self._on_dedupe_done)
         self._dd_worker.start()
+
+    def _ai_model_name(self):
+        """本地 AI 用哪个模型 —— 与「智能推荐」页共用配置，绝不各存一份。"""
+        try:
+            return str(self.s.smart.get("ai_model") or "")
+        except Exception:
+            return ""
 
     def _clear_dedupe_result(self):
         self._dd_report = None
@@ -2434,70 +3209,117 @@ class SettingsDialog(QDialog):
         s = report.summary()
         self.dd_bar.setValue(100)
         gone = f"，其中 {report.missing} 部在磁盘上已不存在、未参与比对" if report.missing else ""
+        # v1.32.0（反馈 1）：把「用了哪个算法、AI 复核了多少条」如实写出来。
+        # 选 AI 但引擎不可用时**必须**让用户看见降级原因，否则会以为 AI 跑过了。
+        algo_note = ""
+        if report.algo == "ai":
+            ai = report.ai or {}
+            if ai.get("ai"):
+                algo_note = (f" · AI 复核 {s['ai_done']} 组"
+                             + (f"（{s['ai_skipped']} 组按极速模式跳过）"
+                                if s["ai_skipped"] else "")
+                             + (f" · {s['ai_failed']} 组复核失败" if s["ai_failed"] else ""))
+            else:
+                algo_note = " · AI 不可用，已按普通算法给出结果"
         self.dd_status.setText(
-            f"检测完成：核对 {s['scanned']} 部作品{gone}，耗时 {s['elapsed']} 秒。")
+            f"检测完成（{'AI 算法' if report.algo == 'ai' else '普通算法'}）："
+            f"核对 {s['scanned']} 部作品{gone}，耗时 {s['elapsed']} 秒。{algo_note}")
         mp = (f"同目录分片（已排除）{s['multipart_groups']} 组"
               if s.get("multipart_excluded", True)
               else "同目录分片（未排除，已并入上方结果）")
         self.dd_summary.setText(
             f"重复组 <b>{s['dup_groups']}</b> 组 · 涉及 {s['dup_movies']} 部 · "
-            f"冗余 {s['redundant_copies']} 份 · 可回收 <b>{s['redundant_text']}</b> · {mp}")
+            f"冗余 {s['redundant_copies']} 份 · 可回收 <b>{s['redundant_text']}</b> · {mp}"
+            + (f"<br><span style='color:#8c8071;'>AI 复核：{s['ai_note']}</span>"
+               if report.algo == "ai" and s.get("ai_note") else ""))
         self._fill_dedupe_tree(report)
         self.dd_tree.resizeColumnToContents(0)
         applog.log(f"[重复检测] 完成：{s['dup_groups']} 组重复，可回收 {s['redundant_text']}，"
-                   f"已失效副本 {report.missing}")
+                   f"已失效副本 {report.missing}，算法 {report.algo}")
 
     def _fill_dedupe_tree(self, report):
-        """把重复组填进树：分组行可展开看每个副本的完整路径（v1.24.0 反馈 7）。"""
+        """把重复组填进树：分组行可展开看每个副本的完整路径（v1.24.0 反馈 7）。
+
+        v1.32.0（反馈 1）：表头改为从 `self.dd_tree.headerItem().setText()` 动态设置 ——
+        只在选了 AI 算法时才追加「AI 建议」列，普通算法下不多出一列空白。
+        """
+        show_ai = (report.algo == "ai")
+        heads = (["标识 / 文件", "依据", "置信度", "AI 建议", "体积", "时长", "目录"]
+                 if show_ai else ["标识 / 文件", "依据", "置信度", "体积", "时长", "目录"])
+        self.dd_tree.setColumnCount(len(heads))
+        self.dd_tree.setHeaderLabels(heads)
+        # 列号随表头长度变，先算出来，下面所有 setForeground / setToolTip 都用它
+        C_AI = 3 if show_ai else -1
+        C_SIZE = 4 if show_ai else 3
+        C_DUR = 5 if show_ai else 4
+        C_DIR = 6 if show_ai else 5
         self.dd_tree.clear()
+
+        def _ai_cells(g):
+            """一组重复的 AI 建议两个格子（组行 / 成员行）。"""
+            if not show_ai:
+                return []
+            a = g.ai or {}
+            if not a:
+                return ["—"]
+            return ["%s（%s）" % (a.get("advice") or "", a.get("confidence") or "")]
+
         for g in report.groups:
-            top = QTreeWidgetItem([
-                f"{g.label}   （{g.copies} 份，冗余 {g.redundant_copies}）",
-                "番号" if g.kind == "num" else "标题+年份",
-                g.confidence,
-                g.total_text,
-                "",
-                " | ".join(g.folders)])
-            top.setToolTip(5, "\n".join(g.folders))
-            top.setToolTip(0, f"{g.note or ''}\n可回收 {g.redundant_text}")
+            row = [f"{g.label}   （{g.copies} 份，冗余 {g.redundant_copies}）",
+                   "番号" if g.kind == "num" else "标题+年份",
+                   g.confidence] + _ai_cells(g) + \
+                  [g.total_text, "", " | ".join(g.folders)]
+            top = QTreeWidgetItem(row)
+            top.setToolTip(C_DIR, "\n".join(g.folders))
+            ai_tip = ""
+            if show_ai and g.ai:
+                ai_tip = "\nAI 建议：%s（%s）%s" % (g.ai.get("advice") or "",
+                                                  g.ai.get("confidence") or "",
+                                                  ("　" + (g.ai.get("reason") or ""))
+                                                  if g.ai.get("reason") else "")
+            top.setToolTip(0, f"{g.note or ''}\n可回收 {g.redundant_text}{ai_tip}")
             if g.redundant_bytes:
                 top.setForeground(0, QBrush(QColor("#f0c674")))
+            if show_ai and g.ai:
+                top.setForeground(C_AI, QBrush(QColor(
+                    "#8fd18f" if (g.ai.get("advice") or "") == "全部保留" else "#f0c674")))
             # 分组行双击 → 打开它最大的那一份（体积最大的留、其余是冗余）
             if g.members:
                 top.setData(0, Qt.UserRole, g.members[0].path)
             for m in g.members:
-                child = QTreeWidgetItem([
-                    (m.original_filename or m.path),
-                    "保留（最大）" if m is g.members[0] else "冗余副本",
-                    m.num or "",
-                    m.size_text,
-                    m.duration_text,
-                    m.folder])
+                cells = [(m.original_filename or m.path),
+                         "保留（最大）" if m is g.members[0] else "冗余副本",
+                         m.num or ""] + ([""] if show_ai else []) + \
+                        [m.size_text, m.duration_text, m.folder]
+                child = QTreeWidgetItem(cells)
                 child.setData(0, Qt.UserRole, m.path)
                 child.setToolTip(0, m.path)
-                child.setToolTip(5, m.folder)
+                child.setToolTip(C_DIR, m.folder)
                 if m is not g.members[0]:
                     child.setForeground(1, QBrush(QColor("#e2685a")))
                 top.addChild(child)
             self.dd_tree.addTopLevelItem(top)
         if report.multipart:
-            head = QTreeWidgetItem([f"同目录分片（{len(report.multipart)} 组，未计入重复）",
-                                    "", "", "", "", ""])
+            head = QTreeWidgetItem([f"同目录分片（{len(report.multipart)} 组，未计入重复）"]
+                                   + [""] * (len(heads) - 1))
             head.setForeground(0, QBrush(QColor("#8c8071")))
             for g in report.multipart:
-                it = QTreeWidgetItem([g.label, "同目录多份", g.confidence,
-                                      g.total_text, "",
-                                      " | ".join(g.folders)])
+                it = QTreeWidgetItem([g.label, "同目录多份", g.confidence]
+                                     + ([""] if show_ai else [])
+                                     + [g.total_text, "", " | ".join(g.folders)])
                 for m in g.members:
                     ch = QTreeWidgetItem([m.original_filename or m.path, "分片",
-                                          m.num or "", m.size_text, m.duration_text,
-                                          m.folder])
+                                          m.num or ""]
+                                         + ([""] if show_ai else [])
+                                         + [m.size_text, m.duration_text, m.folder])
                     ch.setData(0, Qt.UserRole, m.path)
                     it.addChild(ch)
                 head.addChild(it)
             self.dd_tree.addTopLevelItem(head)
         self.dd_tree.expandToDepth(0)
 
+    # ---- v1.33.0（反馈 1）：结果文件导出 / 导入 ----
+    # v1.33.1（反馈 2）：入口按钮已取消，保留此方法供脚本 / 冒烟调用，不再挂 UI。
     def _export_dedupe(self, fmt):
         rep = getattr(self, "_dd_report", None)
         if rep is None:
@@ -2514,6 +3336,50 @@ class SettingsDialog(QDialog):
             applog.log(f"[重复检测] 已导出清单：{p}")
         except Exception as e:
             QMessageBox.warning(self, "导出失败", str(e))
+
+    def _export_dedupe_result(self):
+        """把本次检测结果存成可再次导入的结果文件。"""
+        rep = getattr(self, "_dd_report", None)
+        if rep is None:
+            QMessageBox.information(self, "提示", "请先执行一次检测（或先导入上次的结果）。")
+            return
+        default = "重复检测结果.json"
+        path, _sel = QFileDialog.getSaveFileName(self, "导出检测结果", default, "结果文件 (*.json)")
+        if not path:
+            return
+        try:
+            p = dup_mod.export_json(rep, path)
+            QMessageBox.information(
+                self, "完成",
+                f"已导出：\n{p}\n\n下次用「导入结果文件…」载入本文件，即可接着处理"
+                f"（本页现有 {len(rep.groups)} 组重复 + {len(rep.multipart)} 组同目录分片）。")
+            applog.log(f"[重复检测] 已导出结果文件：{p}")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", str(e))
+
+    def _import_dedupe_result(self):
+        """导入上次导出的结果文件 → 直接渲染结果树（不必重新扫描）。"""
+        path, _sel = QFileDialog.getOpenFileName(self, "导入检测结果", "",
+                                                 "结果文件 (*.json);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            rep = dup_mod.import_json(path)
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"{e}\n\n请确认选的是本页「导出结果文件…」"
+                                                  f"产出的文件。")
+            applog.log(f"[重复检测] 导入结果失败：{e}", "error")
+            return
+        # 复用正常检测完成的渲染路径 —— 树、汇总、导出、后续 AI 复核全都一致。
+        self._on_dedupe_done(rep)
+        self.dd_status.setText(self.dd_status.text()
+                               + f"　（本结果是**导入**的：{os.path.basename(path)}，"
+                                 f"生成于 {rep.generated_at or '未知时间'}）")
+        applog.log(f"[重复检测] 已导入结果文件：{path}（{len(rep.groups)} 组重复）")
+        QMessageBox.information(
+            self, "导入完成",
+            f"已载入 {len(rep.groups)} 组重复、{len(rep.multipart)} 组同目录分片。\n"
+            f"可以直接「导出结果文件…」留档，或切到「AI 算法」对这些结果做复核。")
 
     # ---------- 数据与日志（v1.13.0 新增） ----------
     def _build_data(self):
@@ -3045,11 +3911,20 @@ class SettingsDialog(QDialog):
          else self.rb_to_normal).setChecked(True)
         g2v.addWidget(self.rb_to_normal)
         g2v.addWidget(self.rb_to_ai)
-        self.to_ai_state = QLabel("点上面的「AI 智能算法」会检测本机 Ollama 是否可用；"
+        self.to_ai_state = QLabel("「AI 智能算法」会调用本地离线 AI（Ollama）；"
+                                  "点下面的按钮可手动检测本机是否可用，"
                                   "用哪个模型跟「智能推荐」页共用同一项设置。")
         self.to_ai_state.setWordWrap(True)
         self.to_ai_state.setStyleSheet("color:#8c8071;font-size:11px;")
         g2v.addWidget(self.to_ai_state)
+
+        # v1.34.3（反馈 2）：显式「检测本地 AI 引擎」按钮 —— 与其它检测页一致。
+        # 原先只在切到「AI 智能算法」时自动探测，用户想主动重测却没有入口。
+        self.to_ai_btn = QPushButton("检测本地 AI 引擎")
+        self.to_ai_btn.setObjectName("Ghost")
+        self.to_ai_btn.setCursor(Qt.PointingHandCursor)
+        self.to_ai_btn.clicked.connect(self._start_tagopt_ai_probe)
+        g2v.addWidget(self.to_ai_btn)
 
         self.ck_to_trans = QCheckBox("日语标签转中文（例：中出し → 中出）")
         self.ck_to_over = QCheckBox("用中文覆盖原日语标签（不勾 = 保留原日语，另补一条中文）")
@@ -3066,6 +3941,9 @@ class SettingsDialog(QDialog):
         # ---------- 预览与执行 ----------
         g3 = QGroupBox("预览与执行（先预览，确认后才写盘）")
         g3v = QVBoxLayout(g3)
+        # v1.33.1（反馈 1）：五枚按钮**同排水平对齐** —— 原先「导出/导入结果文件…」
+        # 单独占一行，与「扫描并预览」错位，视觉上像从属关系；合并成一行后
+        # 主操作在前、结果文件操作在后，中间用竖线分隔表达分组。
         arow = QHBoxLayout()
         arow.setSpacing(8)
         self.btn_to_scan = QPushButton("扫描并预览")
@@ -3083,6 +3961,25 @@ class SettingsDialog(QDialog):
         self.btn_to_clear.setObjectName("Ghost")
         self.btn_to_clear.clicked.connect(self._tagopt_clear)
         arow.addWidget(self.btn_to_clear)
+        # 结果文件导入 / 导出 —— 扫全库 nfo 要逐个读盘（还可能跑 AI），
+        # 当天没写完的导出来，第二天导入后**直接点「执行写入」**，不必重新扫。
+        sep_to = QFrame()
+        sep_to.setObjectName("VRule")
+        sep_to.setFixedWidth(1)
+        sep_to.setFixedHeight(18)
+        arow.addSpacing(6)
+        arow.addWidget(sep_to)
+        arow.addSpacing(6)
+        self.btn_to_exp = QPushButton("导出结果文件…")
+        self.btn_to_exp.setObjectName("Ghost")
+        self.btn_to_exp.setToolTip("把当前预览的改动清单存成一个 JSON，下次可导入后直接写入")
+        self.btn_to_exp.clicked.connect(self._tagopt_export_result)
+        arow.addWidget(self.btn_to_exp)
+        self.btn_to_imp = QPushButton("导入结果文件…")
+        self.btn_to_imp.setObjectName("Ghost")
+        self.btn_to_imp.setToolTip("导入上次导出的改动清单，填回预览表格后可直接执行写入")
+        self.btn_to_imp.clicked.connect(self._tagopt_import_result)
+        arow.addWidget(self.btn_to_imp)
         arow.addStretch(1)
         g3v.addLayout(arow)
 
@@ -3221,6 +4118,14 @@ class SettingsDialog(QDialog):
             self.to_ai_state.setText("当前用普通智能算法：纯本地规则 + 全库标签共现，"
                                      "完全不依赖 AI，速度最快。")
             return
+        self._start_tagopt_ai_probe()
+
+    def _start_tagopt_ai_probe(self):
+        """v1.34.3（反馈 2）：标签优化页显式触发本地 AI 引擎探测，收口复用 _on_to_ai_probe。
+
+        抽出成独立方法后，「AI 智能算法」单选切换 与 新增的「检测本地 AI 引擎」按钮
+        共用同一套忙碌态 + 探测逻辑，避免两处各写一遍导致行为漂移。
+        """
         w = getattr(self, "_to_ai_worker", None)
         if w is not None and w.isRunning():
             return
@@ -3255,6 +4160,55 @@ class SettingsDialog(QDialog):
         self.to_progress.setValue(0)
         self.to_status.setStyleSheet("color:#8c8071;font-size:11px;")
         self.to_status.setText("已清空预览。")
+
+    # ---- v1.33.0（反馈 1）：结果文件导出 / 导入 ----
+    def _tagopt_export_result(self):
+        """把当前预览的改动清单存成可再次导入的结果文件。"""
+        plans = list(getattr(self, "_to_plans", None) or [])
+        if not plans:
+            QMessageBox.information(self, "提示", "还没有扫描结果，先点「扫描并预览」。")
+            return
+        default = "标签优化结果.json"
+        path, _sel = QFileDialog.getSaveFileName(self, "导出扫描结果", default, "结果文件 (*.json)")
+        if not path:
+            return
+        try:
+            p = tagopt_mod.export_json(plans, path)
+            changed = len(getattr(self, "_to_changed", None) or [])
+            QMessageBox.information(
+                self, "完成",
+                f"已导出：\n{p}\n\n共 {len(plans)} 条扫描记录（其中 {changed} 条会改动）。"
+                f"\n下次用「导入结果文件…」载入，即可直接点「执行写入」。")
+            applog.log(f"[标签优化] 已导出结果文件：{p}（{len(plans)} 条）")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", str(e))
+
+    def _tagopt_import_result(self):
+        """导入上次导出的扫描结果 → 填回预览表格，「执行写入」立即可用。"""
+        path, _sel = QFileDialog.getOpenFileName(self, "导入扫描结果", "",
+                                                 "结果文件 (*.json);;所有文件 (*)")
+        if not path:
+            return
+        try:
+            plans = tagopt_mod.import_json(path)
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"{e}\n\n请确认选的是本页「导出结果文件…」"
+                                                  f"产出的文件。")
+            applog.log(f"[标签优化] 导入结果失败：{e}", "error")
+            return
+        changed = [p for p in plans if not p.get("error")
+                   and list(p.get("before") or []) != list(p.get("after") or [])]
+        self._to_plans = plans
+        self._to_changed = changed
+        self._fill_to_table(changed)
+        self.btn_to_run.setEnabled(bool(changed))
+        self.to_progress.setValue(0)
+        self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.to_status.setText(
+            "已导入 %s：%d 条扫描记录、其中 %d 条标签会变化。"
+            "确认无误后点「执行写入」即可（**无需重新扫描**）。"
+            % (os.path.basename(path), len(plans), len(changed)))
+        applog.log(f"[标签优化] 已导入结果文件：{path}（{len(plans)} 条 / 改动 {len(changed)}）")
 
     def _on_to_progress(self, i, n, msg):
         if n and n > 0:

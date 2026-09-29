@@ -47,6 +47,18 @@ _LEGACY_BUILTIN_LIBS = {
 # 媒体库「类型」候选项（仅作标签，扫描时按目录里实际的 nfo 判定电影/剧集）
 LIBRARY_KINDS = ["电影", "剧集", "动画", "混合"]
 
+# ---------- 数值输入框（QSpinBox / QDoubleSpinBox）的宽度口径（v1.34.1） ----------
+# 背景（用户反馈「数值和上下 UI 重叠」的根因）：
+#   style.qss 给 SpinBox 设了 `padding: 5px 10px`，内容区左右各被吃掉 10px；
+#   再叠加「0.5 ~ 10.0」+ 1 位小数 + 上下箭头，Qt 自己算出的
+#   `minimumSizeHint().width()` 在本机（Microsoft YaHei UI 9 / DPI 96）是 **131px**。
+#   而代码里原来写死了 setFixedWidth(72)（引导行权重）与 setFixedWidth(88/96)
+#   （自动填充 前 N / 权重）—— 比最小需求少 35~59px，Qt 只能把数字与箭头
+#   强行挤在一格里 → **数字贴边、右侧箭头被裁**，视觉上就是「与上下重叠」。
+# 结论：**任何装数值的 SpinBox 都不许写小于 SPIN_MIN_W 的固定宽**。
+SPIN_MIN_W = 131      # = Qt 实测 minimumSizeHint 宽度，放行给足
+SPIN_MAX_W = 160      # 上限：字体/DPI 变大时允许长一点，但不撑爆窄面板
+
 DEFAULT_HOME_MODULES = {
     "recent": True,       # 首页「最近添加」快捷筛选
     "favorites": True,    # 首页「我的收藏」快捷筛选
@@ -59,7 +71,9 @@ DEFAULT_CONTENT_CARDS = {
     "show_quality": True,    # 内容卡片显示分辨率/画质
     "show_actors": True,     # 内容卡片显示演员小字（v1.11.1 需求）
     "show_directors": True,  # 内容卡片显示导演小字（v1.11.1 需求）
-    "hover_trailer": False,  # 悬停时显示预告片(预留)
+    # v1.33.0（反馈 3）：删除「悬停时显示预告片（预留）」—— 该功能从未实现，
+    # 留个永远无效果的开关只会误导用户。老配置里的 hover_trailer 键会被
+    # Settings.load() 忽略（不在白名单的键直接丢弃），无需迁移。
 }
 
 # 首页表格可选列：(key, 标签) —— 参考 tinyMediaManager 的「选中可见栏」
@@ -123,11 +137,28 @@ DEFAULT_RECOMMEND = {
     "diversity": 0.5,          # 多样性（MMR λ 的反面：越大越多样）
     # v1.25.0（反馈 1）：调用哪个本地模型 —— 空 = 自动（取 ollama list 里的第一个）
     "ai_model": "",
+    # v1.35.0（需求 1）：开机是否自动用 powershell 拉起本机 Ollama 服务
+    "auto_start_ollama": False,
     # v1.25.0（反馈 3）：最近 N 轮推荐过的作品不再出现（0 = 不限制）
     "no_repeat_rounds": 3,
 }
 # 重复检测：exclude_multipart=True 时把「同一目录下的多份」当分片自动排除
-DEFAULT_DEDUPE = {"exclude_multipart": True, "min_confidence": "低"}
+DEFAULT_DEDUPE = {"exclude_multipart": True, "min_confidence": "低",
+                  "algo": "normal", "fast": True}
+# v1.34.0（需求 1）：「从画像自动填充」的偏好 —— 统计范围 + 各维度前 N + 各维度权重。
+# 默认值刻意与旧版**硬编码的那套**完全一致（标签前 30 / 其余各 10，权重 1.5/1.3/1.2），
+# 这样老用户升级后点「从画像自动填充」看到的结果与升级前一模一样。
+DEFAULT_AUTOFILL = {
+    "scope": "",            # 统计范围："" = 全部媒体库，否则媒体库名
+    "favorites_only": False,  # 只统计「我的收藏」
+    "dims": {
+        "tag":      {"on": True, "top": 30, "w": 1.5},
+        "studio":   {"on": True, "top": 10, "w": 1.3},
+        "series":   {"on": True, "top": 10, "w": 1.2},
+        "actor":    {"on": True, "top": 10, "w": 1.3},
+        "director": {"on": True, "top": 10, "w": 1.2},
+    },
+}
 # 数据导出 / 导入的可选分区（v1.24.0 反馈 9：细化到「收藏、演员收藏」等）
 EXPORT_SECTIONS = [
     ("media",      "媒体索引（影片 / 剧集）"),
@@ -200,8 +231,10 @@ ACCENT_COLORS = [
 ]
 ACCENT_DEFAULT = "#c0392b"
 # v1.28.0（反馈 1）：侧栏底部「数据统计」/「实时状态」两块的显隐，放进「外观」里开关。
+# v1.32.0（反馈 3）：`language` —— 界面语言（19 种，见 src/i18n.py），默认基准语言简体中文。
 DEFAULT_APPEARANCE = {"mode": "磨砂玻璃", "level": "中", "accent": ACCENT_DEFAULT,
-                      "show_stats": True, "show_sysmon": True}
+                      "show_stats": True, "show_sysmon": True,
+                      "language": "zh_CN"}
 
 
 def accent_name(hexv: str) -> str:
@@ -326,6 +359,8 @@ class Settings:
         # v1.24.1：画像概览的统计范围（换过之后下次打开还是它）
         self.insight = dict(DEFAULT_INSIGHT)
         self.vector_overrides = {}      # 向量编辑：{维度: {键: 权重}}（0 = 屏蔽）
+        # v1.34.0（需求 1）：画像自动填充偏好（范围 + 前 N + 权重）
+        self.autofill = json.loads(json.dumps(DEFAULT_AUTOFILL))
         self.seen_smart = []            # 智能推荐「换一批」避让用（最近推过的 media id）
         # v1.25.0（反馈 3）：推荐历史按「轮次」记 —— [{"round": 1, "ids": [...], "ts": ...}]
         self.smart_history = []
@@ -415,6 +450,12 @@ class Settings:
                 if k in DEFAULT_DEDUPE:
                     self.dedupe[k] = v
         self.dedupe["exclude_multipart"] = bool(self.dedupe.get("exclude_multipart", True))
+        # v1.32.0（反馈 1）：脏配置归一化 —— **绝不能写 `bool(v)`**，
+        # `bool("0")` 是 True，而老配置文件里很可能存着字符串 "0"。
+        if str(self.dedupe.get("algo") or "").lower() not in ("ai", "normal"):
+            self.dedupe["algo"] = "normal"
+        self.dedupe["fast"] = str(self.dedupe.get("fast", True)).strip().lower() \
+            not in ("", "0", "false", "no", "off")
         if isinstance(data.get("export"), dict) and isinstance(data["export"].get("sections"), list):
             valid = {k for k, _ in EXPORT_SECTIONS}
             self.export = {"sections": [k for k in data["export"]["sections"] if k in valid]}
@@ -423,6 +464,8 @@ class Settings:
                 str(dim): {str(k): float(w) for k, w in (vals or {}).items()
                            if isinstance(w, (int, float))}
                 for dim, vals in data["vector_overrides"].items() if isinstance(vals, dict)}
+        # v1.34.0（需求 1）：画像自动填充偏好 —— 逐键白名单 + 范围钳制
+        self.autofill = self._clean_autofill(data.get("autofill"))
         if isinstance(data.get("insight"), dict):
             raw_ins = data["insight"]
             self.insight["scope"] = str(raw_ins.get("scope") or "")
@@ -457,6 +500,11 @@ class Settings:
             elif _v is None:
                 _v = True
             self.appearance[_k] = bool(_v)
+        # v1.32.0（反馈 3）：界面语言。老配置没这个键 → 落基准语言；
+        # 手改成未知代码（`zh-Hans-CN`、`xx`）也在这里归一 —— 归一逻辑只在 i18n 里，
+        # 别在这儿再写一份 `if code in ...`。
+        import i18n as _i18n
+        self.appearance["language"] = _i18n.normalize(self.appearance.get("language"))
         if isinstance(data.get("scraper"), dict):
             self.scraper.update(data["scraper"])
             # 数据源优先级：只保留已知源，并补上缺失的已知源
@@ -544,6 +592,7 @@ class Settings:
                     "export": self.export,
                     "insight": self.insight,              # v1.24.1
                     "vector_overrides": self.vector_overrides,
+                    "autofill": self.autofill,            # v1.34.0 画像自动填充偏好
                     "seen_smart": self.seen_smart,
                     "smart_history": self.smart_history,
                     "tagopt": self.tagopt,
@@ -655,6 +704,12 @@ class Settings:
             self.dedupe["exclude_multipart"] = bool(kw["exclude_multipart"])
         if "min_confidence" in kw:
             self.dedupe["min_confidence"] = str(kw["min_confidence"])
+        # v1.32.0（反馈 1）：重复检测也能选「普通 / AI」算法了，偏好跟另外几个
+        # 检测页**同一套键名**（algo / fast），这样 setting 面板之间不会各存一份。
+        if "algo" in kw:
+            self.dedupe["algo"] = "ai" if str(kw["algo"]) == "ai" else "normal"
+        if "fast" in kw:
+            self.dedupe["fast"] = bool(kw["fast"])
         self.save()
 
     def set_export_sections(self, keys: list):
@@ -801,6 +856,59 @@ class Settings:
         self.recommend["use_userrating"] = bool(
             self.recommend.get("use_userrating", False))
 
+    # --------- v1.34.0（需求 1）：画像自动填充偏好 ---------
+    AUTOFILL_DIMS = ("tag", "studio", "series", "actor", "director")
+    # v1.34.2（用户反馈 2）：原来上限是 200，但「取前 N 个」的 SpinBox 宽度只够 2 位、
+    # 第 3 位会被吞（实测只能写 99）；而且 insight.Portrait 榜单写死 most_common(30)
+    # 截断，填 999 实际也只写 30 条。现在上限提到 999，且必须真正支持到 999
+    # （见 insight.py 的 PORTRAIT_TOP 与榜单 most_common 对齐）。
+    AUTOFILL_TOP_RANGE = (1, 999)
+    AUTOFILL_W_RANGE = (0.0, 5.0)
+
+    @classmethod
+    def _clean_autofill(cls, raw=None) -> dict:
+        """把落盘的 autofill 配置清洗成合法值（load 与 set_autofill 共用）。
+
+        逐键白名单 + 范围钳制；任何脏值都退回默认，**绝不抛**。
+        """
+        out = json.loads(json.dumps(DEFAULT_AUTOFILL))
+        if not isinstance(raw, dict):
+            return out
+        out["scope"] = str(raw.get("scope") or "")[:120]
+        out["favorites_only"] = str(raw.get("favorites_only", False)).strip().lower() \
+            not in ("", "0", "false", "no", "off")
+        dims = raw.get("dims")
+        if isinstance(dims, dict):
+            lo_t, hi_t = cls.AUTOFILL_TOP_RANGE
+            lo_w, hi_w = cls.AUTOFILL_W_RANGE
+            for d in cls.AUTOFILL_DIMS:
+                src = dims.get(d)
+                if not isinstance(src, dict):
+                    continue
+                dst = out["dims"][d]
+                dst["on"] = str(src.get("on", dst["on"])).strip().lower() \
+                    not in ("", "0", "false", "no", "off")
+                try:
+                    dst["top"] = max(lo_t, min(hi_t, int(src.get("top", dst["top"]))))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    w = float(src.get("w", dst["w"]))
+                    dst["w"] = round(max(lo_w, min(hi_w, w)), 2)
+                except (TypeError, ValueError):
+                    pass
+        return out
+
+    def set_autofill(self, **kw):
+        """更新画像自动填充偏好（只认识 scope / favorites_only / dims）。"""
+        raw = dict(self.autofill or {})
+        for k in ("scope", "favorites_only", "dims"):
+            if k in kw:
+                raw[k] = kw[k]
+        self.autofill = self._clean_autofill(raw)
+        self.save()
+        return self.autofill
+
     def _sanitize_tagopt(self):
         if self.tagopt.get("scope") not in ("file", "folder", "library"):
             self.tagopt["scope"] = "file"
@@ -873,7 +981,8 @@ class Settings:
 
     # ---------- 外观 ----------
     def set_appearance(self, mode: str = None, level: str = None, accent: str = None,
-                       show_stats: bool = None, show_sysmon: bool = None):
+                       show_stats: bool = None, show_sysmon: bool = None,
+                       language: str = None):
         if mode in APPEARANCE_MODES:
             self.appearance["mode"] = mode
         if level in GLASS_LEVELS:
@@ -885,7 +994,18 @@ class Settings:
             self.appearance["show_stats"] = bool(show_stats)
         if show_sysmon is not None:
             self.appearance["show_sysmon"] = bool(show_sysmon)
+        # v1.32.0（反馈 3）：界面语言。**必须走 i18n.normalize()** ——
+        # 校验和归一化只留一处真源，否则「设置里存的语言」和「实际生效的语言」
+        # 会漂移（改天加了新语种就更容易出这种事）。
+        if language is not None:
+            import i18n
+            self.appearance["language"] = i18n.normalize(language)
         self.save()
+
+    # v1.32.0（反馈 3）：界面语言读写
+    def language(self) -> str:
+        import i18n
+        return i18n.normalize(self.appearance.get("language"))
 
     # v1.25.0（反馈 5）：高亮色 —— 卡片选中 / 外发光 / 强调色都用它
     def accent(self) -> str:

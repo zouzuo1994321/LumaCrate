@@ -1,0 +1,18 @@
+{
+  "_app": "LumaCrate",
+  "_kind": "tagopt",
+  "_format": 1,
+  "plans": [
+    {
+      "file": "x.mp4",
+      "title": "Test",
+      "old_tags": [
+        "a"
+      ],
+      "new_tags": [
+        "b"
+      ],
+      "error": ""
+    }
+  ]
+}
