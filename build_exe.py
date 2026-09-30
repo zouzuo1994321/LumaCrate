@@ -30,13 +30,14 @@ LEGACY_PREFIXES = ("本地影视中心-",)
 
 
 def _ensure_logo_ico():
-    """确保 logo.ico 存在且不旧于 logo-3.png（PyInstaller --icon 用，v1.23.0 反馈 2）。
+    """确保 logo.ico 存在且不旧于 logo-4.png（PyInstaller --icon 用，v1.23.0 反馈 2）。
 
     坑：只在「文件不存在」时生成会一直沿用旧 ico（换了源图也不更新），
     所以按 mtime 判断，源图更新过就重新生成多分辨率 ico。
     v1.35.0：品牌图标由旧 logo.png 换成金色胶片 logo-3.png，源图路径随动。
+    v1.35.1：再由 logo-3.png 升级为 logo-4.png（第三版 → 第四版），路径随动。
     """
-    png = os.path.join(ROOT, "logo-3.png")
+    png = os.path.join(ROOT, "logo-4.png")
     ico = os.path.join(ROOT, "logo.ico")
     if os.path.exists(ico) and (not os.path.exists(png)
                                 or os.path.getmtime(ico) >= os.path.getmtime(png)):
@@ -112,7 +113,7 @@ def main():
         "--noconfirm",
         "--clean",
         "--add-data", f"{os.path.join(SRC, 'style.qss')};.",
-        "--add-data", f"{os.path.join(ROOT, 'logo-3.png')};.",    # v1.35.0：新品牌图标（运行时窗口 / 任务栏）
+        "--add-data", f"{os.path.join(ROOT, 'logo-4.png')};.",    # v1.35.1：新品牌图标（运行时窗口 / 任务栏）
         "--hidden-import", "PySide6.QtXml",
         "--hidden-import", "backdrop",
         "--hidden-import", "scraper",
@@ -126,6 +127,7 @@ def main():
         "--hidden-import", "tagopt",         # v1.25.0：标签优化（纯计算层）
         "--hidden-import", "nfo_parser",     # v1.25.0：标签优化要读/写 nfo
         "--hidden-import", "sysmon",         # v1.27.0：侧栏实时状态（采集线程 + 自绘横条）
+        "--hidden-import", "guide_translate",  # v1.36.0：引导向量「中文 → 日文」候选词表
         # v1.27.0：实时状态的 CPU / 内存 / 网络采集。venv 里有 psutil 7.2.2，
         # _pyinstaller_hooks_contrib/stdhooks/hook-psutil.py 会把它连
         # _psutil_windows.pyd 一起收进来（已核实 hook 存在）；万一没收到，

@@ -324,7 +324,7 @@ class SplashScreen(QSplashScreen):
 
 
 def _default_logo_path():
-    """开发期 / 打包期都能找到 logo-3.png（与 main.py::_app_resource 同一套候选）。"""
+    """开发期 / 打包期都能找到 logo-4.png（与 main.py::_app_resource 同一套候选）。"""
     here = os.path.dirname(os.path.abspath(__file__))
     cands = []
     if getattr(sys, "frozen", False):
@@ -335,7 +335,7 @@ def _default_logo_path():
         cands.append(os.path.dirname(here))
     for c in cands:
         if c:
-            path = os.path.join(c, "logo-3.png")
+            path = os.path.join(c, "logo-4.png")
             if os.path.exists(path):
                 return path
     return None

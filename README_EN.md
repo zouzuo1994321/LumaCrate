@@ -6,7 +6,7 @@
 
 **所有流明 · 尽收盒中** · *Every lumen, in one crate.*
 
-![Version](https://img.shields.io/badge/version-v1.35.0%20(2609300052)-c0392b?style=flat-square)
+![Version](https://img.shields.io/badge/version-v1.36.0%20(2609300054)-c0392b?style=flat-square)
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d6?style=flat-square\&logo=windows)
 
@@ -37,7 +37,7 @@ A **local-first** Windows desktop app for managing your movie & TV library: insp
 ## 📸 Preview
 
 <p align="center">
-  <img src="logo-3.png" width="200" alt="LumaCrate Logo">
+  <img src="logo-4.png" width="200" alt="LumaCrate Logo">
 </p>
 
 > The UI presents an Emby-style poster wall, actor library and detail pages. Full screenshots ship with the GitHub Release assets.
@@ -70,7 +70,7 @@ A **local-first** Windows desktop app for managing your movie & TV library: insp
 | Image detection | pure-Python structural check; catches missing / truncated images and replaces them |
 | Tag optimization | high-frequency tag / studio / series / actor / director charts from your favorite profile |
 | Vector edit | hand-tune per-dimension weights; "auto-fill from profile" and **"auto-fill from favorited actors"** |
-| Guide vector | type an actor / tag / studio / series on the wall and this session's picks lean that way (**fuzzy match**: every containing tag / studio / series is boosted) |
+| Guide vector | type an actor / tag / studio / series on the wall and this session's picks lean that way (**fuzzy match**: every containing tag / studio / series is boosted; optional **auto Chinese→Japanese translation** before matching — `轮奸 → 輪姦`, `三上悠亚 → 三上悠亜`) |
 
 </details>
 
@@ -105,7 +105,7 @@ A **local-first** Windows desktop app for managing your movie & TV library: insp
 
 **No Python, no network, no browser required.**
 
-1. Download `LumaCrate-v1.35.0-2609300052.exe` (~46 MB, single file) from [Releases](../../releases).
+1. Download `LumaCrate-v1.36.0-2609300054.exe` (~46 MB, single file) from [Releases](../../releases).
 2. Double-click to run — on first launch it creates `index_data/` (index DB) and `settings.json` **next to the exe**.
 3. Runtime data lives **next to the exe**, so you can move the exe together with its folder.
 
@@ -129,8 +129,8 @@ A **local-first** Windows desktop app for managing your movie & TV library: insp
 
 ```
 LumaCrate/
-├── LumaCrate-v1.35.0-2609300052.exe   # single-file executable
-├── logo-3.png                         # brand icon (golden film)
+├── LumaCrate-v1.36.0-2609300054.exe   # single-file executable
+├── logo-4.png                         # brand icon (golden film)
 ├── logo.ico                           # exe icon
 ├── README.md / README_EN.md
 ├── src/                               # source (PySide6)
@@ -158,7 +158,7 @@ python src/main.py
 python build_exe.py        # produces LumaCrate-vX.Y.Z-YYMMDDNNNN.exe into root + history/
 ```
 
-- Packaging params (`--onefile --windowed`, icon `logo.ico`, bundled `logo-3.png`) live in `build_exe.py`.
+- Packaging params (`--onefile --windowed`, icon `logo.ico`, bundled `logo-4.png`) live in `build_exe.py`.
 - Newest exe goes to root; older builds auto-archived to `history/`.
 
 ---
@@ -169,6 +169,8 @@ python build_exe.py        # produces LumaCrate-vX.Y.Z-YYMMDDNNNN.exe into root 
 
 | Script | Purpose |
 | ------ | ------- |
+| `smoke_v1360.py` | v1.36.0 offscreen smoke: CN→JP candidates (lexicon / char map / multi-term split) / preference persistence + dirty-value normalization / translated hits merged into guides / **double-click callback destroying its own card no longer raises** — **all pass / 0 fail** |
+| `smoke_v1351.py` | v1.35.1 offscreen smoke: toolbar min-width **independent of chip count** / chips wrap + fold in their own row / zero horizontal overflow at 1920 / logo-4 wiring — **all pass / 0 fail** |
 | `smoke_v1350.py` | v1.35.0 offscreen smoke: fuzzy resolve / AI Engine page / vector-edit auto-fill — **all pass / 0 fail** |
 | `smoke_v1343.py` | module-attribute audit and detector-page widget assertions |
 | `live_verify_v1342.py` / `live_verify_v1343.py` | real-machine acceptance: run the frozen exe and check `app.log` for uncaught exceptions |
@@ -204,6 +206,62 @@ Third-party components:
 ## 📚 Changelog
 
 <details open>
+
+<summary><b>v1.36.0 (Build 2609300054) — 2026-09-30</b></summary>
+
+> One new feature + one real-machine defect fix: guide vectors now auto-translate Chinese → Japanese · fixed the "already deleted object" crash on double-clicking a poster
+
+- **New: "guide vector" auto Chinese→Japanese translation before fuzzy matching** (toggle under
+  **Tools → Smart Recommend → Recommendation scope & preferences**). Library tags / studios / series /
+  actor names are almost all **original Japanese**, while users almost always type **Chinese** into the
+  guide box — `轮奸` cannot match anything (`轮奸` vs `輪姦`). When enabled, the input is first translated
+  into several Japanese candidates, each of which is run through the **same** fuzzy matcher, and the
+  results are **merged** into the original hits (additive only; extra guides can be removed one by one).
+  - **Fully offline, millisecond-level, no network**: new leaf module `src/guide_translate.py` with two
+    layers — a **term lexicon** (`中出 → 中出し`, `护士 → ナース`, `捆绑 → 緊縛`, `时间停止 → 時間停止`)
+    for terms whose glyphs differ entirely, plus a **541-entry simplified → Japanese shinjitai character
+    map** covering the much larger group that only differs in orthography — which **also solves actor
+    names** (`轮奸 → 輪姦`, `三上悠亚 → 三上悠亜`, `桥本有菜 → 橋本有菜`).
+  - Multi-term input is **split**: `孕妇教师 → 妊婦教師 / 妊婦 / 教師` — otherwise the whole translated
+    string matches nothing at all.
+  - The status line reports "**of which N came from Chinese→Japanese translation**" and the log appends
+    `[引导向量] 中文→日文扩展：…`, so it is obvious whether the toggle actually took effect.
+- **Fixed a real-machine defect: double-clicking a poster raised `RuntimeError: libshiboken: Internal
+  C++ object (PosterCard) already deleted`** (6 occurrences in the real `index_data/logs/app.log`, top
+  frame `mouseDoubleClickEvent` in `main_window.py`). Root cause: the "check liveness on entry" guard
+  added in v1.24.1 **cannot structurally catch this**, because the destruction happens **inside the
+  callback**: `_on_open → _open_media → set_backdrop + go(HeroView)` replaces the current page, so the
+  card is gone by then and the following `super()` call is the actual bomb. Fix: **run the base-class
+  handling before the callback**, put the callback last and **never touch `self` after it** — applied
+  uniformly to `mousePressEvent` + `mouseDoubleClickEvent` of `PosterCard` / `ActorCard` and to
+  `mousePressEvent` of the collection card.
+
+</details>
+
+<details>
+
+<summary><b>v1.35.1 (Build 2609300053) — 2026-09-30</b></summary>
+
+> Two reports (both from user screenshots) + brand icon update: Smart Recommend layout fix · logo → v4
+
+- **Fixed the "guide vector" chips wrecking the Smart Recommend layout**: v1.35.0's fuzzy match can hit
+  dozens to hundreds of tags / studios / series at once, and every chip was crammed into the toolbar —
+  a single-row HBox — so the row's minimum width ballooned far past the viewport, clipping the chips and
+  buttons on the right and misaligning the whole page. Fix: chips + status text moved **out of the toolbar**
+  into their own full-width row below it (`FlowLayout`, auto-wrapping); beyond 14 chips they collapse into
+  "show all (N)" and can be expanded / collapsed.
+- **Fixed the toolbar overflowing by itself**: the summary label's `setMinimumWidth(0)` is a **no-op in Qt**
+  (0 is the default, so the call cannot distinguish "explicitly 0" from "never set"), leaving its minimum
+  width equal to the full text (531px measured); together with the guide controls the toolbar's minimum
+  reached 1081px > the 884px viewport and pushed controls off-screen. Fix: the summary now takes **its own
+  row**, so both fit fully (zero horizontal overflow at the 1920 design width).
+- **Brand icon switched from `logo-3.png` to `logo-4.png`** (3rd → 4th golden-film version):
+  `build_exe.py` (`--icon` source and `--add-data`), `src/main.py`, `src/splash.py` all follow;
+  `logo.ico` is regenerated automatically by mtime.
+
+</details>
+
+<details>
 
 <summary><b>v1.35.0 (Build 2609300052) — 2026-09-30</b></summary>
 

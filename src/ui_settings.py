@@ -2605,6 +2605,25 @@ class SettingsDialog(QDialog):
             ck.setChecked(bool(self.s.recommend.get(key, dflt)))
             ck.toggled.connect(self._save_smart_prefs)
             g2v.addWidget(ck)
+
+        # v1.36.0（需求 2）：引导向量「中文自动翻译成日文再模糊匹配」。
+        # 用户大概率敲中文，而库里的标签 / 艺人名是日文原文 —— 打开后输入词会先翻成
+        # 日文候选，再各跑一遍 `resolve_guide_tokens_fuzzy`，结果**并进**原有命中里。
+        self.ck_guide_ja = QCheckBox("引导向量：输入中文时自动翻译成日文再模糊匹配")
+        self.ck_guide_ja.setToolTip(
+            "库里的标签 / 艺人名大多是日文原文，而引导输入框里通常敲的是中文。\n"
+            "打开后：输入「轮奸」会额外按「輪姦」匹配；输入「三上悠亚」会额外按「三上悠亜」匹配。\n"
+            "译文命中与原本命中的结果会合并 —— 只增不减，多出来的引导项可以逐条点 × 移除。")
+        self.ck_guide_ja.setChecked(bool(self.s.recommend.get("guide_ja_translate", False)))
+        self.ck_guide_ja.toggled.connect(self._save_smart_prefs)
+        g2v.addWidget(self.ck_guide_ja)
+        g2_hint = QLabel(rich(
+            "翻译是**纯离线**的「术语表 + 字形对照（简体 → 日本新字体）」，毫秒级完成、不出网。\n"
+            "字形类（三上悠亚 → 三上悠亜、桥本有菜 → 橋本有菜）走逐字对照；"
+            "词义类（中出 → 中出し、护士 → ナース、捆绑 → 緊縛）走内置术语表。"))
+        g2_hint.setWordWrap(True)
+        g2_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        g2v.addWidget(g2_hint)
         v.addWidget(g2)
 
         g3 = QGroupBox("向量编辑")
@@ -2900,6 +2919,11 @@ class SettingsDialog(QDialog):
         sp = getattr(self, "sp_rounds", None)
         if sp is not None:
             kw["no_repeat_rounds"] = int(sp.value())
+        # v1.36.0（需求 2）：引导向量「中文 → 日文」开关（同样 getattr 兜底，
+        # 避免日后有人把构造顺序挪到信号连接之后就直接崩）。
+        ck_ja = getattr(self, "ck_guide_ja", None)
+        if ck_ja is not None:
+            kw["guide_ja_translate"] = bool(ck_ja.isChecked())
         self.s.set_recommend(**kw)
         self._refresh_hist_label()
 

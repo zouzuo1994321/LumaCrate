@@ -33,6 +33,7 @@ import veil as veil_mod
 import media_meta as mm
 import applog
 import recommend as rec_mod         # v1.34.0：推荐墙顶部「引导向量」要用来解析 / 取常量
+import guide_translate as gt_mod    # v1.36.0：引导向量「中文 → 日文」候选（纯离线词表，叶子模块）
 import sysmon                    # v1.27.0：侧栏「实时状态」面板（叶子模块，无循环导入）
 import i18n                      # v1.32.0：界面语言（叶子模块，无循环导入；查不到原样返回中文）
 from ui_hero import HeroView, circle_pixmap, cover_pixmap, placeholder_pixmap, compact_button
@@ -1737,23 +1738,39 @@ class PosterCard(QFrame):
 
     # ---------- 交互：单击选中 / 双击进入 ----------
     def mousePressEvent(self, e):
+        # v1.36.0：与 mouseDoubleClickEvent 同一条铁律 —— 基类处理提前、回调放最后，
+        # 回调之后不再触碰 self（选中回调目前不会销毁本卡，同构写是为了不给日后留雷）。
         if not _qt_alive(self):
             return
-        if e.button() == Qt.LeftButton and self._on_select:
-            self._on_select(self)
-        super().mousePressEvent(e)
+        on_select = self._on_select
+        try:
+            super().mousePressEvent(e)
+        except RuntimeError:
+            pass
+        if e.button() == Qt.LeftButton and on_select:
+            on_select(self)
 
     def mouseDoubleClickEvent(self, e):
         # v1.24.1：页面被 _replace_current() 换掉后（LazyGrid 刷新 / 换库 / 换筛选），
         # 队列里可能还压着投给本卡的鼠标事件 —— 此时 C++ 对象已析构，
-        # 下面任何 self 的调用（含 super()）都会抛
+        # 任何 self 的调用（含 super()）都会抛
         # RuntimeError: Internal C++ object (PosterCard) already deleted。
-        # 真实日志里抓到过 `main_window.py, in mouseDoubleClickEvent`，故先判存活。
+        #
+        # v1.36.0：**只在入口判存活是不够的**。真机 app.log 抓到 6 次
+        # `main_window.py, line 1756, in mouseDoubleClickEvent` —— 因为
+        # `_on_open` → `_open_media()` → `set_backdrop()` + `go(HeroView)` 会**替换当前页面**，
+        # 本卡在这一步就没了；紧接着那句 `super()` 才是真正的炸弹（入口判活时它还活着）。
+        # 现在改成：**基类处理提前到回调之前**（这中间只有两次局部变量取值，不可能跑嵌套
+        # 事件循环），回调放到最后，且**回调之后绝不再触碰 self**。
         if not _qt_alive(self):
             return
-        if self._on_open:
-            self._on_open(self.media)
-        super().mouseDoubleClickEvent(e)
+        media, on_open = self.media, self._on_open
+        try:
+            super().mouseDoubleClickEvent(e)
+        except RuntimeError:
+            pass
+        if on_open:
+            on_open(media)      # 之后不再访问 self —— 回调可能换页并把本卡销毁
 
     # ---------- 自绘 ----------
     def paintEvent(self, e):
@@ -1890,11 +1907,17 @@ class FolderCard(QFrame):
 
     def mousePressEvent(self, e):
         # 同 PosterCard：合集墙也是 LazyGrid，换页后残留事件可能投给已析构的卡。
+        # v1.36.0：`_on_open` 是「进这个合集的影片墙」，会替换当前页面 ——
+        # 故基类处理提前、回调放最后，回调之后不再触碰 self。
         if not _qt_alive(self):
             return
-        if e.button() == Qt.LeftButton and self._on_open:
-            self._on_open(self.path, self.name)
-        super().mousePressEvent(e)
+        path, name, on_open = self.path, self.name, self._on_open
+        try:
+            super().mousePressEvent(e)
+        except RuntimeError:
+            pass
+        if e.button() == Qt.LeftButton and on_open:
+            on_open(path, name)
 
     def contextMenuEvent(self, e):
         if not _qt_alive(self):
@@ -2196,19 +2219,30 @@ class ActorCard(QFrame):
 
     # ---------- 交互：单击选中 / 双击查看 ----------
     def mousePressEvent(self, e):
+        # v1.36.0：基类处理提前、回调放最后（同 PosterCard 的铁律）。
         if not _qt_alive(self):
             return
-        if e.button() == Qt.LeftButton and self._on_select:
-            self._on_select(self)
-        super().mousePressEvent(e)
+        on_select = self._on_select
+        try:
+            super().mousePressEvent(e)
+        except RuntimeError:
+            pass
+        if e.button() == Qt.LeftButton and on_select:
+            on_select(self)
 
     def mouseDoubleClickEvent(self, e):
         # 同 PosterCard：换页/重排后队列里残留的鼠标事件可能投给已析构的卡。
+        # v1.36.0：`_on_open` 会打开演员/导演详情页（替换当前页面），
+        # 故基类处理提前、回调放最后，回调之后不再触碰 self。
         if not _qt_alive(self):
             return
-        if self._on_open:
-            self._on_open(self.person)
-        super().mouseDoubleClickEvent(e)
+        person, on_open = self.person, self._on_open
+        try:
+            super().mouseDoubleClickEvent(e)
+        except RuntimeError:
+            pass
+        if on_open:
+            on_open(person)
 
     # ---------- 自绘（现役绿 / 退役黄 / 选中粉） ----------
     def paintEvent(self, e):
@@ -3727,6 +3761,10 @@ class MainWindow(QMainWindow):
             self._replace_current(self._smart_wall)
         applog.log(f"[智能推荐] {self._smart_algo} → {len(self._smart_picks)} 部")
 
+    # v1.35.1：引导芯片在独占行里**默认最多铺这么多条**，多出的折进「展开全部（共 N）」。
+    # 模糊匹配一次可能命中上百个标签 / 片商 / 系列，全铺出来会把页面撑得很高。
+    GUIDE_CHIP_LIMIT = 14
+
     def _guide_bar(self, row):
         """把「引导向量」控件**接在工具行里**（v1.34.0 需求 2，位置按用户截图定）。
 
@@ -3791,19 +3829,47 @@ class MainWindow(QMainWindow):
         b_clr.clicked.connect(self._clear_guides)
         row.addWidget(b_clr)
 
-        # 已生效的引导 chips（每个带一个 × 用来单独移除）+ 状态文案，接在同一行右侧。
+        # v1.35.1：已生效的引导 chips + 状态文案**不再挂在工具行里**（见 `_guide_row`）。
+        # 根因：模糊匹配一次能命中几十上百个标签 / 片商 / 系列，chips 塞进这条单行 QHBox
+        # 后，行的最小宽度被撑到远超可视区 → 右端芯片 / 按钮被裁、整页错位。
+        # 现在工具行只留「info + 引导输入框 + 权重 + 加强 / 清空」，宽度恒定。
+
+    def _guide_row(self):
+        """v1.35.1：引导芯片与状态文案**独占一整行**（用户截图红框区域）。
+
+        这里是「已生效引导」的落地容器：`guide_chips` 用 FlowLayout 自动换行，
+        无论命中多少条、窗口多窄都不会再把工具行顶爆；`guide_state` 单独一行放状态。
+        只在 `_smart_wall` 建页时调用一次，之后由 `_refresh_guides()` 原地刷新。
+        """
+        self._guides_expanded = bool(getattr(self, "_guides_expanded", False))
+        self.guide_row = QWidget()
+        self.guide_row.setObjectName("guide_row")
+        rv = QVBoxLayout(self.guide_row)
+        rv.setContentsMargins(0, 2, 0, 0)
+        rv.setSpacing(4)
+
         self.guide_chips = QWidget()
         self.guide_chips.setObjectName("guide_chips")
-        self.guide_chips_l = QHBoxLayout(self.guide_chips)
-        self.guide_chips_l.setContentsMargins(0, 0, 0, 0)
-        self.guide_chips_l.setSpacing(6)
-        row.addWidget(self.guide_chips)
+        self.guide_chips_l = FlowLayout(self.guide_chips, margin=0, spacing=6)
+        # FlowLayout 靠 heightForWidth() 上报高度，宿主控件**必须同时声明**支持该特性，
+        # 否则外层 QVBoxLayout 只会按「一行」给它高度 → 换行的芯片被裁掉。
+        sp = self.guide_chips.sizePolicy()
+        sp.setHeightForWidth(True)
+        self.guide_chips.setSizePolicy(sp)
+        rv.addWidget(self.guide_chips)
 
         self.guide_state = QLabel("—")
         self.guide_state.setObjectName("guide_state")
         self.guide_state.setStyleSheet("color:#8c8071;font-size:11px;")
         self.guide_state.setToolTip("引导向量的当前状态")
-        row.addWidget(self.guide_state)
+        self.guide_state.setWordWrap(True)
+        rv.addWidget(self.guide_state)
+        return self.guide_row
+
+    def _toggle_guides_expand(self):
+        """展开 / 收起全部引导芯片（模糊匹配可能一次命中上百条）。"""
+        self._guides_expanded = not bool(getattr(self, "_guides_expanded", False))
+        self._refresh_guides()
 
     def _refresh_guides(self):
         """重刷已生效的引导 chips 与状态文案。"""
@@ -3818,12 +3884,22 @@ class MainWindow(QMainWindow):
                 cw.setParent(None)
                 cw.deleteLater()
         guides = self._smart_guides or []
-        seen = set()
+        # 去重：同一个 token 只出一个 chip
+        uniq, seen = [], set()
         for g in list(guides):
             tok = g.get("token")
-            if tok in seen:                     # 同一个 token 只出一个 chip（去重）
+            if tok in seen:
                 continue
             seen.add(tok)
+            uniq.append(g)
+        # v1.35.1：模糊匹配一次可能命中上百条，全铺出来会把页面撑高。
+        # 默认只显示前 GUIDE_CHIP_LIMIT 条，其余折进「展开全部（共 N）」；
+        # 展开状态由 self._guides_expanded 记住，跨页面重建不丢。
+        limit = int(getattr(self, "GUIDE_CHIP_LIMIT", 14) or 14)
+        expanded = bool(getattr(self, "_guides_expanded", False))
+        shown = uniq if (expanded or len(uniq) <= limit) else uniq[:limit]
+        for g in shown:
+            tok = g.get("token")
             chip = QWidget()
             chip.setAttribute(Qt.WA_StyledBackground, True)
             chip.setObjectName("GuideChip")
@@ -3838,17 +3914,38 @@ class MainWindow(QMainWindow):
             x.clicked.connect(lambda _c=False, t=tok: self._remove_guide(t))
             hl.addWidget(x)
             lay.addWidget(chip)
-        lay.addStretch(1)
+        if len(uniq) > limit:
+            more = QPushButton("收起" if expanded else f"展开全部（共 {len(uniq)}）")
+            more.setObjectName("Ghost")
+            more.setCursor(Qt.PointingHandCursor)
+            more.setToolTip("显示 / 收起全部引导项")
+            more.clicked.connect(self._toggle_guides_expand)
+            lay.addWidget(more)
         st = getattr(self, "guide_state", None)
         if st is not None and _qt_alive(st):
-            if not guides:
+            if not uniq:
                 st.setText("没有引导 —— 当前完全按「我的收藏」的画像推荐。")
             else:
-                hits = [g for g in guides if g.get("_hit")]
+                # v1.36.0（需求 2）：标出其中有多少条是「中文→日文」翻译出来的 ——
+                # 否则用户只会看到一堆日文标签，不知道开关到底有没有生效。
+                ja_n = len([g for g in uniq if g.get("_ja")])
+                ja_tail = f"，其中 {ja_n} 条由中文→日文翻译得到" if ja_n else ""
+                hits = [g for g in uniq if g.get("_hit")]
                 if hits:
-                    st.setText("引导已生效，点「换一批」可以看效果。")
+                    st.setText(f"引导已生效（共 {len(uniq)} 条{ja_tail}），点「换一批」可以看效果。")
                 else:
-                    st.setText("引导已就绪，点「换一批」生效。")
+                    st.setText(f"引导已就绪（共 {len(uniq)} 条{ja_tail}），点「换一批」生效。")
+
+    def _guide_ja_enabled(self):
+        """「引导向量：输入中文时自动翻译成日文再模糊匹配」开关（v1.36.0 需求 2）。
+
+        读设置里的 ``recommend.guide_ja_translate``；任何读取异常都当「关」——
+        绝不因为一个偏好项读失败就把「加强」按钮点崩。
+        """
+        try:
+            return bool(cfg.get_settings().recommend.get("guide_ja_translate", False))
+        except Exception:
+            return False
 
     def _add_guide(self):
         """解析输入 → 加进 `_smart_guides` → 重算推荐。
@@ -3875,6 +3972,34 @@ class MainWindow(QMainWindow):
         except Exception as e:
             applog.log(f"[引导向量] 模糊解析失败：{type(e).__name__}: {e}", "error")
 
+        # v1.36.0（需求 2）：中文 → 日文扩展。开关打开时，把输入词翻成若干日文候选，
+        # 每个候选**再跑一遍**同样的模糊匹配，结果并进 cands（只增不减）。
+        # 典型：输入「轮奸」→ 译文「輪姦」→ 命中库里所有含「輪姦」的标签；
+        #      输入「三上悠亚」→ 译文「三上悠亜」→ 命中这位艺人（字形对照表顺手解决了艺人名）。
+        ja_tokens = set()      # 由译文贡献出来的 token（用于在状态行里标注来源）
+        ja_hits = []           # [(日文候选, 命中条数)]
+        if self._guide_ja_enabled():
+            try:
+                for ja in gt_mod.translate_zh_to_ja(text):
+                    got = rec_mod.resolve_guide_tokens_fuzzy(ja) or []
+                    if not got:
+                        continue
+                    ja_hits.append((ja, len(got)))
+                    for item in got:
+                        ja_tokens.add(item[0])
+                        cands.append(item)
+            except Exception as e:
+                applog.log(f"[引导向量] 中文→日文扩展失败：{type(e).__name__}: {e}", "error")
+            if ja_tokens:
+                # 合并去重，**保持原顺序**（原命中在前、译文命中在后），沿用 300 上限
+                _seen, _uniq = set(), []
+                for item in cands:
+                    if item[0] in _seen:
+                        continue
+                    _seen.add(item[0])
+                    _uniq.append(item)
+                cands = _uniq[:300]
+
         if not cands:
             # 认不出来 → 让用户指定维度，再在**那个维度**里直接使用
             kinds = [("tag", "标签"), ("actor", "演员"), ("director", "导演"),
@@ -3894,6 +4019,8 @@ class MainWindow(QMainWindow):
         added = 0
         for tok, dim, name in cands:
             ent = {"token": tok, "dim": dim, "key": name or tok[2:], "weight": w}
+            if tok in ja_tokens:
+                ent["_ja"] = True      # v1.36.0：标记「这条是中文→日文翻译出来的」
             # 同一个 token 再加 = 覆盖权重（不做多条叠加，避免误点越点越强）
             self._smart_guides = [g for g in (self._smart_guides or [])
                                   if g.get("token") != tok]
@@ -3901,6 +4028,10 @@ class MainWindow(QMainWindow):
             added += 1
         applog.log(f"[引导向量] 模糊命中 {added} 条（{text}），本次生效共 "
                    f"{len(self._smart_guides)} 条")
+        if ja_hits:
+            # 让「开关到底有没有生效」在日志里也留痕（真机验收/排查时一眼可查）
+            applog.log("[引导向量] 中文→日文扩展：" + "；".join(
+                f"{ja} → {n} 条" for ja, n in ja_hits))
         ed.clear()
         self._refresh_guides()
         self._replace_current(lambda: self._view_smart(force=True))
@@ -3943,16 +4074,19 @@ class MainWindow(QMainWindow):
             f"（{meta.get('liked', 0)} 部高分） + {meta.get('fav_people_n', 0)} 位收藏的演员/导演"
             f" · 候选 {res.get('pool', 0):,} 部")
         info.setStyleSheet("color:#c9bda7;font-size:12px;")
-        # v1.34.0：工具行里现在还要塞引导向量输入框 → 让 info 可以被压窄而不是
-        # 把别的控件顶出去（QLabel.minimumSizeHint 默认是文本完整宽度、不肯缩）。
+        # v1.35.1：摘要 info **独占一行**（原先在工具行里）。
+        # 根因：`QLabel.minimumSizeHint()` 恒等于整段文本宽度、不肯缩；而
+        # `setMinimumWidth(0)` 在 Qt 里**等于没设**（0 是默认值，函数无法区分
+        # 「显式设成 0」与「没设过」）→ info 实测固定占 531px，工具行最小宽
+        # 1081px > 可视区 884px → 右侧控件被推出屏幕、整页错位。
+        # 独占一行后：摘要（531px）与工具行控件（约 471px）都在 884px 内完整显示。
         info.setMinimumWidth(0)
         info.setWordWrap(False)
-        tbl.addWidget(info, 1)
 
         # ---- v1.34.0（需求 2）：引导向量，接在「换一批」**左侧**同一行 ----
         # 用户截图指定的位置：「换一批旁边加入一个输入框」。
         self._guide_bar(tbl)
-        self._refresh_guides()          # 建完立即按 _smart_guides 刷 chips / 状态文案
+        tbl.addStretch(1)      # info 已独占上一行 → 用 stretch 把「换一批」顶到最右
 
         again = QPushButton("换一批")
         again.setObjectName("Ghost")
@@ -3965,7 +4099,12 @@ class MainWindow(QMainWindow):
             tbl.addWidget(grid.more_btn)
             w.lazy_grid = grid
             grid.mark_toolbar_placed()
+        v.addWidget(info)               # v1.35.1：推荐依据摘要独占一行
         v.addWidget(tb)
+        # v1.35.1：引导芯片 / 状态文案独占工具栏下方一整行（用户截图红框位置），
+        # 不再挤在工具行里 —— 模糊匹配命中几十上百条 tag 也不会把界面顶错位。
+        v.addWidget(self._guide_row())
+        self._refresh_guides()          # 建完立即按 _smart_guides 刷 chips / 状态文案
 
         if grid is not None:
             v.addWidget(grid)

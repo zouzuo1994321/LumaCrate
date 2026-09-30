@@ -6,13 +6,13 @@
 
 **所有流明 · 尽收盒中** · *Every lumen, in one crate.*
 
-![Version](https://img.shields.io/badge/version-v1.35.0%20\(2609300052\)-c0392b?style=flat-square)
+![Version](https://img.shields.io/badge/version-v1.36.0%20\(2609300054\)-c0392b?style=flat-square)
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d6?style=flat-square\&logo=windows)
 
 ![Python](https://img.shields.io/badge/python-3.13-3776ab?style=flat-square\&logo=python)
 
-![Qt](<https://img.shields.io/badge/UI-PySide6%20(Qt%206)-41cd52?style=flat-square\\\\\\\&logo=qt>)
+![Qt](https://img.shields.io/badge/UI-PySide6%20\(Qt%206\)-41cd52?style=flat-square\\\\\\\&logo=qt)
 
 ![Offline](https://img.shields.io/badge/network-只读nfo%20不联网-2c3e50?style=flat-square)
 
@@ -36,8 +36,8 @@
 
 ## 📸 界面预览
 
-<p align="center">    
-  <img src="logo-3.png" width="200" alt="流明盒 Logo">    
+<p align="center">      
+  <img src="logo-4.png" width="200" alt="流明盒 Logo">      
 </p>
 
 > 软件以 Emby 风格的海报墙、演员库、详情页呈现。完整界面截图随 GitHub Release 资源发布。
@@ -70,7 +70,7 @@
 | 图像检测 | 纯 Python 结构校验，揪出缺图 / 截断图并逐个替换                                       |
 | 标签优化 | 基于收藏画像的高频标签 / 片商 / 系列 / 演员 / 导演榜                                    |
 | 向量编辑 | 手工编写各维度向量权重；支持「从画像自动填充」与 **「从收藏的演员自动填充」**                           |
-| 引导向量 | 在推荐墙输入一个艺人 / 标签 / 片商 / 系列，本次推荐即明显偏向它（**模糊匹配**：含该词的标签 / 片商 / 系列全部加强） |
+| 引导向量 | 在推荐墙输入一个艺人 / 标签 / 片商 / 系列，本次推荐即明显偏向它（**模糊匹配**：含该词的标签 / 片商 / 系列全部加强；可选**中文自动翻译成日文**再匹配 —— `轮奸 → 輪姦`、`三上悠亚 → 三上悠亜`） |
 
 </details>
 
@@ -105,7 +105,7 @@
 
 **无需安装 Python、无需联网、不依赖浏览器。**
 
-1. 到 [Releases](../../releases) 下载 `流明盒-v1.35.0-2609300052.exe`（约 46 MB，单文件）。
+1. 到 [Releases](../../releases) 下载 `流明盒-v1.36.0-2609300054.exe`（约 46 MB，单文件）。
 2. 双击运行 —— 首次启动会在 **exe 同目录** 生成 `index_data/`（索引库）与 `settings.json`。
 3. 运行期数据生成在 **exe 同目录**，可随 exe 一起移动。
 
@@ -129,8 +129,8 @@
 
 ```
 流明盒/
-├── 流明盒-v1.35.0-2609300052.exe   # 单文件可执行
-├── logo-3.png                     # 品牌图标（金色胶片）
+├── 流明盒-v1.36.0-2609300054.exe   # 单文件可执行
+├── logo-4.png                     # 品牌图标（金色胶片）
 ├── logo.ico                       # exe 图标
 ├── README.md / README_EN.md
 ├── src/                           # 源码（PySide6）
@@ -158,7 +158,7 @@ python src/main.py
 python build_exe.py        # 产出 流明盒-vX.Y.Z-YYMMDDNNNN.exe，落到根目录与 history/
 ```
 
-- 打包参数（`--onefile --windowed`、图标 `logo.ico`、捆绑 `logo-3.png`）写在 `build_exe.py` 里，不用命令行长参数。
+- 打包参数（`--onefile --windowed`、图标 `logo.ico`、捆绑 `logo-4.png`）写在 `build_exe.py` 里，不用命令行长参数。
 - 最新版 exe 放根目录，历史版本自动归档到 `history/`。
 
 ---
@@ -169,6 +169,8 @@ python build_exe.py        # 产出 流明盒-vX.Y.Z-YYMMDDNNNN.exe，落到根�
 
 | 脚本                                              | 作用                                                      |
 | ----------------------------------------------- | ------------------------------------------------------- |
+| `smoke_v1360.py`                                | v1.36.0 离屏冒烟：中文→日文候选（术语表 / 字形对照 / 多词拆分）/ 开关落盘与脏值归一 / 译文命中并入引导 / **双击回调销毁自身不再抛异常** **全过 / 0 失败** |
+| `smoke_v1351.py`                                | v1.35.1 离屏冒烟：工具行最小宽**不随芯片数量变化** / 芯片独占行换行折叠 / 1920 下零横向溢出 / logo-4 引用 **全过 / 0 失败** |
 | `smoke_v1350.py`                                | v1.35.0 离屏冒烟：模糊解析 / AI引擎设置页 / 向量编辑自动填充等断言 **全过 / 0 失败** |
 | `smoke_v1343.py`                                | 模块属性审计与检测页控件断言                                          |
 | `live_verify_v1342.py` / `live_verify_v1343.py` | 真机验收：跑真实 exe 并核查 `app.log` 未捕获异常                        |
@@ -202,6 +204,53 @@ Copyright 2026 肆月Aperture
 ---
 
 ## 📚 迭代记录
+
+<details open>
+
+<summary><b>v1.36.0 (Build 2609300054) — 2026-09-30</b></summary>
+
+> 一条新功能 + 一条真机缺陷修复：引导向量「中文自动翻译成日文」· 修复双击海报的「已销毁对象」崩溃
+
+- **新增：引导向量「中文自动翻译成日文再模糊匹配」**（开关在「工具 → 智能推荐 → **推荐范围与偏好**」）。
+  库里的标签 / 片商 / 系列 / 艺人名几乎全是**日文原文**，而引导输入框里用户大概率敲**中文** ——
+  「轮奸」在子串匹配里一条也命中不了（`轮奸` vs `輪姦`）。打开后，输入词会先翻成若干日文候选，
+  每个候选**再跑一遍**同样的模糊匹配，结果**并进**原有命中（只增不减，多出来的引导项可逐条点 × 移除）。
+  - **纯离线、毫秒级**，不出网：新增叶子模块 `src/guide_translate.py`，两级 —— **术语表**
+    （`中出 → 中出し`、`护士 → ナース`、`捆绑 → 緊縛`、`时间停止 → 時間停止`）负责字形完全不同的那批；
+    **541 组「简体 → 日本新字体」逐字对照表**负责字形只差写法的更大部分，**顺手把艺人名也解决了**
+    （`轮奸 → 輪姦`、`三上悠亚 → 三上悠亜`、`桥本有菜 → 橋本有菜`）。
+  - 多词输入会**拆词**：`孕妇教师 → 妊婦教師 / 妊婦 / 教師` —— 否则整串译文一条都命中不了。
+  - 状态行会标出「**其中 N 条由中文→日文翻译得到**」，日志追加 `[引导向量] 中文→日文扩展：…`，
+    开关到底有没有生效一眼可见。
+- **修复真机缺陷：双击海报抛 `RuntimeError: Internal C++ object (PosterCard) already deleted`**
+  （真机 `index_data/logs/app.log` 抓到 6 次，栈顶 `main_window.py` 的 `mouseDoubleClickEvent`）。
+  根因：v1.24.1 加的「入口判存活」**结构上拦不住** —— 因为销毁发生在**回调之中**：
+  `_on_open → _open_media → set_backdrop + go(HeroView)` 会替换当前页面，本卡在那一步就没了，
+  紧接着那句 `super()` 才是炸弹。修法：**基类处理提前到回调之前**，回调放到最后且**回调之后
+  绝不再触碰 self**；`PosterCard` / `ActorCard` 的 `mousePressEvent` + `mouseDoubleClickEvent`、
+  合集卡 `mousePressEvent` 四处统一同构。
+
+</details>
+
+<details>
+
+<summary><b>v1.35.1 (Build 2609300053) — 2026-09-30</b></summary>
+
+> 两条反馈（均来自用户截图）+ 品牌图标更新：智能推荐页布局错位修复 · logo 换第四版
+
+- **修复智能推荐页「引导向量」芯片把界面撑错位**：v1.35.0 的模糊匹配一次可能命中几十上百个
+  标签 / 片商 / 系列，而芯片全塞在**工具行这一条单行 HBox** 里 → 行的最小宽度被撑到远超可视区，
+  右端芯片与按钮被裁、整页错位。修法：芯片与状态文案从工具行**整体搬出**，独占工具栏下方一整行
+  （`FlowLayout` 自动换行）；超过 14 条时默认折叠为「展开全部（共 N）」，可随时展开 / 收起。
+- **修复工具行本身也会溢出**：摘要标签的 `setMinimumWidth(0)` 在 Qt 里**等于没设**（0 是默认值，
+  函数无法区分「显式设成 0」与「没设过」），其最小宽度恒等于整段文本（实测 531px）；叠加引导控件后
+  工具行最小宽 1081px > 可视区 884px，右侧控件被推出屏幕。修法：摘要改为**独占一行**，
+  两端都能完整显示（1920 设计宽度下零横向溢出）。
+- **品牌图标由 `logo-3.png` 换为 `logo-4.png`**（第三版 → 第四版金色胶片）：
+  `build_exe.py` 的 `--icon` 源图与 `--add-data`、`src/main.py`、`src/splash.py` 三处引用随动，
+  `logo.ico` 按 mtime 自动重新生成。
+
+</details>
 
 <details>
 

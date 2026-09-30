@@ -15,9 +15,9 @@ from main_window import MainWindow, load_style
 
 
 def _app_resource(name):
-    """定位打包 / 开发期的资源文件（logo-3.png 等）。
+    """定位打包 / 开发期的资源文件（logo-4.png 等）。
 
-    打包后资源在 sys._MEIPASS；开发期 logo-3.png 放在项目根目录（src 的上级）。
+    打包后资源在 sys._MEIPASS；开发期 logo-4.png 放在项目根目录（src 的上级）。
     """
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = []
@@ -26,7 +26,7 @@ def _app_resource(name):
         candidates.append(os.path.dirname(sys.executable))
     else:
         candidates.append(here)                       # src/
-        candidates.append(os.path.dirname(here))      # 项目根（logo-3.png 在此）
+        candidates.append(os.path.dirname(here))      # 项目根（logo-4.png 在此）
     for c in candidates:
         if c:
             p = os.path.join(c, name)
@@ -97,7 +97,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(ver.APP_NAME)
     app.setApplicationVersion(ver.VERSION)
-    logo = _app_resource("logo-3.png")   # v1.35.0：新品牌图标（金色胶片 LumaCrate）
+    logo = _app_resource("logo-4.png")   # v1.35.1：新品牌图标（金色胶片 LumaCrate）
     if logo:
         app.setWindowIcon(QIcon(logo))        # v1.22.0（反馈 3）：logo 作为窗口/任务栏图标
 

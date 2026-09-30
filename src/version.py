@@ -12,11 +12,10 @@
     第三位 = 小版本迭代(bug 修复 / 小改进)
 """
 
-# 外部版本号 v1.35.0
+# 外部版本号 v1.36.0
 PRODUCT_GENERATION = 1   # 产品代
-MAJOR_ITER = 35          # 大版本迭代 -> 第二位（v1.35.0：三项功能新增，
-                         #                 故第二位 34→35、第三位归 0）
-MINOR_ITER = 0           # 小版本迭代 -> 第三位
+MAJOR_ITER = 36          # 大版本迭代 -> 第二位（v1.36.0：引导向量中文转日文 + 双击崩溃修复）
+MINOR_ITER = 0           # 小版本迭代 -> 第三位（v1.36.0 为功能性新增，Z 归 0）
 
 VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 
@@ -190,8 +189,46 @@ VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 #       另：「向量编辑」对话框新增「从收藏的演员自动填充」按钮：把演员 / 导演库里
 #          收藏（★）的人一键写成 actor / director 维度的向量权重。
 #       注：打包当天取 260930；末四位按「每次打包自增」连续计数。
+# 0053：v1.35.1 两条反馈（用户截图）——
+#       ① 智能推荐页「引导向量」的芯片把界面撑错位（模糊匹配一次可命中几十上百个标签 /
+#          片商 / 系列，v1.35.0 的 chips 全塞在工具行这条单行 QHBox 里 → 行最小宽度
+#          被撑到远超可视区，右端芯片 / 按钮被裁、整页错位）。
+#          修法：把「已生效的引导 chips + 状态文案」从工具行**整体搬出**，独占工具栏
+#          下方一整行（FlowLayout 自动换行，用户截图红框区域）；工具行只留
+#          info + 引导输入框 + 权重 + 加强 / 清空 + 换一批，宽度恢复稳定。
+#          芯片超过 GUIDE_CHIP_LIMIT 条时默认折叠为「展开全部（共 N）」。
+#       ② 品牌图标由 logo-3.png 换为 logo-4.png（第三版金色胶片升级为第四版）：
+#          build_exe.py（源图 / --add-data / 归档前缀说明）、src/main.py、
+#          src/splash.py 三处引用随动，logo.ico 按 mtime 自动重生成。
+#       注：打包当天取 260930；末四位按「每次打包自增」连续计数。
+# 0054：v1.36.0 一条新功能 + 一条真机缺陷修复 ——
+#       ① 引导向量「中文自动翻译成日文再模糊匹配」（新开关在
+#          「工具 → 智能推荐 → 推荐范围与偏好」）：
+#          根因：库里的标签 / 片商 / 系列 / 艺人名几乎全是日文原文，而引导输入框里
+#          用户大概率敲中文 —— 「轮奸」在子串匹配里一条也命中不了（轮奸 vs 輪姦）。
+#          做法：新增叶子模块 src/guide_translate.py，纯离线两级 —— 术语表
+#          （中出 → 中出し、护士 → ナース、捆绑 → 緊縛）负责字形完全不同的那批，
+#          541 组「简体 → 日本新字体」逐字对照表负责字形只差写法的更大部分
+#          （轮奸 → 輪姦、三上悠亚 → 三上悠亜、桥本有菜 → 橋本有菜）；
+#          译文候选（最多 6 个）各跑一遍同样的 resolve_guide_tokens_fuzzy，
+#          结果并进原有命中（只增不减、上限仍 300），状态行标出「其中 N 条由
+#          中文→日文翻译得到」，日志追加 [引导向量] 中文→日文扩展：
+#          为什么不做 AI 翻译：Ollama 那条路 timeout=25s 且要发 HTTP，而这里是
+#          「加强」按钮的同步点击处理器，跑下去等于界面冻结 —— 留给以后的后台方案。
+#       ② 真机缺陷：PosterCard 双击「已销毁对象」崩溃
+#          （index_data/logs/app.log 抓到 6 次 RuntimeError: libshiboken:
+#           Internal C++ object (PosterCard) already deleted，栈顶
+#           main_window.py line 1756 in mouseDoubleClickEvent）。
+#          根因：v1.24.1 加的「入口判存活」**结构上拦不住** —— 因为销毁发生在
+#          回调**之中**：_on_open → _open_media → set_backdrop + go(HeroView)
+#          会替换当前页面，本卡在那一步没了，紧接着那句 super() 才是炸弹。
+#          修法：**基类处理提前到回调之前**（中间只有两次局部变量取值，不可能跑
+#          嵌套事件循环），回调放到最后且回调之后绝不再触碰 self；PosterCard /
+#          ActorCard 的 mousePressEvent + mouseDoubleClickEvent、合集卡
+#          mousePressEvent 四处统一同构，防止日后重蹈。
+#       注：打包当天取 260930；末四位按「每次打包自增」连续计数。
 BUILD_DATE = "260930"
-BUILD_SEQ = "0052"
+BUILD_SEQ = "0054"
 BUILD = f"{BUILD_DATE}{BUILD_SEQ}"
 
 # 完整标识

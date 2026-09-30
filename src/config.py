@@ -141,6 +141,10 @@ DEFAULT_RECOMMEND = {
     "auto_start_ollama": False,
     # v1.25.0（反馈 3）：最近 N 轮推荐过的作品不再出现（0 = 不限制）
     "no_repeat_rounds": 3,
+    # v1.36.0（需求 2）：引导向量「中文自动翻译成日文再模糊匹配」。
+    # 用户大概率敲中文，而库里的标签/艺人名是日文原文 —— 打开后，
+    # 输入词会先翻成日文候选，再各跑一遍模糊匹配，结果并进原有命中里。
+    "guide_ja_translate": False,
 }
 # 重复检测：exclude_multipart=True 时把「同一目录下的多份」当分片自动排除
 DEFAULT_DEDUPE = {"exclude_multipart": True, "min_confidence": "低",
@@ -855,6 +859,15 @@ class Settings:
             self.recommend["no_repeat_rounds"] = 3
         self.recommend["use_userrating"] = bool(
             self.recommend.get("use_userrating", False))
+        # v1.36.0（需求 2）：引导向量的「中文转日文」开关。
+        # ⚠ 这里**不能**写 `bool(v)` —— `bool("0")` 是 True（v1.28.0 踩过的坑）。
+        # 手改坏的 settings.json 会把 "0" / "false" 静默读成「开」。
+        _v = self.recommend.get("guide_ja_translate", False)
+        if isinstance(_v, str):
+            _v = _v.strip().lower() not in ("", "0", "false", "no", "off")
+        elif _v is None:
+            _v = False        # 键存在但写成 null → 当作「没设过」，回到默认（关）
+        self.recommend["guide_ja_translate"] = bool(_v)
 
     # --------- v1.34.0（需求 1）：画像自动填充偏好 ---------
     AUTOFILL_DIMS = ("tag", "studio", "series", "actor", "director")
