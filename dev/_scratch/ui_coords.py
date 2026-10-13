@@ -46,6 +46,38 @@ from main_window import MainWindow
 from ui_settings import SettingsDialog, ToggleSwitch
 
 
+def unwrap(pg):
+    """★ v1.40.7：`_freeze()` 把每页包成「滚动区 → 画布 → 页面」三层，
+    所以这里的解包要**多剥一层**（滚动区 → 画布 → 页面）。
+
+    历史（v1.40.4）：`_fit_page()` 在内容高于可视区时会把页面就地包进 QScrollArea，
+    于是 `dlg._pg_*` 指向的可能是滚动区而不是页面。凡「取页面上的控件」的地方
+    都先过这个函数解包，否则会拿到 AttributeError。
+
+    v1.40.7 起页面结构恒定（不再有运行期包装），剥两层即可命中真页面：
+    判据是「这一层是 QScrollArea」→ 取 widget（画布）→ 再看画布里固定宽的那个孩子。
+    """
+    from PySide6.QtWidgets import QScrollArea, QWidget
+    seen = 0
+    while isinstance(pg, QScrollArea) and seen < 4:
+        inner = pg.widget()
+        if inner is None:
+            break
+        pg = inner
+        seen += 1
+    # 现在 pg 是画布（或裸页）—— 若画布里只有「一个固定宽的孩子」，那一层才是真页面
+    if isinstance(pg, QWidget) and pg.layout() is not None:
+        lay = pg.layout()
+        kids = []
+        for i in range(lay.count()):
+            w = lay.itemAt(i).widget()
+            if w is not None and w.width() > 100 and w.layout() is not None:
+                kids.append(w)
+        if len(kids) == 1:
+            pg = kids[0]
+    return pg
+
+
 def center(widget, ref):
     p = widget.mapTo(ref, QPoint(widget.width() // 2, widget.height() // 2))
     return [int(p.x()), int(p.y())]
@@ -67,11 +99,29 @@ for b in win.findChildren(QPushButton):
 res["main_size"] = [win.width(), win.height()]
 
 # ---------------- 设置对话框（真机尺寸同 SettingsDialog.__init__ 的算法）
-# 注意：offscreen 平台的 primaryScreen 只有 800×800，不能用它算 —— 真机是 1920×1080
-# （可用高 ~1040），代入同一个公式得到 min(1000,·)=1000 × min(900,·)=900。
-dw, dh = 1000, min(900, 1040 - 40)
+# ★ v1.40.7：默认尺寸固定 1320×960（DEF_W/DEF_H），不再看屏幕宽高
+#   （离屏平台 primaryScreen 只有 800×800，用它算会得到不该有的收敛值）。
+dw, dh = 1320, 960
 res["dialog_size"] = [dw, dh]
-res["dialog_size_note"] = "按 1920x1080 真机代入 SettingsDialog 的公式；offscreen 屏幕太小不能直接用"
+res["dialog_size_note"] = ("v1.40.7：固定默认 1320x960（DEF_W/DEF_H）；"
+                           "offscreen 屏幕太小不能直接代入真机算法")
+
+# ★ v1.40.7：把 screen() 换成假屏幕（复刻真机 2560×1392），
+#   否则 `max(760, avail.width()-40)` 会被离屏的 800 兜底缩小，量出来的
+#   对话框尺寸与真机不符 → 坐标全错。
+from PySide6.QtCore import QRect as _QRect
+
+
+class _FakeScr:
+    def availableGeometry(self):
+        return _QRect(0, 0, 2560, 1392)
+
+    def geometry(self):
+        return _QRect(0, 0, 2560, 1440)
+
+
+import ui_settings as _uis
+_uis.SettingsDialog.screen = lambda self: _FakeScr()
 
 dlg = SettingsDialog(win)
 dlg.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -82,6 +132,18 @@ app.processEvents()
 res["dialog_nav"] = {}
 for k, b in dlg.sub_btns.items():
     res["dialog_nav"][k] = center(b, dlg)
+
+# v1.39.0（需求 3）：导航项旁边的转圈位置（ring 隐藏时也在布局里占位失败，
+# 所以先 set_state(True) 让它显示出来再量，量完复位）。
+# live_verify 用它从工具窗截图里裁出转圈区域，验证「进行中任务旁有转圈」。
+res["dialog_nav_rings"] = {}
+for k, ring in getattr(dlg, "nav_rings", {}).items():
+    ring.set_state(True, 0, "coords")
+    app.processEvents()
+    _p = ring.mapTo(dlg, QPoint(0, 0))
+    res["dialog_nav_rings"][k] = [_p.x(), _p.y(), ring.width(), ring.height()]
+    ring.set_state(False)
+    app.processEvents()
 
 # 内容卡片分组的位置（用于截图裁剪参考）
 for g in dlg.findChildren(QGroupBox):
@@ -108,6 +170,80 @@ app.processEvents()
 rep = [b for b in dlg.findChildren(QPushButton) if "修复历史资料" in b.text()]
 res["repair_btn"] = center(rep[0], dlg) if rep else None
 res["repair_btn_text"] = rep[0].text() if rep else None
+
+# v1.39.0（需求 1）：数据源行的「测试」按钮（行序 = SOURCE 顺序，第 0 个是 minnano）。
+# 真机验收点它 → 截图应能看到 403 的人话提示（Cloudflare 指纹校验）或真的可用。
+_tests = [b for b in dlg.findChildren(QPushButton) if b.text() == "测试"]
+_tests.sort(key=lambda b: b.mapTo(dlg, QPoint(0, 0)).y())
+res["scraper_test_btns"] = [center(b, dlg) for b in _tests]
+res["scraper_test_note"] = "行序即 SOURCE 顺序：[0]=minnano(www.minnano-av.com)、[1]=IMDB"
+
+# v1.40.0（反馈 4）：「Cloudflare 验证…」按钮 —— 真机验收点它应弹出三步走对话框。
+# 它和数据源按钮行是同一排（`测试全部数据源` 右边），所以必须**先确保当前页是
+# 演员刮削**再量（非当前页的控件几何是陈旧的，坐标会乱）。
+_cf = [b for b in dlg.findChildren(QPushButton) if "Cloudflare" in b.text()]
+res["scraper_cf_btn"] = center(_cf[0], dlg) if _cf else None
+res["scraper_cf_btn_text"] = _cf[0].text() if _cf else None
+
+# v1.40.1（反馈 3）：站点验证对话框**内部**的按钮坐标 —— 真机验收要实测
+# 「打开内置浏览器」真的能拉起子进程。对话框是常驻实例（`dlg._cf_dlg`），
+# 打开它、按客户区量出按钮中心（相对对话框自身）。
+try:
+    dlg._open_cloudflare()
+    app.processEvents()
+    _cfd = getattr(dlg, "_cf_dlg", None)
+    if _cfd is not None:
+        _cfd.resize(_cfd.sizeHint())
+        _cfd.show()
+        app.processEvents()
+        res["cf_dlg_open_builtin"] = center(_cfd.btn_open, _cfd)
+        res["cf_dlg_open_builtin_text"] = _cfd.btn_open.text()
+        # v1.40.2（反馈 2）：新增的**独立**「读取 Cookie」按钮坐标
+        res["cf_dlg_read_btn"] = center(_cfd.btn_read, _cfd)
+        res["cf_dlg_read_btn_text"] = _cfd.btn_read.text()
+        res["cf_dlg_check_wv"] = center(_cfd.btn_webview, _cfd)
+        res["cf_dlg_save"] = center(_cfd.btn_save, _cfd)
+        res["cf_dlg_clear"] = center(_cfd.btn_clear, _cfd)
+        res["cf_dlg_close"] = center(_cfd.btn_close, _cfd)
+        res["cf_dlg_adv"] = center(_cfd.btn_adv, _cfd)
+        res["cf_dlg_client"] = [_cfd.width(), _cfd.height()]
+        res["cf_dlg_adv_visible"] = bool(_cfd.adv.isVisibleTo(_cfd))
+        _cfd.close()
+        app.processEvents()
+except Exception as _e:
+    print(f"[警告] CloudflareDialog 坐标测量失败：{type(_e).__name__}: {_e}")
+
+# v1.40.0（反馈 3）：代理显式开关 + 输入框（真机验收要看它关着时输入框置灰）。
+_sp = getattr(dlg, "sc_proxy", None)
+_so = getattr(dlg, "sc_proxy_on", None)
+res["scraper_proxy_edit"] = center(_sp, dlg) if _sp is not None else None
+res["scraper_proxy_toggle"] = center(_so, dlg) if _so is not None else None
+res["scraper_proxy_note"] = ("v1.40.0 反馈 3：代理由 sc_proxy_on 显式开关决定；"
+                             "关掉时输入框置灰、且请求纯直连（不套系统代理）")
+
+# v1.40.0（反馈 1/2）：三个模块的标题与日志区位置（供截图裁剪与肉眼核对）。
+res["scraper_modules"] = [g.title() for g in dlg.findChildren(QGroupBox)]
+_sl = getattr(dlg, "sc_log", None)
+res["scraper_log_rect"] = ([_sl.x(), _sl.y(), _sl.width(), _sl.height()]
+                           if _sl is not None else None)
+
+# v1.38.0（需求 2）：演员检测页的多选批量工具栏。
+# 只取坐标，**真机验收不得点「批量确认关联」** —— 它会对真实索引执行
+# db.merge_people（删除演员记录、搬移作品关联），是不可逆的写操作。
+# 验收只做到：进页 → 开始检测（只读）→ 全选（只改复选框状态）→ 截图。
+dlg._show("演员检测")
+app.processEvents()
+_pg = unwrap(dlg._pg_actorcheck)
+for _k, _attr in (("actorcheck_run_btn", "run_btn"),
+                  ("actorcheck_sel_all", "sel_all_btn"),
+                  ("actorcheck_sel_none", "sel_none_btn"),
+                  ("actorcheck_batch_merge", "batch_merge_btn")):
+    _w = getattr(_pg, _attr, None)
+    res[_k] = center(_w, dlg) if _w is not None else None
+    if _w is None:
+        print(f"[警告] ActorCheckPage.{_attr} 不存在，演员检测页工具栏可能没建出来")
+res["actorcheck_tree_header"] = [_pg.tree.headerItem().text(i)
+                                 for i in range(_pg.tree.columnCount())]
 
 # v1.24.0：新增两页也要真机点一下 —— 它们分别是 insight / recommend 两个
 # hidden-import 模块的唯一入口，漏打包就会在这里炸。

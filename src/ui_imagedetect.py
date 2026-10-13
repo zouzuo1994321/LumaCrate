@@ -346,6 +346,11 @@ class ImageDetectPage(QWidget):
             ("color:#8fd18f;font-size:11px;" if ok else "color:#e8b76a;font-size:11px;"))
 
     # ---------- 检测 ----------
+    def is_busy(self):
+        """v1.39.0（需求 3）：检测是否正在跑 —— 工具窗左侧导航据此显示转圈。"""
+        w = getattr(self, "_worker", None)
+        return bool(w is not None and w.isRunning())
+
     def _run(self):
         if self._worker is not None and self._worker.isRunning():
             return

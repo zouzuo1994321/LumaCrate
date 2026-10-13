@@ -1,17 +1,14 @@
 # -*- coding: utf-8 -*-
-"""流明盒 (LumaCrate) 启动入口 —— 独立桌面程序，不依赖浏览器。"""
+"""流明盒 (LumaCrate) 启动入口 —— 独立桌面程序，不依赖浏览器。
+
+v1.40.1（反馈 3）：本文件同时是「内置浏览器取 cookie」子进程的入口 ——
+带 `--cf-browser` 参数启动时**不初始化 Qt**，直接把控制权交给 `cf_browser.main()`
+（pywebview 要求 MainThread，见文件末尾的分流）。所以 Qt 相关 import 全部延迟到
+`main()` 内部，避免子进程白白加载一遍 Qt。
+"""
 import os
 import sys
 import subprocess
-
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon
-
-import database as db
-import version as ver
-import applog
-import splash as splash_mod
-from main_window import MainWindow, load_style
 
 
 def _app_resource(name):
@@ -87,6 +84,16 @@ def _i18n_tip(text):
 
 
 def main():
+    # v1.40.1（反馈 3）：Qt 相关 import 延迟到此处 —— 这样带 `--cf-browser` 启动的
+    # 子进程（见文件末尾分流）不会白白加载一遍 Qt。
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QIcon
+    import database as db
+    import version as ver
+    import applog
+    import splash as splash_mod
+    from main_window import MainWindow, load_style
+
     applog.setup()                   # v1.13.0：先把「全部运行记录」的日志系统挂上
     applog.install_excepthook()      # 未捕获异常也写进日志（打包后没有控制台）
     applog.log(f"启动 {ver.APP_NAME} {ver.FULL_VERSION}  frozen={getattr(sys, 'frozen', False)}")
@@ -95,6 +102,27 @@ def main():
     # v1.24.0（反馈 4）：蓝色启动画面。先建 QApplication（Qt 控件必须有 app），
     # 再用真实启动步骤驱动进度；LMC_NO_SPLASH=1 时 make_splash 返回 None，全流程照常。
     app = QApplication(sys.argv)
+
+    # v1.39.3：**必须显式指定 QStyle 为 Fusion**。
+    # Qt 6 在 Windows 11 上默认用 `windows11` 风格，它是**唯一画不出
+    # QTreeView::indicator（树控件行内复选框）的风格** —— 真机实测：
+    #   windows11    → checkbox 矩形 16x19 非零，但复选框填充/描边色**一个像素都没有**
+    #   windowsvista → 770 像素     Windows → 820 像素     Fusion → 820 像素
+    # 也就是 `QStyleSheetStyle` 画的 `QTreeView::indicator` 与 windows11 的原生
+    # checkbox 绘制路径冲突，导致「演员检测」结果树的「选择」列一格不画。
+    # ⚠ 这也说明 v1.39.0 / v1.39.2 两轮「改 indicator 背景色」的修复方向是错的：
+    #   颜色从来不是问题，离屏探针之所以全绿是因为 offscreen 后端不用 windows11。
+    #   **凡是验「控件是否真画出来」的探针，必须在 `QT_QPA_PLATFORM=windows` 下跑。**
+    # Fusion 与 windowsvista 的观感差异对本软件（深色玻璃主题 + 全局 QSS）不可见，
+    # 换来的是所有控件在所有 Windows 版本上表现一致。
+    try:
+        from PySide6.QtWidgets import QStyleFactory
+        _st = QStyleFactory.create("Fusion")
+        if _st is not None:
+            app.setStyle(_st)
+    except Exception as e:
+        applog.log("设置 Fusion 风格失败，沿用系统默认：%s" % e)
+
     app.setApplicationName(ver.APP_NAME)
     app.setApplicationVersion(ver.VERSION)
     logo = _app_resource("logo-4.png")   # v1.35.1：新品牌图标（金色胶片 LumaCrate）
@@ -141,4 +169,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # v1.40.1（反馈 3）：内置浏览器取 cookie 的**子进程入口**。
+    # 打包成单文件 exe 后，`cf_browser.py` 没法再由「python 脚本路径」启动 ——
+    # 于是约定用 exe 自身 + `--cf-browser` 开关：这里第一时间分流，把控制权交给
+    # `cf_browser.main()`（pywebview 要求 MainThread，所以必须是**新进程**）。
+    if len(sys.argv) > 2 and sys.argv[1] == "--cf-browser":
+        import cf_browser
+        del sys.argv[1]                 # 让 cf_browser 只看到自己的参数
+        sys.exit(cf_browser.main())
     main()

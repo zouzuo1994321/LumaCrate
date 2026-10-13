@@ -190,6 +190,20 @@ DEFAULT_TAGOPT = {
 }
 
 
+def _truthy(v, default=False) -> bool:
+    """把任意来源的「开关值」归一成 bool。
+
+    v1.40.0（反馈 3）：**绝不能写 `bool(v)`** —— `bool("0")` 是 `True`，
+    手改过 settings.json 的用户（把开关写成字符串）会被判成「开着」。
+    字符串按 ("", "0", "false", "no", "off") 判假；None / 缺键走 default。
+    """
+    if v is None:
+        return bool(default)
+    if isinstance(v, str):
+        return v.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(v)
+
+
 def _clean_prefs(raw, default: dict, filter_keys) -> dict:
     """把任意来源的偏好规整成安全结构（只留已知键、只留 JSON 标量）。"""
     out = {"sort": default["sort"], "asc": bool(default["asc"]), "filters": {}}
@@ -320,6 +334,12 @@ DEFAULT_SCRAPER = {
     "timeout": 15,               # 单次请求超时（秒）
     "limit": 0,                  # 单次最多处理人数，0 = 不限
     "retry": 1,                  # 失败重试次数
+    # v1.40.0（反馈 3）：代理改为**显式开关**。
+    # 老行为是「填了就用、留空就自动套系统代理」，用户无法表达「我要直连、别用系统代理」；
+    # 真机排查时正是被这一点误导（切代理 / 关代理表现一致，看起来像代理没生效）。
+    # 现在：proxy_enabled=False（默认）→ 完全直连，忽略 proxy 与系统代理；
+    #       proxy_enabled=True        → 用 proxy（为空时回落系统代理）。
+    "proxy_enabled": False,      # 是否启用代理（关闭 = 直连，忽略下面的 proxy）
     "proxy": "",                 # 代理，例 http://127.0.0.1:7890（minnano-av 常需代理）
     "photo_dir": "",             # 头像缓存目录，空 = exe 同级 cache/people
 }
@@ -520,6 +540,11 @@ class Settings:
             self.scraper["sources"] = order
             en = self.scraper.get("sources_enabled") or {}
             self.scraper["sources_enabled"] = {k: bool(en.get(k, True)) for k in known}
+            # v1.40.0（反馈 3）：代理开关归一。老配置**没有这个键** → 走 default False
+            # （直连）；这是有意的行为变更：老用户升级后刮削默认不再偷偷套系统代理，
+            # 想用代理请在「刮削策略 → 使用代理」里打开。脏值（"0"/"no"）也在这里判假。
+            self.scraper["proxy_enabled"] = _truthy(
+                self.scraper.get("proxy_enabled", False), False)
         # 后台任务指向的库可能已被删除（尤其是本次升级清掉的内置库）→ 复位为「全部库」
         self._drop_missing_background_library()
 
@@ -1068,6 +1093,19 @@ class Settings:
         else:
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(base, "cache", "people")
+
+    def scraper_proxy(self) -> str:
+        """刮削实际要用的代理；返回空串 = 直连。
+
+        v1.40.0（反馈 3）：代理由显式开关 `proxy_enabled` 决定 ——
+          · 关（默认）→ 一律直连，**连系统代理也不套**。用户原话「切换代理或者关闭
+            代理后一样不可用」，说明他需要一条真正干净的直连路径来对比排查；
+            老行为「留空就自动套系统代理」让「关代理」这个动作根本无法表达。
+          · 开 → 用 `proxy`；`proxy` 空时回落到系统代理（保留老用户的便利）。
+        """
+        if not _truthy(self.scraper.get("proxy_enabled", False), False):
+            return ""
+        return (self.scraper.get("proxy") or "").strip()
 
 
 _SETTINGS = None

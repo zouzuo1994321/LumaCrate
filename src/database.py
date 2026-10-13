@@ -1149,10 +1149,12 @@ def toggle_person_pinned(person_id: int) -> int:
             conn.close()
 
 
-def cast_crew_map(ids=None):
-    """取出 media_id -> {'actors': '演员1 / 演员2', 'directors': '导演1'}。
+def cast_crew_map_ex(ids=None):
+    """取出 media_id -> {'actors': [(name, fav, pin), ...], 'directors': [...]}。
 
-    用于影片卡片小字（演员 + 导演）。导演以 media_people.role_type='Director' 区分。
+    v1.37.0（反馈 1/2）：除名字外额外携带**每个艺人**的 收藏(fav) / 置顶(pin) 标记，
+    供卡片与详情页按标记给名字上色（收藏→金色、置顶→加粗、二者兼有→金色加粗），
+    而不必为每张卡片再发一次查询。导演以 media_people.role_type='Director' 区分。
 
     v1.14.0：`ids` 限定只查这批影片 —— 影片墙改成按页加载后，每页只需几十条关联，
     不必再把几十万行关联整表拉进内存（这是「一进媒体库就卡死」的第一元凶）。
@@ -1161,20 +1163,17 @@ def cast_crew_map(ids=None):
     with _LOCK:
         conn = get_conn()
         try:
+            base = ("SELECT mp.media_id AS mid, p.name AS name, p.role_type AS rtype, "
+                    "COALESCE(p.favorite,0) AS fav, COALESCE(p.pinned,0) AS pin "
+                    "FROM media_people mp JOIN people p ON p.id=mp.person_id")
             if ids is None:
-                rows = conn.execute(
-                    "SELECT mp.media_id AS mid, p.name AS name, p.role_type AS rtype "
-                    "FROM media_people mp JOIN people p ON p.id=mp.person_id "
-                    "ORDER BY mp.media_id, mp.person_order"
-                ).fetchall()
+                rows = conn.execute(base + " ORDER BY mp.media_id, mp.person_order").fetchall()
             else:
                 ids = [int(i) for i in ids]
                 for part in _chunks(ids):
                     ph = ",".join("?" * len(part))
                     rows.extend(conn.execute(
-                        "SELECT mp.media_id AS mid, p.name AS name, p.role_type AS rtype "
-                        "FROM media_people mp JOIN people p ON p.id=mp.person_id "
-                        f"WHERE mp.media_id IN ({ph}) "
+                        base + f" WHERE mp.media_id IN ({ph}) "
                         "ORDER BY mp.media_id, mp.person_order", part).fetchall())
         finally:
             conn.close()
@@ -1184,12 +1183,29 @@ def cast_crew_map(ids=None):
         if not nm:
             continue
         mid = r["mid"]
-        (directors if r["rtype"] == "Director" else actors).setdefault(mid, []).append(nm)
+        t = (nm, int(r["fav"] or 0), int(r["pin"] or 0))
+        (directors if r["rtype"] == "Director" else actors).setdefault(mid, []).append(t)
     out = {}
     for mid in set(actors) | set(directors):
         out[mid] = {
-            "actors": " / ".join(dict.fromkeys(actors.get(mid, []))),
-            "directors": " / ".join(dict.fromkeys(directors.get(mid, []))),
+            "actors": actors.get(mid, []),
+            "directors": directors.get(mid, []),
+        }
+    return out
+
+
+def cast_crew_map(ids=None):
+    """取出 media_id -> {'actors': '演员1 / 演员2', 'directors': '导演1'}（纯文本兼容接口）。
+
+    v1.37.0：直接复用 cast_crew_map_ex 的查询结果，只把名字拼回字符串，避免重复查询；
+    需要 收藏/置顶 标记的调用方请改用 cast_crew_map_ex。
+    """
+    ex = cast_crew_map_ex(ids)
+    out = {}
+    for mid, c in ex.items():
+        out[mid] = {
+            "actors": " / ".join(dict.fromkeys(n for n, _, _ in c["actors"])),
+            "directors": " / ".join(dict.fromkeys(n for n, _, _ in c["directors"])),
         }
     return out
 

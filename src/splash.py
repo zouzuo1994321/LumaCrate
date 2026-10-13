@@ -33,17 +33,45 @@ from PySide6.QtWidgets import QSplashScreen, QApplication
 import version as ver
 import i18n      # v1.32.0：Slogan 与启动提示语跟随界面语言（叶子模块）
 
-# —— 蓝色主题（主色调）——————————————————————————————————————
-_BG_TOP = QColor("#101b2e")        # 深蓝（上）
-_BG_BOT = QColor("#0a1220")        # 更深蓝（下）
-_GLOW = QColor(61, 139, 253, 60)    # 顶部蓝色渐晕
-_ACCENT_A = QColor("#4f9dff")      # 进度条起点（亮蓝）
-_ACCENT_B = QColor("#1f6fe0")      # 进度条终点（深蓝）
-_TRACK = QColor(255, 255, 255, 30)  # 进度槽
-_TEXT = QColor("#e9f2ff")          # 主文字
-_DIM = QColor("#8ea6c8")           # 次要文字
-_SLOGAN = QColor("#a9c8ff")        # Slogan 行（v1.27.0，比副标题亮一档的蓝）
-_FAINT = QColor("#5d7a9c")         # 版本 / 版权行（更暗的蓝灰）
+# —— 配色：默认跟随「外观 → 高亮色」（v1.37.0 反馈 5）——————————————————
+# 启动画面底色取高亮色的**深色倾向**（同色相、压低明度/饱和），进度条与描边用高亮色本身；
+# 这样换任何高亮色，启动画面整体跟着变色，又保持深色可读。读取不到高亮色时回落到经典蓝。
+import colorsys
+
+def _clamp8(v):
+    return max(0, min(255, int(round(v))))
+
+def _accent_hex():
+    try:
+        import config as _cfg
+        return _cfg.get_settings().appearance.get("accent")
+    except Exception:
+        return None
+
+def _derive_splash_theme(accent_hex):
+    """由高亮色派生一整套深色启动画面配色。键名见 drawContents / _draw_logo / _draw_bar。"""
+    try:
+        import config as _cfg
+        r, g, b = _cfg.accent_rgb(accent_hex)
+    except Exception:
+        r, g, b = (61, 139, 253)            # 回落经典蓝
+    h, l, s = colorsys.rgb_to_hls(r / 255.0, g / 255.0, b / 255.0)
+    def hls(ll, ss):
+        rr, gg, bb = colorsys.hls_to_rgb(
+            h, max(0.05, min(0.95, ll)), max(0.0, min(1.0, ss)))
+        return QColor(_clamp8(rr * 255), _clamp8(gg * 255), _clamp8(bb * 255))
+    return {
+        "bg_top": hls(0.12, 0.42),          # 深底（上）
+        "bg_bot": hls(0.06, 0.34),          # 更深底（下）
+        "glow": QColor(r, g, b, 55),        # 顶部渐晕（高亮色）
+        "accent_a": QColor(r, g, b),        # 进度条亮端 / logo 渐变起点
+        "accent_b": hls(0.30, 0.55),        # 进度条暗端 / logo 渐变终点
+        "track": QColor(255, 255, 255, 30),  # 进度槽
+        "text": QColor("#eef3fb"),          # 主文字（近白，保证可读）
+        "dim": hls(0.62, 0.32),             # 次要文字（高亮色相浅色调）
+        "slogan": hls(0.74, 0.50),          # Slogan 行（比副标题亮一档）
+        "faint": hls(0.42, 0.22),           # 版本 / 版权行（更暗的浅色调）
+    }
 
 
 class SplashScreen(QSplashScreen):
@@ -74,7 +102,7 @@ class SplashScreen(QSplashScreen):
     _FOOT_BOTTOM = 5.0                 # 版权行距底边
 
     def __init__(self, logo_path=None, title=None, version_text=None,
-                 copyright_text=None):
+                 copyright_text=None, accent_hex=None):
         # 第一个参数必须是 pixmap（QSplashScreen 的签名是 (splash_pixmap, flags)）；
         # 传一个 **W×H 的全透明** pixmap，圆角外的区域才能透出去。
         pm = QPixmap(self.W, self.H)
@@ -96,6 +124,9 @@ class SplashScreen(QSplashScreen):
         self._fade = None                 # 持有动画引用，防 GC
 
         self._logo = self._load_logo(logo_path)
+
+        # v1.37.0（反馈 5）：配色跟随「外观 → 高亮色」。accent_hex 未显式传入时按配置读。
+        self._t = _derive_splash_theme(accent_hex if accent_hex else _accent_hex())
 
         # 不确定态用的小滑块相位定时器（按需启动）
         self._marquee = QTimer(self)
@@ -201,24 +232,25 @@ class SplashScreen(QSplashScreen):
         W, H = self.W, self.H
         body = QRectF(1.0, 1.0, W - 2.0, H - 2.0)
 
-        # 1) 圆角深蓝底
+        # 1) 圆角深底（跟随高亮色深色倾向）
         path = QPainterPath()
         path.addRoundedRect(body, 16, 16)
         p.setClipPath(path)
         g = QLinearGradient(0, 0, 0, H)
-        g.setColorAt(0.0, _BG_TOP)
-        g.setColorAt(1.0, _BG_BOT)
+        g.setColorAt(0.0, self._t["bg_top"])
+        g.setColorAt(1.0, self._t["bg_bot"])
         p.fillPath(path, g)
 
-        # 2) 顶部蓝色渐晕（把主色调压出来）
+        # 2) 顶部渐晕（把主色调压出来）
         rg = QRadialGradient(W / 2.0, -H * 0.15, H * 1.05)
-        rg.setColorAt(0.0, _GLOW)
+        rg.setColorAt(0.0, self._t["glow"])
         rg.setColorAt(1.0, QColor(0, 0, 0, 0))
         p.fillPath(path, rg)
 
-        # 3) 蓝色描边 + 顶部高光
+        # 3) 描边 + 顶部高光（描边用高亮色，半透明）
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(79, 157, 255, 120), 1.2))
+        bc = QColor(self._t["accent_a"]); bc.setAlpha(120)
+        p.setPen(QPen(bc, 1.2))
         p.drawRoundedRect(body.adjusted(0.6, 0.6, -0.6, -0.6), 15, 15)
         hi = QLinearGradient(0, 0, 0, 60)
         hi.setColorAt(0.0, QColor(255, 255, 255, 26))
@@ -231,20 +263,20 @@ class SplashScreen(QSplashScreen):
         self._draw_logo(p, lx, R["logo"])
 
         # 5) 标题 + 英文名
-        p.setPen(_TEXT)
+        p.setPen(self._t["text"])
         f = QFont(); f.setFamily("Microsoft YaHei UI"); f.setPixelSize(24); f.setBold(True)
         p.setFont(f)
         p.drawText(QRectF(0, R["title"], W, self._TITLE_H),
                    Qt.AlignHCenter | Qt.AlignVCenter, self.title)
-        p.setPen(_DIM)
+        p.setPen(self._t["dim"])
         f2 = QFont(); f2.setFamily("Microsoft YaHei UI"); f2.setPixelSize(11)
         f2.setLetterSpacing(QFont.AbsoluteSpacing, 2.2)
         p.setFont(f2)
         p.drawText(QRectF(0, R["sub"], W, self._SUB_H),
                    Qt.AlignHCenter | Qt.AlignVCenter, ver.APP_NAME_EN)
 
-        # 5.5) Slogan（v1.27.0 反馈 1）：比副标题亮一档的蓝，字距略收，更像一句标语
-        p.setPen(_SLOGAN)
+        # 5.5) Slogan（v1.27.0 反馈 1）：比副标题亮一档的高亮色浅调
+        p.setPen(self._t["slogan"])
         fs = QFont(); fs.setFamily("Microsoft YaHei UI"); fs.setPixelSize(12)
         fs.setLetterSpacing(QFont.AbsoluteSpacing, 1.2)
         p.setFont(fs)
@@ -255,14 +287,14 @@ class SplashScreen(QSplashScreen):
         self._draw_bar(p, W)
 
         # 7) 提示语
-        p.setPen(_DIM)
+        p.setPen(self._t["dim"])
         f3 = QFont(); f3.setFamily("Microsoft YaHei UI"); f3.setPixelSize(11)
         p.setFont(f3)
         p.drawText(QRectF(30, R["tip"], W - 60, 18), Qt.AlignHCenter | Qt.AlignVCenter,
                    self._tip)
 
         # 8) 版本 / 版权
-        p.setPen(_FAINT)
+        p.setPen(self._t["faint"])
         f4 = QFont(); f4.setFamily("Microsoft YaHei UI"); f4.setPixelSize(9)
         p.setFont(f4)
         p.drawText(QRectF(20, R["ver"], W - 40, self._FOOT_H),
@@ -275,11 +307,11 @@ class SplashScreen(QSplashScreen):
         if self._logo is not None:
             p.drawPixmap(int(x), int(y), self._logo)
             return
-        # 兜底：自绘圆角蓝色方块 + 「影」
+        # 兜底：自绘圆角高亮色方块 + 「影」
         r = QRectF(x, y, self.LOGO, self.LOGO)
         lg = QLinearGradient(r.topLeft(), r.bottomRight())
-        lg.setColorAt(0.0, _ACCENT_A)
-        lg.setColorAt(1.0, _ACCENT_B)
+        lg.setColorAt(0.0, self._t["accent_a"])
+        lg.setColorAt(1.0, self._t["accent_b"])
         p.setPen(Qt.NoPen)
         p.setBrush(lg)
         p.drawRoundedRect(r, 26, 26)
@@ -296,12 +328,12 @@ class SplashScreen(QSplashScreen):
         by = R["bar"]
         # 槽
         p.setPen(Qt.NoPen)
-        p.setBrush(_TRACK)
+        p.setBrush(self._t["track"])
         p.drawRoundedRect(QRectF(bx, by, bw, bh), bh / 2, bh / 2)
         # 填充
         lg = QLinearGradient(bx, 0, bx + bw, 0)
-        lg.setColorAt(0.0, _ACCENT_A)
-        lg.setColorAt(1.0, _ACCENT_B)
+        lg.setColorAt(0.0, self._t["accent_a"])
+        lg.setColorAt(1.0, self._t["accent_b"])
         if not self._indeterminate:
             fill = bw * (self._pct / 100.0)
             if fill > 0.5:
@@ -310,7 +342,7 @@ class SplashScreen(QSplashScreen):
         # 百分比：**右对齐到进度槽右端**、比槽高一行。
         # 居中的话会和副标题在同一水平带上打架（v1.24.0 踩过），靠右还能顺手让
         # 「已走完多少」和槽的右端对齐，读起来更直观。
-        p.setPen(_DIM)
+        p.setPen(self._t["dim"])
         f = QFont(); f.setFamily("Microsoft YaHei UI"); f.setPixelSize(10)
         p.setFont(f)
         p.drawText(QRectF(bx, R["pct"], bw, self._PCT_H),

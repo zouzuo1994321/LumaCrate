@@ -275,9 +275,20 @@ class CastAvatar(QFrame):
         img.setPixmap(circle_pixmap(person.get("photo_path") or person.get("thumb"), size))
         img.setFixedSize(size, size)
         v.addWidget(img, alignment=Qt.AlignHCenter)
+        # v1.37.0（反馈 1）：收藏 → 金色；置顶 → 加粗；收藏+置顶 → 金色加粗。
+        fav = person.get("favorite")
+        pin = person.get("pinned")
+        if fav and pin:
+            _nc, _nw = "#d4af37", "bold"
+        elif fav:
+            _nc, _nw = "#d4af37", "normal"
+        elif pin:
+            _nc, _nw = "#e8e0d4", "bold"
+        else:
+            _nc, _nw = "#e8e0d4", "normal"
         name = QLabel(person.get("name", ""))
         name.setAlignment(Qt.AlignHCenter)
-        name.setStyleSheet("font-size:12px;color:#e8e0d4;")
+        name.setStyleSheet(f"font-size:12px;color:{_nc};font-weight:{_nw};")
         name.setToolTip(person.get("name", ""))
         v.addWidget(name)
         role = QLabel(person.get("char_role") or person.get("role_type") or "")
@@ -308,17 +319,19 @@ class HeroView(QScrollArea):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 顶部返回行
-        topbar = QWidget()
-        tl = QHBoxLayout(topbar)
-        tl.setContentsMargins(18, 10, 18, 0)
-        if self.on_back:
+        # 顶部返回行（v1.37.0 反馈 3）：仅在确实需要返回按钮时才建这一行。
+        # 首页右侧详情 on_back=None，原本仍建一个空 topbar（上边距 10px）会露出一条
+        # 顶部空白带，看起来像「少了几个像素」。on_back 为 None 时直接不建，让横幅顶到顶端。
+        if self.on_back is not None:
+            topbar = QWidget()
+            tl = QHBoxLayout(topbar)
+            tl.setContentsMargins(18, 10, 18, 0)
             back = QPushButton("← 返回")
             back.setObjectName("Ghost")
             back.clicked.connect(self.on_back)
             tl.addWidget(back)
-        tl.addStretch(1)
-        root.addWidget(topbar)
+            tl.addStretch(1)
+            root.addWidget(topbar)
 
         # 横幅
         banner = HeroBanner(430)

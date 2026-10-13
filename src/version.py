@@ -12,10 +12,10 @@
     第三位 = 小版本迭代(bug 修复 / 小改进)
 """
 
-# 外部版本号 v1.36.0
+# 外部版本号 v1.40.11
 PRODUCT_GENERATION = 1   # 产品代
-MAJOR_ITER = 36          # 大版本迭代 -> 第二位（v1.36.0：引导向量中文转日文 + 双击崩溃修复）
-MINOR_ITER = 0           # 小版本迭代 -> 第三位（v1.36.0 为功能性新增，Z 归 0）
+MAJOR_ITER = 40          # 大版本迭代 -> 第二位（v1.40.0：刮削页统计独立成模块 + 日志区加大 + 代理显式开关 + Cloudflare 验证助手）
+MINOR_ITER = 11          # 小版本迭代 -> 第三位（v1.40.11：执行日志框样式复刻「运行日志（实时）」—— 等宽字体 + 半透明深色底 + 浅色字 + 不自动换行；README 按 CertVault 模板全面升级；清理工程目录缓存与临时文件）
 
 VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 
@@ -227,8 +227,575 @@ VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 #          ActorCard 的 mousePressEvent + mouseDoubleClickEvent、合集卡
 #          mousePressEvent 四处统一同构，防止日后重蹈。
 #       注：打包当天取 260930；末四位按「每次打包自增」连续计数。
-BUILD_DATE = "260930"
-BUILD_SEQ = "0054"
+# 0055：v1.37.0 五条反馈 ——
+#       ① 详情页「演职人员信息」：艺人/导演 收藏→名字金色、置顶→名字加粗、
+#          收藏+置顶→名字金色加粗（数据来自 get_cast 已带的 favorite/pinned 标记）。
+#       ② 影片卡片小字（演员 / 导演）同步上色规则；新增 cast_crew_map_ex() 携带
+#          每个艺人的 收藏/置顶 标记（仍走「按页批量查」模式，不为每张卡片多发查询），
+#          cast_crew_map() 改为复用其结果只拼回纯文本，避免重复扫关联表。
+#       ③ 首页右侧详情顶部空白带（红框处「像少了几个像素」）：根因是 HeroView._build
+#          即便 on_back=None（首页详情无返回按钮）仍建一个带 10px 上边距的空 topbar，
+#          露出一条死区。改为 on_back 为 None 时直接不建该行，横幅顶到顶端。
+#       ④ 首页右侧「影片详细信息」面板加高亮色边框（detail_host 开 WA_StyledBackground
+#          + style.qss 的 QWidget#DetailHost 规则，背景保持透明不盖磨砂玻璃）。
+#       ⑤ 启动动画背景/进度条/描边跟随「外观 → 高亮色」：splash.py 由硬编码蓝改为
+#          按 accent 在 HLS 空间派生深色底 + 高亮色进度条，读不到高亮色时回落经典蓝。
+#       注：打包当天取 261007；末四位按「每次打包自增」连续计数。
+# 0056：v1.38.0 一条 bug 修复 + 一条功能新增 ——
+#       ①（bug 修复）多目录「顺序即扫描优先级，自上而下依次扫描」过程中，点「刷新一下」
+#          首页数量（侧栏库名（N）/ 左下角统计 / 首页列表）不更新。根因：ScanWorker 的
+#          live 信号（扫描中节流 1.2s 刷一次首页）只在第一种入口（顶栏「扫描媒体库」）
+#          被 connect 到 MainWindow._on_scan_live；而媒体库右键「扫描」(_scan_library_cat)、
+#          文件夹扫描对话框(FolderScanDialog._start_scan)、后台定时扫描(_bg_scan_next)
+#          三处创建 ScanWorker 时漏连 live → 这几条路径扫描期间首页数字一动不动。
+#          修法：三处补上 self._worker.live.connect(self._on_scan_live)（后台扫描用
+#          w.live.connect(...)）。
+#       ②（功能新增）演员检测支持多选批量确认关联：左侧结果树最左新增「选择」复选框列，
+#          每簇可勾选；树下方新增「全选建议合并 / 全不选 / 批量确认关联（合并 N 簇）」
+#          工具栏 —— 一键把勾选的所有「建议合并」簇按各自默认保留艺名批量合并
+#          （复用 db.merge_people，只补空字段 + 合并别名与 meta，不动视频/nfo），
+#          每簇默认保留「作品最多 / 有头像」的那条；存疑对不参与批量合并（无自动合并）。
+#       注：打包当天取 261012；末四位按「每次打包自增」连续计数。
+# 0057：v1.39.0 三条反馈（两条 bug 修复 + 一条功能新增）——
+#       ①（bug 修复）演员检测「选择」列复选框看不见 + 不能 Shift/Ctrl 多选（用户截图：
+#         表头「选择/候选/人数/匹配度/判定依据」在，但选择列空）。
+#         根因（离屏探针实锤）：QTreeView 布局不给簇行（子行）的 indicator 占位 ——
+#         缩进后文本区 rect 从视口 x=40 起（decoration 20 + indent×1 20），仅 6px；
+#         而 QStyledItemDelegate 绘制时复选框绝对定位于 x=43..60（subElementRect
+#         实测 43,17 17x17），列 0 宽 46 → indicator 右 14px 伸进「候选」列，被列
+#         边界裁剪只剩 3px 竖条。顶层行（rect left=20）不溢出，只有缩进子行溢出。
+#         修法：列宽 46→62（indicator 右缘 60 + 2px 余量），实测 Checked 态可见面积
+#         46→279px（17×17 方块完整现形）；另开 ExtendedSelection 支持 Shift 区间 /
+#         Ctrl 逐点多选，勾选 ∪ 选中并集驱动「批量确认关联（合并 N 簇）」。
+#         QSS 路线（subcontrol-position / 负 margin / top 偏移）全部证伪，未动 style.qss。
+#       ②（bug 修复）minnano-av.com 工具→演员刮削页测试 HTTP 403（开不开代理都一样，
+#         浏览器却正常）。根因：该站 DNS 解析到 Cloudflare，按 TLS 指纹（JA3）封锁
+#         非浏览器客户端，与 IP / 代理无关（IMDB 在 Amazon CloudFront 无此封锁）。
+#         修法（先加固、连续 403 自动降级）：http.cookiejar 全局 cookie 罐 + 按
+#         (proxy, verify_ssl) 缓存 opener 复用会话；每 600s 一次首页预热让 Cloudflare
+#         种 cookie；连续 403 达 3 次自动降级 curl_cffi（impersonate="chrome124"
+#         完整 Chrome TLS/HTTP2 指纹，可选依赖，import 失败自动退回纯标准库模式）；
+#         test_source 的 403 追加人话说明。PyInstaller 加 --collect-all curl_cffi。
+#       ③（功能新增）工具窗左侧导航「进行中」任务旁加转圈（对齐主窗侧栏媒体库扫描
+#         的 ScanRing 效果）：ScanRing 从 main_window.py 抽到独立 src/scan_ring.py
+#         （自包含只依赖 Qt，main_window 与 ui_settings 共用，新增 size 参数）；
+#         导航按钮包一层 row 容器（按钮 + ring，ring 隐藏时不占布局空间、几何与旧版
+#         一致）；400ms QTimer 集中轮询 _running_tasks()（11 类 worker 属性映射 +
+#         两个检测页问 is_busy()），不去各 worker 启动点插桩。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0058：v1.39.1 一条 bug 修复（画像概览「高频榜 / 分布」长名把整行撑爆）——
+#       反馈 4（用户两张截图 1139x500 / 1158x804）：系列 / 片商 / 导演列最严重，
+#       长 CJK 条目名让计数与 █ 条形被 QLabel 折到下一行、与下一条目文字重叠糊成一片。
+#       根因：`_bar_lines` 用 `str(name)[:18].ljust(18)` 按**字符数**对齐，而字体是
+#       Consolas + CJK 回退 —— 一个汉字占 **2 个**等宽格，18 个汉字实际要 36 格；
+#       再叠 `{:>7,}` 计数与 14 格条形，整行轻易超出列宽（约 150px ≈ 22 格）一倍，
+#       折行随之而来（Python 端三处一起改）：
+#         ① 10 个 body 标签改走新工厂 `_bar_label()`：`setWordWrap(False)` 从根上
+#            杜绝折行；横向 `QSizePolicy.Ignored` 是**配套必做**的 —— 不换行的
+#            QLabel 其 `minimumSizeHint()` 就是整段文本宽度，直接用会把 5 列网格
+#            顶宽、把整页横向撑爆（Qt 老坑）。
+#         ② `_bar_lines` 从 staticmethod 改实例方法，按
+#            `QFontMetrics.horizontalAdvance` 的**真实像素**算预算：逐字裁名字
+#            （超预算加 …）、像素级补空格对齐名字列、按像素补空格右对齐计数列
+#            （不能靠 `{:>N}` 的字符宽度，CJK 回退下必歪）。
+#         ③ 悬停 tooltip 给完整名字（正文已裁过），全名仍可查。
+#       探针 dev/_scratch/probe_bars.py 用用户截图形态的长 CJK 数据对 10 列断言
+#       「不折行 / 不溢出(最宽行≤列宽) / 计数右对齐(±4px)」→ ALL_OK。
+#       同批修掉真机验收脚本的一次**误触事故**（详见 .workbuddy/memory 当日记录）：
+#       ui_coords 离屏按 1000x900 量坐标，真机工具窗客户区 1318x900 → 横向偏 300+px，
+#       「全选建议合并」落在「批量确认关联」上，对真实索引跑了 543 次 db.merge_people。
+#       修法：① 拿到工具窗先 SetWindowPos 调回 COORDS_CLIENT_W/H；
+#             ② **删掉**「全选/全不选」这两个点击（纯视觉证据，收益不抵风险）；
+#             ③ 日志检查加「写入地雷」——出现 批量合并/clear_media 立即报警。
+# 0059：v1.39.2 一条 bug 修复（复选框真机一个都画不出来，v1.39.0 的修复其实没生效）——
+#       v1.39.1 真机验收截图（40_live_tools_actorcheck_detect.png，5 倍特写）铁证：
+#       结果树「选择」列**一格复选框都没有**，用户的原始反馈根本没被修掉。
+#       根因（探针 dev/_scratch/probe_checkbox.py 逐项排除后实锤）：style.qss 里
+#       `QTreeView::indicator` 给未勾选态写的是 `background: rgba(255,255,255,0.05)`。
+#       只要 QSS 给 ::indicator 设了 width/height，Qt 就不再走默认绘制而改走 QSS 分支，
+#       它按 subElementRect 的矩形**重新铺一遍背景**；5% 白在深色面板上等于「无背景」，
+#       QStyleSheetStyle 直接跳过绘制 → 未勾选态一格不画（勾选态有实色 __ACCENT__ 所以
+#       能画出来，这正是 v1.39.0 探针漏掉它的原因）。
+#       修法：未勾选态给**实色**背景（#2a241c，hover #362e23），QListWidget / QCheckBox /
+#       QRadioButton 的 ::indicator 同款隐患一并修。
+#       ⚠ v1.39.0 探针的错误方法学（务必记住）：它量的是「Checked vs Unchecked 的差分
+#       面积」（46→279px），差分对得上只说明两状态有差别，**证明不了有复选框**。
+#       正确判据是「与**空树**逐像素差分」，且未勾选态也必须 > 0。
+#       同批修掉两处验收脚本问题：live_verify 的「开始检测」坐标落在按钮外
+#       （(227,170) vs 实际 y≈138）、裁转圈时检测已结束导致亮蓝像素恒为 0。
+# 0060
+# v1.39.3：复选框的**真正**根因 —— Qt 6 在 Windows 11 上默认 QStyle 是 `windows11`，
+#       它是四个可用风格里**唯一画不出 `QTreeView::indicator`** 的：
+#         windows11    → checkbox 矩形 16x19 非零，但填充/描边色**0 像素**
+#         windowsvista → 770 像素      Windows → 820 像素      Fusion → 820 像素
+#       也就是 `QStyleSheetStyle` 画的 indicator 与 windows11 的原生 checkbox 路径冲突，
+#       `QStyleSheetStyle` 直接跳过绘制 → 「演员检测」结果树「选择」列一格不画。
+#       修法：`main.py` 建 QApplication 后显式 `app.setStyle(QStyleFactory.create("Fusion"))`。
+#       ⚠ v1.39.0 / v1.39.2 两轮都在改 indicator 的**颜色**，方向从根上就错了 ——
+#         离屏探针之所以全绿，是因为 offscreen 后端不用 windows11。
+#       **铁律：凡是验「控件是否真画出来」的探针，必须在 `QT_QPA_PLATFORM=windows` 下跑。**
+#       另修正 v1.39.2 的坐标误判：真机截图实锤「开始检测」坐标 (227,170) 本来就对
+#       （玫红按钮实测 x∈[187,266]、y∈[154,190]，中心 (226,172)），
+#       转圈抓不到的真因是**检测只跑 0.3 秒** —— 必须点完立刻连拍（`grab_ring_burst`）。
+#       事故复盘：v1.39.0 窗口真机宽 1318 而坐标按 1000 量，横向偏 +318，
+#       「全选建议合并」(218,486) → 实际 (536,486)，精确命中「批量确认关联」(x∈[358,544])。
+# 0061
+# v1.39.4：minnano-av「SSL: UNEXPECTED_EOF_WHILE_READING」+ IMDB「可访问但检索无结果」
+#       —— 两个**独立**的代码 bug，让 v1.39.0 加的降级链**一次都没真正触发过**。
+#       bug A（异常包装）：`urllib` 把 `ssl.SSLError` **包进** `URLError`。实测
+#             isinstance(e, ssl.SSLError) = False、type(e).__name__ = 'URLError'，
+#             `e.reason` 才是 SSLEOFError → 原来的 `except ssl.SSLError` 永远接不住，
+#             直接掉进兜底分支，**证书降级与 curl_cffi 指纹降级都没被触发**。
+#             修法：新增 `except urllib.error.URLError` 分支 + `_unwrap_reason()` 剥 `.reason`；
+#             并认定 UNEXPECTED_EOF_WHILE_READING 是「对端握手后立刻断开」（Cloudflare
+#             按 JA3 挡非浏览器客户端），**关证书校验毫无意义**，必须换指纹。
+#       bug B（WAF 挑战页回 200/202，不是 403）：原降级链只按 `_CF_403_COUNT >= 3` 触发，
+#             而 IMDB 的 AWS WAF 回 **200**（urllib 路径，1997 字节 JS 挑战页，正文零个
+#             `/name/nm`）/ **202**（curl_cffi 路径）→ 永远攒不够 403 → 挑战页一路流到
+#             解析器 → 表现为「可访问，但检索无结果」。修法：新增 `is_waf_challenge()`
+#             （7 个标记串），在 `_curl_get` 状态检查处拦 202/403、在 `http_get` 解码后拦挑战页。
+#       bug C（降级太晚）：这类拦截**第一次就发生**，却要攒 3 次才切指纹。修法：
+#             `http_get` 加 `_escalated` 标志，首次命中拦截立即切指纹重试**一次**（不成死循环）。
+#       bug D（提示误导）：`test_source` 的「可访问，但检索无结果」最坑 —— 其实一次正文
+#             都没拿到。重写为如实报告拦截原因 + 区分代码问题与网络问题（`_explain()` /
+#             `_network_hint()`，会点出系统代理并给出「换网络/换代理可解」）。
+#       环境结论（本机实测，**代码层无解**）：HTTP(S)_PROXY=http://127.0.0.1:2336；
+#       `curl -v` 显示 CONNECT 返回 200，但 `--noproxy '*'` 绕过后仍失败；curl_cffi 的
+#       chrome124/131/136/safari17_0 四种指纹全部失败；TLS 1.2/1.3/http 全试均失败；
+#       而 cloudflare.com 200 / dmm.co.jp 302 / baidu 200 正常
+#       → **拦截发生在出口 IP / 站点级，不是代码、不是代理配置、不是指纹残留**。
+#       另：用户截图里「已批量合并 543 个簇」是 09:31 那次坐标误点事故的**残留标记**
+#       （app.log 最后一条合并时间戳 09:31:39，之后再无合并），不是新发生的合并。
+# 0062
+# v1.39.5：三条反馈（v1.39.4 之后的真机复测）——
+#       ① 网络测连（反馈 1）：**本机三路全被挡，代码层已无解**，但查出两个真缺陷并修掉：
+#         a) `_explain()` 的 **403 分支漏了出路** —— 原来只说「站点 Cloudflare 指纹校验
+#            拦截了标准库客户端；已自动切换浏览器指纹重试」，用户只能干瞪眼。实测本机
+#            三种走法（走 8866 注册表代理 → 403 / 走 4328 环境变量代理 → TLS 断开 /
+#            完全直连 → 连接重置）**全部失败**，说明是出口 IP / 站点级拦截。
+#            修法：403 分支统一补 `_network_hint()`，与 TLS / WAF 分支口径一致。
+#         b) `_system_proxy()` 返回**裸 `host:port`**（Windows 注册表 `ProxyServer`
+#            常写成 `127.0.0.1:8866`，无 `http://`）。urllib 会自动补 scheme，
+#            但 **curl_cffi 的 `proxies=` 不会** → 排查时极易误判成「站点拦截」。
+#            修法：新增 `_normalize_proxy()` 统一补 `http://`。
+#       ② 演员检测结果树（反馈 3）—— 用户第二次截图，这次是真的丑：
+#         a) 复选框右缘 60 紧贴「候选」文字起点 61~62，**间隙只有 1~2px**，真机糊成一片。
+#            修法：列 0 62 → 76（右缘 60 + 16px 呼吸）。
+#         b) 行高就是纯文本高（~20px），而 indicator 高 15px → 方框上下几乎相接、
+#            一排挤成「栅栏」。根因：style.qss 只有 `QTreeView::indicator`（子控件），
+#            **没有基类 `QTreeView::item`** → 没有 padding。修法：新增
+#            `QTreeView::item { padding: 4px 2px; }` 把行高抬到 ~28px。
+#            ⚠ 只加 padding，**不碰 indicator 定位属性**（subcontrol-position / 负 margin
+#            那一套在 v1.39.0 已全部证伪）。
+#         c) 列 2/3 原为 44/52，真机装不下「2 人」「94 铁证」（内容 + QSS padding 溢出
+#            → 显示成「2 …」「94 铁」）。修法：按 sizeHintForColumn 重设为 62 / 78。
+#         d) 两个根节点标题很长（「建议合并（5 簇，共可减少 5 条演员记录）」约 200px），
+#            却只写在列 0（76px）→ 被裁成「建议...」「存疑...」。修法：
+#            `setFirstColumnSpanned(row, QModelIndex(), True)` 让根节点**横跨所有列**。
+#            ⚠ PySide6 的坑：`QTreeWidget` 上直接调会解析到 `QTreeView` 的三参签名，
+#            传 `(item, 0, True)` 是 TypeError，必须 `(int_row, QModelIndex(), bool)`。
+#       ③ 演员刮削页统计条（反馈 2「单独成行」）：`sc_stats` 原为 `setWordWrap(True)`，
+#          6 段统计串在窄窗口会折成 2~3 行，把「刷新统计」按钮顶到中间。
+#          修法：改 `setWordWrap(False)` + `SizePolicy(Ignored, Preferred)`，
+#          统计串恒单行、按钮固定贴右。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0063
+# v1.40.0：四条反馈（三条 UI + 一条可用性出路）——
+#       ①（反馈 1）「演员资料统计」独立成模块。用户三张截图实锤两件事：
+#         a) 统计条夹在「启用演员刮削」与数据源列表之间，视觉上属于数据源那一段，
+#            而它讲的其实是**演员库资料的总体状况**，与「数据源」无关；
+#         b) 红框那条「空白带」**不是留白，是被压扁的 `src_hint`** —— 数据源组框内容
+#            本来就高（开关行 + 统计行 + 2 行列表 + 测试按钮 + 提示），而设置窗是
+#            **不套滚动区**的写死高度（`SettingsDialog.resize` 上限 900）→ 内容超标时
+#            Qt 把最后那个 QLabel 压到只剩描边（真机实测 5~7px，整段文字看不见）。
+#         修法：拆成三个模块 ——「演员刮削」（总开关）/「演员资料统计」（标题 + 统计行 +
+#         刷新按钮）/「演员刮削数据源」。组框少两行，两个问题一起消失。
+#       ②（反馈 2）加大执行日志区：`sc_log` 由 `setFixedHeight(48)`（≈3 行）改为
+#         `setMinimumHeight(240)`（≈14 行）+ 布局 stretch=1（窗口拉高时跟着长）。
+#         48px 连一条测连结果都装不下（那条文案本身就要折 2 行）。
+#       ③（反馈 3）代理加**显式开关** `config.DEFAULT_SCRAPER["proxy_enabled"]`：
+#         老行为「填了就用、留空自动套系统代理」，用户无法表达「我要直连」——
+#         真机排查时正是被这点误导（切代理 / 关代理表现一致，看起来像代理没生效）。
+#         现在关掉 = 纯直连（`Settings.scraper_proxy()` 返回空串 + 新增
+#         `scraper.set_proxy_disabled()` 进程级标志，让 `http_get` 不再拿系统代理兜底）；
+#         打开 = 用 proxy（空则回落系统代理）。另加 `config._truthy()` —— **绝不写
+#         `bool(v)`**，`bool("0")` 是 True，手改过 json 的用户会被判成「开着」。
+#       ④（反馈 4）**Cloudflare 验证助手**（新增 `CloudflareDialog`）—— 用户原话
+#         「切换代理或者关闭代理后一样不可用，网页登录显示一切正常，如果有 cloudflare
+#         则弹窗输入验证码」。
+#         本轮报错**性质变了**：由 urllib 的 `UNEXPECTED_EOF_WHILE_READING` 变为
+#         curl_cffi 的 `BoringSSL SSL_connect: Connection closed abruptly
+#         (SSL_ERROR_SYSCALL)` → 证明 v1.39.5 的 `_normalize_proxy()` 已让 curl_cffi
+#         拿到合法代理 URL、**真的走了指纹路径**，但对端仍在握手后立刻 RST。
+#         代码层已无解（换指纹 / 换代理 / 直连三路全挡），而**系统浏览器是通的** ——
+#         所以唯一出路是借它过一次挑战、把通行 cookie 取回来复用：
+#         · `scraper.parse_cookie_header()` 容错三种粘贴形态（Cookie 头 / 分号串 /
+#           DevTools 逐行 name<TAB>value）；
+#         · `inject_cookies()` 写进 `_JAR`（urllib 路径）+ `_MANUAL_COOKIES`
+#           （curl_cffi 路径**不走** urllib 罐，必须单独拼 Cookie 头，否则「过一次
+#           挑战之后还是被拦」）；会话已变 → 作废缓存的 opener 与降级计数；
+#         · `_explain()` 补 curl_cffi/BoringSSL 文案分支（老分支只认 `TLS 被对端断开`
+#           与 `UNEXPECTED_EOF`，这条最关键的报错一路落到兜底原样透出）；
+#         · `_network_hint()` 把「换网络/换代理可解」换成**可执行的那条出路**（用户
+#           早就换过了，没用）。
+#         修掉的探针实锤缺陷：`clear_cookies()` 只清 `_MANUAL_COOKIES` → 
+#         `has_pass_cookie()` 回退扫 `_JAR` 仍返回 True（「清除」之后界面还显示 ✅）；
+#         现在同时按 (domain, path, name) 从 `_JAR` 摘除。
+#         另修掉本轮包完页面时抓到的两个**自引入缺陷**（出图探针才发现）：
+#         ① `_fit_page()` **可重入** —— `_make_scrollable()` 内部 `insertWidget`
+#            会改当前索引 → 触发 `currentChanged` → 又回调 `_fit_page` → 包第二层，
+#            最后 `_pg_scraper` 指向**不在 stack 里的孤儿**（`indexOf == -1`）；
+#         ② 包完后当前索引被挪到隔壁页 → 切页后**页面跳到别的工具**（实测跳到
+#            「智能推荐」）。修法：`_in_fit` 防重入标志 + `was_current` 复位当前页 +
+#            「先算好属性名再动 stack」。回归断言已进 `dev/smoke_v1400.py`。
+#         同时**纠正排查途中的一个错误判断**：截图那条「空白带」并非 `src_hint`
+#         被压扁（真机 1092px 宽下文案一行放得下、`heightForWidth` 返回 15，文字
+#         完整），而是数据源组框被压小 + 统计行夹在组框里造成的观感。故把
+#         `_pin_min_height()` 改成**逐子项 sizeHint 累加**（避开 `lay.sizeHint()`
+#         被压缩后返回缩水值的陷阱），并加「内容真实需求」硬保证。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0064
+# v1.40.1：三条反馈（全部是对 v1.40.0 的**回修**，两条是上轮自引入缺陷）——
+#       ①（反馈 1「留空太多」）数据源组框底部凭空多出约 70px 空白。
+#         真根因在 v1.40.0 新写的 `_pin_min_height()`：它逐子项累加，而**对固定高控件
+#         也用了 `sizeHint()`** —— `src_list` 是 `setFixedHeight(SRC_ROW_H*n+8)`（2 源
+#         =120px），但 QListWidget 的 `sizeHint()` 恒返回通用默认 **192**；
+#         `src_hint` 折行标签按当前宽只需 30，也被算成 60。逐子项累加 = 192+24+30
+#         +间隔+边距 = **280**，而真实内容只需 **208** → 72px 空白。
+#         ⚠ v1.40.0 的注释里写着「QListWidget 恒报 192，哪怕实际只分到 120」——
+#           那句话正是病根被写成了论据。
+#         修法两步：a) `need = min(need, w.maximumHeight())` 夹一次（`setFixedHeight`
+#         的控件 min==max，这一夹把 192 拉回 120）；b) 折行子项只要
+#         `heightForWidth(当前宽)` 拿到正数就不再回退 `sizeHint()`。
+#         实测：组框 minimumHeight 280 → **208**，空白消除。
+#       ②（反馈 2「执行日志缩小一半」）v1.40.0 把 `sc_log` 从 48px 提到 240px（≈14 行）
+#         又**占得太多**。改回 `setMinimumHeight(120)`（≈7 行）—— 仍是弹性高度
+#         （不 setFixedHeight，布局 stretch=1，拉高窗口时跟着长），但默认少占一半。
+#       ③（反馈 3「站点验证使用内置浏览器，参考 微博bot小助手 那种方式获取 cookie」）
+#         `CloudflareDialog` 由「系统浏览器 + F12 抠 document.cookie + 手动粘贴」改为
+#         **内嵌浏览器**：新增 `src/cf_browser.py`，用 pywebview 开内嵌 WebView2 窗口，
+#         用户过完 Cloudflare / AWS WAF 校验后点窗口右下角「✅ 我已完成验证，读取
+#         Cookie」（或直接关窗），cookie 自动取回 → `inject_cookies()` → 自动复测。
+#         关键取舍：pywebview 的 `webview.start()` **必须在 MainThread**（源码断言），
+#         而本软件是 Qt、`app.exec()` 独占主线程 → **必须另起子进程**（微博bot 整个
+#         GUI 就是 pywebview，所以它在主线程，我们不能照抄那一点）。
+#         `main.py` 末尾加 `--cf-browser` 开关做子进程分流（**延迟 Qt import**，子进程
+#         不白加载 Qt）；父子用结果 JSON 文件通信（原子 os.replace，无 IPC 依赖）。
+#         照抄 微博bot 的两条硬经验：a) `OPEN_EXTERNAL_LINKS_IN_BROWSER=False`
+#         （否则 SSO/跳转会 webbrowser.open 逃到系统浏览器，get_cookies 取不到）；
+#         b) `get_cookies()` 返回的元素是 `http.cookies.SimpleCookie`（dict 子类，
+#         值是 Morsel，要用 `.key`/`.value`）—— 且**每条 cookie 一个 SimpleCookie**，
+#         必须迭代 `.values()` 全部取（只取第一条会漏 __cf_bm）。
+#         保留「高级 ▾（手动粘贴 cookie）」折叠面板作兜底（WebView2 未装 / pywebview
+#         缺失时仍可用）。体积代价近零 —— pywebview 复用**系统自带 WebView2 运行时**，
+#         不打包 Chromium（微博bot exe 仅 58.7MB，本机 WebView2 Runtime 已装）。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0065
+# v1.40.2：三条反馈（两条留白压缩 + 一条「读 cookie 失败」的根因查证与修文案）——
+#       ①（反馈 1「界面行与行间隔太大，压缩空间」）站点验证对话框留白压缩：
+#         外边距 16→10 / 行距 12→7、两步说明由每步一行压成单行、
+#         「高级 ▾」内边距与输入框高度同步收紧、底部按钮行距 8→6。
+#       ②（反馈 2「站点还要求别的校验，复测未通过…单独安排一个按钮进行 cookie 读取，
+#         查看运行日志，查明 cookie 失败原因」）—— **本轮最重要的根因查证**：
+#         · 探针实测（E 盘 / 2026-10-13）：内置浏览器 **cookie 读取完全正常**
+#           （8 次全部成功取回 5 条，含 cf_clearance；结果文件与 app.log 双重确认）。
+#         · 真正原因：**连接在 TLS 握手阶段就被对端 RST** ——
+#           `ConnectionResetError [WinError 10054]`（裸 ssl 模块也复现）。
+#           对照实验：TCP 能连（IPv4/IPv6 都通）；urllib / curl_cffi（chrome110/120/124/
+#           131、safari17、firefox133、edge101 全试）/ 裸 ssl **无一例外都在这步被重置**；
+#           走系统代理与直连结果相同；而 cloudflare.com / baidu.com 直连都 200。
+#           ⇒ **HTTP 请求根本没发出去，cookie 没有机会被使用；取多少 cookie 都没用。**
+#           v1.39.5/v1.40.0 文案里那句「浏览器能打开说明出口 IP 没被拒，缺的只是通行
+#           cookie」是**错误推断**，害用户在死路上试了 8 次。
+#         · 修法：a) `_network_hint()` 更正为「连接在 TLS 握手阶段即被重置（与 cookie
+#           无关），请换网络/换代理，排查本机防火墙与安全软件」；
+#           b) 新增 `scraper.diagnose_host()` 分层探针（TCP → TLS → 对照站），
+#           `test_source()` 失败时附 `diag`；`CloudflareDialog._on_verified()` /
+#           刮削页 `_on_test_done()` 把「失败层 + 判因」写进**状态标签与运行日志**；
+#           c) **新增独立「读取 Cookie」按钮**（用户明确要求）：内置浏览器还开着就
+#           写 `lmc_cf_request.json` 令其现场 dump（`cf_browser` 起后台线程监听），
+#           已关闭则读**持久快照** `lmc_cf_snapshot.json`（每次成功取 cookie 都会存）。
+#       ③（反馈 3「执行底部留白太多，压缩界面到 960px；工具默认窗口高度控制在 960px」）
+#         `SettingsDialog` 默认高 900→**960**（仍受屏幕可用高约束）；
+#         刮削页边距 12→8、组距 10→7；「执行」组内行距 6；
+#         ★ 底部留白的真根因：旧写法 `addWidget(g3)` + 页级 `addStretch(1)` ——
+#         多余高度全被**页级弹簧**吃掉、组框本身不长，形成组框下方一大块空白。
+#         改为 `addWidget(g3, 1)` 并**去掉页级弹簧**：余量进组框、由组内日志区
+#         （stretch=1）吸收 → 底边紧贴页底，空白消除。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0066
+# v1.40.3：两条反馈（都是对 v1.40.2 的**回修/续修**）——
+#       ①（反馈 1「压缩执行的高度，把界面控制在 960px」）**回退 v1.40.2 改错的方向**。
+#         v1.40.2 把「执行」组框改成 `addWidget(g3, 1)`（吃满 stretch）并删掉页级弹簧，
+#         本意是「组框底边贴页底、不留白」；实际效果**恰好相反**：
+#         探针实测（`dev/_scratch/probe_exec_h.py`）`QPlainTextEdit` 的 sizePolicy 是
+#         Expanding，组内**只有它一个** Expanding 项 → stretch=1 时**全部余量都灌进
+#         日志框**，真机 1080p 下日志框被撑到 200px+，用户看到的就是「执行区一大片
+#         空的日志区」（本轮截图核心问题就是这个）。
+#         ⇒ 正解：`sc_log.setFixedHeight(96)`（≈6 行，**固定**、彻底不参与拉伸）+
+#           执行组框改回 `addWidget(g3)`（stretch=0）+ 页尾放回 `addStretch(1)`。
+#           执行区高度 = 内容固有高度（与窗口大小无关）；多余空间出现在**页底空白**、
+#           而不是**日志框里**。
+#       ②（反馈 2「内置浏览器点击没反应」）**真机复现证明窗口建得出来、是「看不到」**：
+#         `dev/_scratch/repro_builtin_click.py` 实测点击后窗口确实被创建 ——
+#         `cls=WindowsForms10.Window...` / `title='站点验证 - 请在内置浏览器中完成验证'` /
+#         `vis=True` / `rect=(182,182,1000,740)`，msedgewebview2 子进程也起了 6 个。
+#         但它是**独立顶层窗口、默认不置顶**，与主程序（工具窗 + 「站点验证」对话框）
+#         层层叠在一起 → 用户看不到 → 主观判断「点了没反应」，于是反复点、反复 spawn。
+#         （附证：源码态与 exe 态直接跑 `--cf-browser` **都能建出窗口**；exe 的
+#          `lmc_cf_browser.log` 为 0 字节是 `--windowed` 下没有 stdout 所致，非故障。）
+#         ⇒ 修法三条：a) `cf_browser.create_window(..., on_top=True, focus=True)`
+#           **置顶**；b) 新增 `_focus_builtin_window()`，点击后分 1.5s/3s/5s 三次
+#           `SetForegroundWindow` 把窗口拉到前台（窗口创建有延迟，单次可能扑空）；
+#           c) 点击后**按钮立即进入「已打开 · 等待验证…」禁用态**（6 秒后恢复），
+#           给用户即时反馈，同时杜绝连点重复 spawn 子进程。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0067
+# v1.40.4：两条反馈（继续修 v1.40.3 的残余）——
+#       ①（反馈 1「**取消**执行窗的弹性，让界面高度**锁死**在 960px」）
+#         v1.40.3 把余量放进「页尾弹簧」（`v.addStretch(1)`）—— 那**仍然是一种弹性**
+#         （弹簧吃掉全部剩余高度；窗口一旦被撑高，那段空白就变长，视觉上执行区仍在长高）。
+#         ⇒ 本轮**彻底取消**：
+#           a) `SettingsDialog` 高度 `setFixedHeight(h)` 钉死（h = min(960, 可用高 - 40)；
+#              小屏按可用高夹，不会顶出屏幕）→ 用户拖不动纵向边框，
+#              `_fit_page()` 的 `_grow_to()` 也随之 no-op（resize 被固定尺寸吃掉），
+#              内容装不下时自动落到「页面自己滚动」分支，不会再顶高窗口；
+#           b) 执行页**去掉页尾弹簧** → 执行组框之下不再有任何可伸缩项，
+#              页面高度 = 5 个组框固有高度之和（严格恒定），余量归上层 stack 吸收。
+#           宽度仍保留弹性（横向拉宽有用），**只锁纵向**。
+#       ②（反馈 2「**握手成功了也不太行**」）—— 上一版判因**没探到「正文」这一层**。
+#         实测（`lmc_probe_sites.py` / `lmc_diag_v1404.py`，直连 2026-10-13）：
+#           · `minnano-av`：TCP 通 → **TLS 握手就被 RST**（WinError 10054）→
+#             `stage=tls`。同机同直连**浏览器能开** ⇒ 本机 Python/curl 进程被按进程掐断。
+#           · `IMDB`：TCP 通 → TLSv1.3 **握手成功** → HTTP **202** →
+#             正文 1997 字节是 **AWS WAF 挑战页**（`awsWafCookieDomainList` + `gokuProps`）。
+#         旧版探到 TLS 通就 `return`，verdict 写「网络链路正常（TCP + TLS 都通）——
+#         若仍被拦，才是 cookie / WAF 层的问题」= **把球踢回给用户**，且同一站不同轮次
+#         被判成 tls / http **摇摆**（探针对 minnano 会落在「TLS 被 RST」与「侥幸握手成功
+#         但正文仍是挑战页」两种结果上）——用户看到的就是「握手成功了也不太行」。
+#         ⇒ 修法：
+#           a) `diagnose_host()` **新增第 ③ 层 HTTP 正文实测** —— 自己发请求、
+#              拿回 body 用 `is_waf_challenge()` 判，新增 `waf` / `http_code` /
+#              `body_len` 三个字段；`stage` 增一档 **`waf`**（与「http 硬拒」分开）。
+#              ⚠ 关键实现细节：**不能**用 `http_get()` 的返回值判 —— 它见 202 就在
+#              状态检查处抛错（v1.39.4 的改动），**正文根本拿不到** → body_len=0 →
+#              会被误判成「HTTP 层硬拦截」，而真相是「拿到了挑战页正文」（实测 IMDB）。
+#              故这里自己用 `_opener().open()` 取 body（含 `HTTPError.read()` 分支，
+#              防 403 + 挑战页正文的情况）。
+#           b) 新增 `_waf_outlet(source)`：按**数据源**给针对该站挑战机制的出路
+#              （IMDB = AWS WAF，凭据 `aws-waf-token`，须浏览器跑 `challenge.js`；
+#               minnano-av = Cloudflare，本机 TLS 就被 RST，与 cookie 无关）。
+#              `_explain()` 的 WAF 分支改用它 —— 旧版错用了 `_network_hint()`
+#              （那是「TLS 被 RST」的结论），与「TLS 通了、只是正文是挑战页」自相矛盾。
+#           c) UI：`_on_test_done()` 新增 `_stage_cn()` 把失败层译为中文
+#              （tcp / tls / waf / http），并按 stage 追加一句「下一步」；
+#              `_on_verified()` 补 `stage=waf` / `stage=http` 两支文案
+#              （旧版只分 tls/tcp，**最需要说清的那一支**恰好落到「请查日志」兜底）；
+#              两处日志行都补 `waf=` / `body_len=` 字段便于事后查证。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0068
+# v1.40.5：两条反馈（刮削页的「留白」再收一轮）——
+#       ①（反馈 1，截图「左右分布压缩到一行」）v1.40.0 把「启用演员刮削」总开关与
+#         「演员资料统计（统计串 + 刷新统计）」拆成**两个独立组框**，各自只装**一行**内容。
+#         探针实测：`QGroupBox` 默认 `contentsMargins=(9,9,9,9)` + 约 20px 标题，
+#         把「演员刮削」撑到 78px（内容仅需 48）、「演员资料统计」撑到 81px（内容仅需 51）
+#         —— 两块合计 **159px** 的纵向空间只为放两行字，各多出 30px 空白。
+#         ⇒ **合成一个组框、一行**：左「启用演员刮削（…）」文字 + 开关，中间
+#           `addStretch(1)` 弹性，右统计串 + 「刷新统计」按钮；组框
+#           `setContentsMargins(9,4,9,4)`。合并后该行 sizeHint = **71px**（省 88px）。
+#         ⚠ 属性名 `self.sc_enabled` / `self.sc_stats` 保留（`_refresh_scraper_stats()`
+#           与 `dev/_scratch/ui_coords.py` 按名引用）。
+#       ②（反馈 2，截图「行间距太大，上下留白太多」）数据源组框里「测试全部数据源 /
+#         Cloudflare 验证…」是**单独一行**，下面 `src_hint` 提示又在**另一行**
+#         （组框 spacing=8），中间隔出一条空档。
+#         ⇒ 把提示**并进按钮同一行**（按钮在左、提示在右、`addStretch(1)` 弹性分隔）。
+#           组框 spacing 8 → 4。该组框 sizeHint **262 → 232**（省 30px）。
+#         ⚠ 折行 QLabel 与按钮同行时**不能**用 `SizePolicy.Ignored` ——
+#           `Ignored` 让布局把它按「宽度可为 0」算，`heightForWidth(0)` 算出 4 行（60px），
+#           组框 sizeHint 直接爆到 **831px**（微探针实测）。改用 `Minimum`：
+#           允许缩到 `minimumSizeHint`、`sizeHint` 仍按自身文本宽算 → 232（正确）。
+#       合计：执行页 sizeHint **944 → 819**（省 125px），且两处「大段空白」消失。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0069
+# v1.40.6：一条反馈（截图 + 「界面紧凑一些，不是定格用满 960px」）——
+#       背景：v1.40.4 为治「拖大窗口把执行页撑开」把工具窗高度 `setFixedHeight` **钉死**
+#         在 960px。那是**过度矫正**：哪怕当前页内容只要 400px（探针实测「手动修改」
+#         仅 398px），窗口也照样张开到 960，页面底部留一大片死白。用户要的是「紧凑」，
+#         不是「永远 960」。
+#       ⇒ 本轮（用户选定「高度完全放开可拉伸」+「只调窗口高度、刮削页内容不动」）：
+#         a) **取消纵向硬锁**：`setFixedHeight(h)` → `setMinimumHeight(MIN_H)`，
+#            窗口高度重新可拖；新增类常量 `MIN_H = 560` / `MAX_H = 960`
+#            （MIN_H 取 560：比最矮的「手动修改」有余量，又不至于把左侧导航挤成一条）。
+#         b) **按页自适应**：`_fit_page()` 从「只长高」扩成「**放得下就收矮、放不下才长高**」——
+#            新增 `_compact_to(need)`（`resize` 到 `max(MIN_H, min(MAX_H, need + 标题栏开销))`），
+#            与既有 `_grow_to()` 成对。探针实测：手动修改 398→**560**、AI引擎 616→**616**、
+#            图像检测 693→**693**、演员检测 766→**766**、≥776 的页维持上限并滚动。
+#         c) **新增 `_unwrap_page(sc)`**：`_make_scrollable()` 的反操作 —— 上一轮被包成
+#            `QScrollArea` 的页，若这轮内容已放得下，要**解包还原**（复位 `minimumHeight`
+#            + 把内层放回 stack），否则收矮窗口后那页会多出滚动条。`_fit_page` 两条分支
+#            都先 `_unwrap_page`（放不下也不会再「直接 return」，见下条）。
+#         d) **修「滚动页永远不长高」**：原 `_fit_page` 见 `QScrollArea` 就 `return`，
+#            于是被前一页顶到上限时包过的页，切回来永远停在「矮窗口 + 滚动条」。
+#            改为先解包、再试拿 `_grow_to()` 长高。
+#         e) **区分「用户拖动」与「程序 resize」**：新增 `resizeEvent` +
+#            `_auto_h`（我们上次自己设的高度）/ `_program_resize`（程序调用中）/
+#            `_user_resized_h`（用户拖过）。用户拖过之后**切页不再自动收放**，尊重手动选择。
+#            ⚠ 不能用「resizeEvent 无条件记」——`show()` 时 Qt 自己会调一次，
+#            会被误标成「用户拖过」→ 自适应整条链路失效（v1 探针实测到）。
+#         f) `_grow_to()` 补 `MAX_H` 封顶，并把屏幕余量口径与 `__init__` 统一成 `-40`。
+#       ⇒ **真机复验又抓到一个真缺陷（第二轮）**：切「个性化设置」（内容 1413px）时
+#         窗口外框冲到 **1408px**（远超 MAX_H=960）——「按页自适应」看着生效，实则
+#         高内容页把窗口**顶穿**了。
+#         根因：`QDialog` 的**有效最小高** = `max(setMinimumHeight(MIN_H), 布局最小高)`。
+#           裸页面（不套滚动区）的最小高会被自身内容顶到 ~1400，**布局最小高胜出** →
+#           `_grow_to()` 里 `resize(960)` 被 Qt 直接忽略，窗口于是被撑到 1408。
+#           （v1.24.0 给「画像概览」套滚动区的注释里就写过同一现象：「不套的话它会
+#             把整窗最小高度顶到 1733px」—— 当时只当个例处理，这次才定位成通例。）
+#         修法：`_fit_page()` 放不下分支**先判 `need <= MAX_H` 再决定解不解包** ——
+#           g) 内容 ≤ MAX_H（如 AI引擎 616 / 演员刮削 849）→ 解包成裸页 + `_grow_to()`；
+#           h) 内容 > MAX_H（个性化设置 1413 / 智能推荐 976）→ **绝不解包**，
+#              保持/恢复 `QScrollArea` 形态，让滚动区把大最小高**吸收掉**（它自身最小高很小），
+#              `resize(960)` 才真的生效 → 窗口稳定停在 960 + 页内滚动。
+#         真机口径实测（2560×1440 / 可用高 1392）：手动修改 560 · AI引擎 616 · 图像检测 693 ·
+#           演员检测 766 · 画像概览 804 · 服务管理 843 · 演员刮削 849 · 重复检测 861 ·
+#           标签优化 891 · 数据与日志 914 · 智能推荐 960 · 个性化设置 960。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0070
+# v1.40.7：一条反馈（截图 + 「界面默认大小改为 1320x960px，不随着工具内的内容进行调整，
+#         内部模块不随着界面调整，直接冻结」）—— 这是对上版（v1.40.6「按页自适应」）的
+#         **方向反转**。
+#       背景：v1.40.6 为治「定格 960 太浪费」引入「切到哪页就把窗口收到该页放得下的高度」。
+#         副作用：窗口在用户切页时**自己跳高度**，观感上就是「界面在跟着内容变」；
+#         用户要的恰恰相反 —— **尺寸恒定**、内容不参与任何自适应。
+#       ⇒ 本轮（经澄清：「打开默认 1320x960（撤销自适应）但可以手动再调整宽度和高度」+
+#         「窗口可拖，但内容不跟着拉伸」）：
+#         a) **固定默认尺寸 1320×960**：新增类常量 `DEF_W = 1320` / `DEF_H = 960`，
+#            `__init__` 里 `resize(1320, 960)`（仅屏幕确实装不下时才收敛，小屏兜底）。
+#            不再按「屏幕宽 - 40」缩到 1000。
+#         b) **撤销按页自适应的收放**：`_fit_page()` / `_compact_to()` / `_grow_to()`
+#            全部停用（留空壳防 `AttributeError`）；`resizeEvent` 里的
+#            `_auto_h`/`_program_resize`/`_user_resized_h` 状态机整个移除 ——
+#            窗口尺寸从打开那一刻起**只有用户能改**。
+#         c) **内部模块冻结（本版核心）**：新增 `_freeze(widget, scroll=True)`——
+#            把每页包成「滚动区 → 固定宽画布 → 页面」三层：
+#              · 画布宽 = `CONTENT_W = DEF_W - NAV_W(150) = 1170`（**必须扣掉导航宽**：
+#                `QDialog` 有效最小宽 = `max(显式, 布局)`，页宽取 1320 会被顶到 1470，
+#                `resize(1320)` 被 Qt 静默忽略 —— 探针实测）；
+#              · 页面 `setFixedWidth(CONTENT_W)` + `setFixedHeight(sizeHint)`，
+#                并以 `AlignTop | AlignLeft` 放**左对齐顶对齐**（用户截图里内容紧贴左侧导航，
+#                拉宽时应「左边不动、右边留白」；居中会让导航右侧多出一段对称空隙，很怪）；
+#              · 于是：窗口拉宽 → 组框宽度一字不变，右侧纯留白；窗口拉高 → 组框高度
+#                不变，底部留白归画布。
+#            ⚠ 关键坑（探针实测）：光「固定宽 + 顶对齐」不够 —— 还得把**高度也钉死**
+#              （`setFixedHeight`）。用 `setMinimumHeight` 时页面仍被父布局拉高，
+#              里面的 Expanding 控件（日志框/列表/树）照旧重新分配空间
+#              （实测：窗口 960→1200 时页高 958→1198）。
+#         d) `_page_scroll()` 改为 `_freeze()` 的薄包装（调用点很多，保留旧名）；
+#            「演员检测」页（自带内外滚动、不能套滚动区）改走 `_freeze(..., scroll=False)`。
+#            `_unwrap_page()` / `_make_scrollable()` 停用（本版无人解包，解了反而破坏画布）。
+#         e) 类常量：新增 `DEF_W` / `DEF_H` / `NAV_W` / `CONTENT_W`；`MIN_H`(560) 保留为
+#            **拖拽下限**（用户要「可以手动再调整」，不能 `setFixedSize`）。
+#       ⇒ 离屏实测（假屏幕 2560×1392 复刻真机口径）：打开即 **1320×960**；12 页切遍
+#         尺寸恒定不变；每页内容宽恒为 1170；拉宽到 1900 后页宽仍 1170、页高不变。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0071：v1.40.8 两条反馈回修（v1.40.7 把「宽度冻结」误做成了「宽 + 高都钉死」）：
+#       用户原话：①「手动修改的页面显示不全，改为默认 960 高度」
+#                 ②「修复模块显示完整的问题」（画像概览底部「标签共现」被裁）
+#       根因（离屏探针实测）：`_freeze()` 用**构造途中**的 `page.sizeHint()` 钉高，
+#         而那是未布局的估算值 —— 手动修改报 356（真值 1400+）、画像概览报 792
+#         （真值 1242）。且「整页自带滚动区」的页面被钉在比视口还矮的高度后，
+#         外层给不了高度、内层滚动区也拿不到高度 → 内容在固定高度处被**硬切**，
+#         底部留一大片死黑（用户截图 1、2 都是这个）。
+#       改法：
+#         a) `_freeze()` **只钉宽度**（`setFixedWidth(CONTENT_W)`），删掉
+#            `setFixedHeight`；并把原先的 `Qt.AlignLeft` 对齐旗标换成
+#            「无旗标 `addWidget(page, 1)` + 末尾零宽弹簧」——
+#            ⚠ Qt 里给布局项传对齐旗标会让它在**两个方向**都退化成 sizeHint 尺寸
+#            （对齐与拉伸互斥），实测页面高只剩 478 而不是铺满视口。
+#         b) 画布最小高 = 「页面内容真正需要的高度」，由新增的
+#            `_content_need_height()` 逐子项累加量出（比 `layout.sizeHint()` 可靠 ——
+#            后者被压缩过就返回缩水值，v1.40.0 的 `_pin_min_height` 已踩过同坑）。
+#            `setWidgetResizable(True)` 下画布高 = max(视口高, 最小高)：
+#            内容矮 → 画布取视口高、页面铺满无滚动条；内容高 → 画布取内容高、
+#            外侧滚动条出现，内容既不被压扁也不被硬切。
+#         c) `_defer_canvas_height()` **重试到稳定**（最多 6 轮，只在变大时续排）：
+#            一轮 `singleShot(0)` 量出来的是「半稳定态」—— 冒烟抓到画像概览 899
+#            （真值 1242，等分析完成的文本）、AI 引擎设置 468（真值 481，等子控件
+#            自己的 `_pin_min_height`）。两处都是**静默偏小**，画布钉矮仍会切内容。
+#         d) 新增 `_refresh_frozen_height()`（允许缩小，供换片）/ `_show_refresh_frozen()`
+#            （切页补量，隐藏页布局是半稳定态）。手动修改页新增 `contentChanged` 信号
+#            （`ui_manualedit.ManualEditPage`），右栏换根 widget 后广播一次；
+#            画像概览在 `_on_insight_done()` 末尾补量一次（文本从「—」涨成 8 行）。
+#         e) `_page_scroll()` 仍是 `_freeze()` 的薄包装；`_freeze(scroll=False)`
+#            （演员检测页）保持「只钉宽度」。
+#       ⇒ 离屏回归 49 项全绿（含「每页画布最小高 >= 内容需求」+ 拉宽到 1900 内容宽
+#         仍 1170 + 拉高到 1200 矮内容页铺满、高内容页出现滚动）；出图确认手动修改
+#         右栏滚到底能看到「简介/概要/演员/保存按钮」、画像概览 8 个区块全在。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0072：v1.40.9 两条反馈（用户对 v1.40.8 的回修，均为布局观感）——
+#       ①（反馈 1「演员刮削 和 其他工具一样，各个子模块锁定高度，不用跟着界面大小进行调整」）
+#         v1.40.8 的 `_freeze()` 只钉**宽度**、高度交给视口（`setWidgetResizable(True)`）。
+#         结果：演员刮削页里「数据源」的 Expanding 列表、「执行」的弹性日志框在窗口拉高时被拉长，
+#         子模块实时变高 —— 与「手动修改 / 画像概览」等已锁高的工具表现不一致。
+#         ⇒ 给 `_freeze()` 加 `lock_height` 形参，演员刮削页改用 `_freeze(..., lock_height=True)`：
+#           a) **关掉** resizable（`setWidgetResizable(False)`）—— 画布高度由下方延迟钉死成
+#              内容高，窗口拉高时画布停在内容高、多余高度落在滚动区视口（页面脚下留白），
+#              页面与子模块都不再被拉长；
+#           b) `_defer_canvas_height()` 新增 `lock` 分支：用「页面真实所需的自然高」取大
+#             （`need` / `page.minimumSizeHint().height()` / `page.sizeHint().height()` 三者 max）
+#              钉 `canvas.setFixedHeight()`，避免只取 `minimumSizeHint` 漏算内容把锁高页面底部切掉
+#              （与 v1.40.7 同源的低估 bug）；
+#           c) `_content_need_height()` 同步**采纳每个被显式钉死的 `minimumHeight()`**（来自
+#             `_pin_min_height` 钉过的子模块）与页面自身的 `minimumHeight()`，否则钉过的组框
+#             会被量矮、锁高页面底部被切；
+#           d) 演员刮削三个非数据源组框（演员刮削 / 刮削策略 / 执行）补 `_pin_min_height`
+#              延迟钉高（与 v1.40.5 起其它工具一致）。
+#         离屏探针实测（假屏幕 2560×1392）：窗口 1320×960 与 1320×1300 下，画布恒 844、
+#         子模块 h 恒 演员刮削 108 / 数据源 219 / 刮削策略 226 / 执行 268 —— 高度锁定、不随窗口变。
+#       ②（反馈 2「画像概览 控制好宽度，不用 下滚轴」）v1.40.8 把高度交给视口后，画像概览
+#         内容需求 1242 > 视口 950 → 出现下滚轴。本轮收窄让其塞进一屏：
+#           a) 八维偏好雷达 `RadarChart` 由「自然 sizeHint 300」改为 `setFixedHeight(220)`；
+#           b) 高频榜（g3）与 分布（g4）由上下堆叠改为**并排一行**（`QHBoxLayout`），
+#              省掉一列 ~310px 的竖向高度；
+#           c) 页面行距 `setSpacing(12)` → `10`。
+#         离屏探针实测：内容需求 1242 → 832（≤ 视口 960，真实应用视口约 900 仍富余），
+#         全页 6 区块（一句话画像 65 / 八维偏好雷达 304 / 概览 324 / 高频榜 310 / 分布 310 /
+#         标签共现 78）均在一屏内、无下滚轴。
+#       ③（流程改进）本轮起**不再每次交付都附截图**—— 改用离屏测量探针（dev/measure_v1409.py）
+#         以数据断言取代肉眼截图验收，交付物只含 exe + README + dev 脚本。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0073：v1.40.10 六条 UI 反馈（均来自用户截图；本次会话模型无法读图，红框区域由用户口头确认
+#       为「演员刮削页顶部开关区」，其余按代码根因定位）——
+#       ①（反馈 1「压缩 演员刮削 红框区域高度」）用户红框圈的是演员刮削页**顶部「演员刮削」开关区**
+#         （启用开关 + 统计串 + 刷新统计）。三项收紧：组内上下留白 4→2、列间距 12→8、
+#         启用说明标签 `setWordWrap(False)` 锁成单行（窄窗口曾折两行把整行顶到 ~108px）。
+#         `_pin_min_height(ge)` 按改后的真实 sizeHint 重新钉最小高，最终组框高度随之下降。
+#       ②（反馈 2「演员检测 选中之后颜色修复和软件风格保持一致」）style.qss 原有
+#         `QListWidget::item:selected` / `QTableWidget::item:selected` 但**缺 `QTreeView::item:selected`**
+#         → 演员检测候选树（QTreeWidget，QTreeView 子类）选中回落 Qt 默认蓝/紫高亮。补上
+#         `QTreeView::item:selected` 与 `:selected:!active` 两态，背景走 `__ACCENT_DARK__`、字白，
+#         与列表/表格选中完全同款。
+#       ③（反馈 3「美化 高频榜单 UI」）画像概览「高频榜 / 分布」原来是一片灰字 + `█` 文本条。
+#         改为 RichText：名字 tan、计数浅金、条形用**当前高亮色**（调用方传 `accent=self.s.accent()`），
+#         整列变成带强调色的条形图；等宽对齐靠把空格替换成 `&nbsp;`，像素对齐不破。
+#       ④（反馈 5 关联）见下条反馈 4。
+#       ④（反馈 4「重复检测 演员检测 图像检测 标签优化 运行时 也 加上 这个动效」）经代码核查，
+#         这四页的「进行中」转圈（ScanRing）自 v1.39.0 已接进 `_running_tasks()` +
+#         `_busy_timer`(400ms)：重复检测/标签优化走 worker（`_dd_worker` / `_to_*_worker`），
+#         演员检测/图像检测走 `is_busy()`；`nav_rings` 也按 NAV_GROUPS 建全。本轮加冒烟断言
+#         证实四条映射齐全，转圈在四页运行时都会出现（与 服务管理/演员刮削/画像概览/AI引擎 同款）。
+#       ⑤（反馈 5「个性化设置里也控制宽度，不需要底部宽度滚轴」）根因：冻结页 `setFixedWidth(1170)`
+#         钉死；但个性化页内容高 ≈1384 > 视口，竖向滚轴吃掉 ~10px → 视口 1160 < 页面 1170 →
+#         Qt 补一条底部横向滚轴。修法：冻结页 `setHorizontalScrollBarPolicy(ScrollBarAlwaysOff)`，
+#         页面右侧 18px 页边距吸收那 10px，内容不裁、无横滚轴（所有冻结页零副作用）。
+#       ⑥（反馈 6「演员检测 中可以拖动的 高度条上下留2px空隙并且改变其样式，使其符合软件风格」）
+#         给演员检测的竖向「高度条」(handleWidth 8) 与横向树/详情分隔条 (handleWidth 6) 各自加
+#         objectName（ActorSplitV / ActorSplitH），style.qss 用 objectName 限定只给它俩上强调色
+#         + margin 2px 上下/左右留白，从隐形灰线变成悬空一段强调色，不影响主页等其他 splitter。
+#       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
+# 0074：v1.40.11（执行日志框样式复刻运行日志 + README 模板化升级 + 工程目录清理）
+BUILD_DATE = "261013"
+BUILD_SEQ = "0074"
 BUILD = f"{BUILD_DATE}{BUILD_SEQ}"
 
 # 完整标识

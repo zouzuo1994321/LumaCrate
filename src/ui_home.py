@@ -289,8 +289,11 @@ class HomeListView(QWidget):
         self._backdrop_timer.setSingleShot(True)
         self._backdrop_timer.timeout.connect(self._apply_backdrop)
 
-        # 右详情
+        # 右详情（v1.37.0 反馈 4）：加高亮色边框。普通 QWidget 不画 QSS 边框，
+        # 故开 WA_StyledBackground；背景保持透明，不要盖掉磨砂玻璃。
         self.detail_host = QWidget()
+        self.detail_host.setObjectName("DetailHost")
+        self.detail_host.setAttribute(Qt.WA_StyledBackground, True)
         dv = QVBoxLayout(self.detail_host)
         dv.setContentsMargins(0, 0, 0, 0)
         dv.addWidget(QLabel("（在左侧选择一项查看详情）"))

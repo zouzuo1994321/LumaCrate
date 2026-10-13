@@ -1,0 +1,1119 @@
+# -*- coding: utf-8 -*-
+"""真机验收脚本（v1.39.3 留档）：启动根目录最新 exe，点击侧边栏逐页截图。
+
+为什么需要它：离屏渲染（render_*.py）只能验证布局与逻辑，真机才能验证**打包后的
+exe 是否真的能启动、真实字体下卡片是否完整**。二者互补，发布前都应过一遍。
+
+v1.39.0 相对 v1.38.0 的新增验收（三条反馈）：
+- ① 网络：工具窗口「演员刮削」页真点一次 minnano 数据源的「测试」—— 截图应能看到
+  403 的人话提示（「站点 Cloudflare 指纹校验拦截了标准库客户端…」）或真的可用；
+  cookie 罐 / 首页预热 / curl_cffi 降级链都在打包镜像里（--collect-all curl_cffi）。
+- ② 演员检测：结果树最左「选择」列复选框在真实字体下完整可见（列宽 62）；
+  开始检测运行期间，左侧导航「演员检测」项旁应出现**转圈**（需求 3 的同款证据）。
+- ③ 导航转圈：检测运行中裁一张导航区放大图，并做像素断言（转圈弧是亮蓝色）。
+- ⚠ 只做到「开始检测（只读）+ 全选（只勾选）」—— **绝不点「批量确认关联」**：
+  它会对真实索引执行 db.merge_people（删除演员记录 + 搬移作品关联），不可逆。
+- 结束前 grep 真机 index_data/logs/app.log 的新增内容，抓「未捕获异常 / Traceback」。
+
+用法：
+    python dev/live_verify.py            # 全部页面
+    python dev/live_verify.py 全部 演员库  # 指定页面
+
+实现要点（踩过的坑）：
+- 只按「本次启动的进程 PID」定位窗口，**绝不按进程名批杀**，否则会误杀同名的
+  资源管理器窗口（目录名也叫「本地影视中心」）。
+- onefile 下「引导器」与「应用」是两个同名进程，应用子进程 pid 在 Popen 之后才
+  出现，故每轮都要重新采集 PID 集合。
+- tasklist 输出是 GBK，`text=True` 会 UnicodeDecodeError，需自行 decode("gbk")。
+- 侧边栏是自绘控件，用 PostMessage(WM_LBUTTONDOWN/UP) 点击客户区坐标即可；
+  坐标随「主题/字号」变化，可用 --scan 模式先扫描文字行位置。
+"""
+import ctypes
+import ctypes.wintypes as wt
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+LOG = r"C:/Users/zouzu/AppData/Local/Temp/lmc_live_verify.log"
+sys.stdout = sys.stderr = open(LOG, "w", encoding="utf-8")
+
+# v1.39.4：数据源测试是**异步**的（点「测试」后立刻返回，结果标签稍后才出现），
+# 而两站在本机都是被拦的 —— 快测（~1s 内就失败）与慢测（WAF 走满降级链 ~10s+）
+# 都可能出现。所以连点两轮、并跨两轮窗口去读结果标签，而不是赌某一轮。
+SCRAPER_ROUNDS = 2
+SCRAPER_WAIT_FIRST = 6.0
+SCRAPER_WAIT_LATER = 16.0
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHOT_DIR = os.path.join(ROOT, "dev", "screenshots")
+
+# v1.39.3：ui_coords.py 离屏量坐标时用的**客户区**尺寸。
+# 真机工具窗默认更宽（实测 1318x900），会让所有控件坐标整体偏移 —— v1.39.0
+# 验收就是这么把「全选建议合并」点到了「批量确认关联」上，误合并了 543 个演员。
+# 所以拿到工具窗后先 SetWindowPos 调回这个尺寸，再按坐标点。
+COORDS_CLIENT_W, COORDS_CLIENT_H = 1000, 900
+
+# v1.39.3：「开始检测」按钮坐标**保持 ui_coords 原值 (227,170)，不要动**。
+# 曾一度怀疑它偏下、想改成 y=138，后用真机截图 `40_live_tools_actorcheck_detect.png`
+# 证伪：那张图显示宽 1080，而原图是 1318（缩放 1.2204），按钮在显示坐标 (183,141)
+# 折算回原图 = (223,171)，与 (227,170) 吻合 —— 坐标本来就是对的，
+# 那一轮检测也确实跑成功了（日志「5341 位演员…耗时 0.3 秒」）。
+# 转圈抓不到的**唯一**真因是检测太快，必须点完立刻连拍（见 grab_ring_burst）。
+
+u32 = ctypes.windll.user32
+EnumWindowsProc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0200, 0x0201, 0x0202
+
+# v1.38.0：QScreen.grabWindow() 只对「本进程创建的窗口」可靠；抓**外部进程**的窗口时
+# 常返回 0x0（尤其窗口被别的进程压在后台时）。改用 PrintWindow(PW_RENDERFULLCONTENT)
+# 直接让目标窗口自己渲染到内存位图 —— 被遮挡 / 在非主屏上也能拿到内容。
+g32 = ctypes.windll.gdi32
+g32.CreateCompatibleDC.restype = wt.HDC
+g32.CreateCompatibleDC.argtypes = [wt.HDC]
+g32.CreateCompatibleBitmap.restype = wt.HBITMAP
+g32.CreateCompatibleBitmap.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int]
+g32.SelectObject.restype = wt.HGDIOBJ
+g32.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+g32.DeleteObject.argtypes = [wt.HGDIOBJ]
+g32.DeleteObject.argtypes = [wt.HGDIOBJ]
+g32.DeleteDC.argtypes = [wt.HDC]
+u32.PrintWindow.restype = wt.BOOL
+u32.PrintWindow.argtypes = [wt.HWND, wt.HDC, wt.UINT]
+u32.GetDC.argtypes = [wt.HWND]
+u32.GetDC.restype = wt.HDC
+u32.ReleaseDC.argtypes = [wt.HWND, wt.HDC]
+PW_RENDERFULLCONTENT = 0x00000002
+
+
+def grab_pw(hwnd):
+    """PrintWindow 抓窗口 → QPixmap（失败返回 None）。"""
+    from PySide6.QtGui import QPixmap
+    r = wt.RECT()
+    u32.GetWindowRect(hwnd, ctypes.byref(r))
+    w, h = r.right - r.left, r.bottom - r.top
+    if w <= 1 or h <= 1:
+        return None
+    hdc = u32.GetDC(None)
+    if not hdc:
+        return None
+    try:
+        mem = g32.CreateCompatibleDC(hdc)
+        if not mem:
+            return None
+        try:
+            bmp = g32.CreateCompatibleBitmap(hdc, w, h)
+            if not bmp:
+                return None
+            try:
+                g32.SelectObject(mem, bmp)
+                ok = u32.PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT)
+                if not ok:
+                    u32.PrintWindow(hwnd, mem, 0)
+                pm = QPixmap.fromWinHBITMAP(ctypes.cast(bmp, ctypes.c_void_p).value)
+                if pm.isNull() or pm.width() <= 1:
+                    return None
+                return pm.copy()      # 与 HBITMAP 解绑后才能安全 DeleteObject
+            finally:
+                g32.DeleteObject(bmp)
+        finally:
+            g32.DeleteDC(mem)
+    finally:
+        u32.ReleaseDC(None, hdc)
+
+# 侧边栏条目 -> 客户区坐标（1920x1080、默认 DPI 下测量；变更主题后需重扫）
+# v1.24.0：导航多了「智能推荐」「导演库」，整列下移；y 由 dev/_probe_sidebar.py
+#           直接量取控件几何（探针里会临时建一个叫「电影」的库，让「媒体库」分组头
+#           也参与布局，第一个库行的 y 就不再靠推算）。改 _brand() / 导航后请重跑探针。
+SIDEBAR = {
+    "首页": (93, 87),
+    "最近播放": (93, 124),
+    "我的收藏": (93, 161),
+    "智能推荐": (93, 198),
+    "文件夹": (93, 235),
+    "合集": (93, 272),
+    "全部": (93, 354),
+    "演员库": (93, 391),
+    "导演库": (93, 428),
+    "电影": (93, 510),
+}
+# 一次最多传 5 个页面名（页面截图编号 18~22，工具窗口固定占 30 起，不会撞号）
+# v1.25.0（反馈 6）：首页排第一 —— 它要拍的是三个快捷筛选芯片被点中后的高亮差异，
+# 而「首页」正是 _load() 后唯一会显示芯片的页面。
+PAGES = ["首页", "全部", "智能推荐", "导演库", "合集"]
+
+
+# v1.27.0：软件更名「流明盒」，exe 前缀随动；旧前缀一并保留，
+# 这样要拿上一版做回归时不用改脚本。
+EXE_GLOBS = ("流明盒-v*.exe", "本地影视中心-v*.exe")
+
+
+def newest_exe():
+    cand = []
+    for pat in EXE_GLOBS:
+        cand += glob.glob(os.path.join(ROOT, pat))
+    cand = sorted(set(cand), key=os.path.getmtime)
+    if not cand:
+        raise SystemExit("根目录未找到 exe")
+    return cand[-1]
+
+
+def pids_of_exe(exe_name):
+    raw = subprocess.run(["tasklist", "/fo", "csv", "/nh"],
+                         capture_output=True, timeout=15).stdout or b""
+    res = set()
+    for line in raw.decode("gbk", "replace").splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if len(parts) >= 2 and parts[0].lower() == exe_name and parts[1].isdigit():
+            res.add(int(parts[1]))
+    return res
+
+
+def wpid(h):
+    p = wt.DWORD()
+    u32.GetWindowThreadProcessId(h, ctypes.byref(p))
+    return p.value
+
+
+def wtitle(h):
+    n = u32.GetWindowTextLengthW(h)
+    if n <= 0:
+        return ""
+    b = ctypes.create_unicode_buffer(n + 1)
+    u32.GetWindowTextW(h, b, n + 1)
+    return b.value
+
+
+def find_window(exe_name, extra, timeout=60, title_sub=None):
+    """找主窗口。
+
+    v1.24.0 坑：加了启动画面后，进程里**第一个**可见的大窗口是 `QSplashScreen`
+    （v1.27.0 起 440×344，标题默认取 QApplication 的 applicationName，就是软件名），
+    它会先于主窗口出现并通过宽高门槛 → 脚本抓住 splash，等它淡出销毁后 hwnd 失效，
+    截图全变 0×0、点击也全落空。所以必须用标题里的版本号（主窗口标题形如
+    「流明盒  v1.27.0 (Build 2609210037)」）把主窗口认出来 —— 这就是下面
+    `title_sub="Build"` 的来历，与软件叫什么无关。
+    """
+    hits, pids = [], [set(extra)]
+
+    def cb(h, _):
+        if u32.IsWindowVisible(h) and wpid(h) in pids[0]:
+            if title_sub and title_sub not in wtitle(h):
+                return True
+            r = wt.RECT()
+            u32.GetWindowRect(h, ctypes.byref(r))
+            w, ht = r.right - r.left, r.bottom - r.top
+            if w > 400 and ht > 300:
+                hits.append((w * ht, h))
+        return True
+
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        pids[0] = pids_of_exe(exe_name) | set(extra)
+        hits.clear()
+        u32.EnumWindows(EnumWindowsProc(cb), 0)
+        if hits:
+            hits.sort(reverse=True)
+            return hits[0][1]
+        time.sleep(1)
+    return None
+
+
+def click(hwnd, x, y):
+    lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    for msg, wp in ((WM_MOUSEMOVE, 0), (WM_LBUTTONDOWN, 1), (WM_LBUTTONUP, 0)):
+        u32.PostMessageW(hwnd, msg, wp, lp)
+        time.sleep(0.08)
+
+
+def grab(app, hwnd, tries=20, gap=0.4, settle=40):
+    """grabWindow 偶发只返回 1x1（窗口尚未真正绘制 / 被遮挡 / 刚恢复未重绘）。
+
+    实测：同一 exe 连跑两次，第二次所有页面截图都成了 1x1，害得把上一轮的好图覆盖掉。
+    这里重试到拿到有效尺寸（>1x1）为止，拿不到也至少把窗口置前再试一次。
+
+    v1.21.0 追加：还遇到「尺寸正常、但卡片区还没画」的帧（静态表头/标题有、卡片没有），
+    会被误判成「页面空白」。所以拿到有效尺寸后再连拍几帧，取**内容最多**的一帧。
+
+    v1.23.0 再修：原来「够 300 就提前收工」会把**上一页的残帧**当成当前页 ——
+    实测阈值分不清：空墙 7 / 首页 1118 / 演员库 2260 / 满墙 9522，
+    点开「全部」后头几秒抓到的仍是首页（1118 ≥ 300）就直接收工，
+    而海报墙实际要 **~15 秒**才画满（dev/_probe_live_actors.py 实测第 6 帧才跳到 77287）。
+    所以改成**不提前 break**，固定采样 settle 帧取最亮的一帧。
+    """
+    pm = app.primaryScreen().grabWindow(hwnd)
+    for _ in range(tries):
+        if pm.width() > 1 and pm.height() > 1:
+            break
+        u32.SetForegroundWindow(hwnd)
+        time.sleep(gap)
+        app.processEvents()
+        pm = app.primaryScreen().grabWindow(hwnd)
+    if pm.width() <= 1 or pm.height() <= 1:
+        # v1.38.0：Qt 的 grabWindow 抓外部进程窗口不可靠（返回 0x0）→ PrintWindow 兜底
+        pm2 = grab_pw(hwnd)
+        if pm2 is not None:
+            print("  [抓取] Qt grabWindow 失败，已用 PrintWindow 兜底", flush=True)
+            pm = pm2
+    if pm.width() > 1:
+        best, best_n = pm, bright_samples(pm)
+        for _ in range(settle):
+            time.sleep(0.5)
+            app.processEvents()
+            cand = app.primaryScreen().grabWindow(hwnd)
+            if cand.width() <= 1:
+                continue
+            n = bright_samples(cand)
+            if n > best_n:
+                best, best_n = cand, n
+        pm = best
+    return pm
+
+
+def bright_samples(pm, step=8, x0=210, y0=220):
+    """抽样统计**内容区**亮像素数：空白页只有零星文字（几十），卡片页/表格页上千。
+
+    v1.23.0 修：原先从 (0,0) 扫整窗，侧栏 + 顶栏 + 页头本身就贡献几百个亮像素，
+    于是「只有头部画出来、卡片还没画」的**半成品帧**也能跨过 300 的门槛被当成好帧 ——
+    结果 19_recent / 20_actors 两张图只有头部不同、内容区完全相同（实测用
+    dev/_probe_live_actors.py 等 12 秒后内容区亮像素 18554，说明页面其实是好的）。
+    现在只扫 x>=210 且 y>=220 的内容区，头部不再能蒙混过关。
+    """
+    img = pm.toImage()
+    n = 0
+    for y in range(y0, img.height(), step):
+        for x in range(x0, img.width(), step):
+            c = img.pixelColor(x, y)
+            if c.red() > 100 or c.green() > 100 or c.blue() > 100:
+                n += 1
+    return n
+
+
+# 设置对话框内部的点击坐标由 dev/_scratch/ui_coords.py 离屏算好写在这里。
+# 为什么不让本脚本自己算：本进程已经有一个**真实平台**的 QApplication，
+# 再建窗口会真的弹窗、还会和待验收的 exe 抢焦点；而且 offscreen 屏只有 800×800，
+# 算出来的对话框尺寸（760）与真机（1000×900）不一致。
+COORDS = r"C:/Users/zouzu/AppData/Local/Temp/lmc_ui_coords.json"
+WM_CLOSE = 0x0010
+
+
+def load_coords():
+    import json
+    try:
+        with open(COORDS, encoding="utf-8") as f:
+            c = json.load(f)
+    except Exception as e:
+        print("[跳过] 读不到界面坐标 %s: %s" % (COORDS, e), flush=True)
+        return None
+    if c.get("main_size") != [1920, 1080]:
+        print("[跳过] 坐标是按 %s 算的，与真机 1920x1080 不符"
+              % (c.get("main_size"),), flush=True)
+        return None
+    return c
+
+
+def dump_windows(pids, label):
+    """诊断用：列出该 PID 集合下所有顶层窗口（含不可见），定位「窗口没出来」的真因。"""
+    rows = []
+
+    def cb(h, _):
+        if wpid(h) in pids:
+            r = wt.RECT()
+            u32.GetWindowRect(h, ctypes.byref(r))
+            rows.append((h, bool(u32.IsWindowVisible(h)), r.left, r.top,
+                         r.right - r.left, r.bottom - r.top, wtitle(h)))
+        return True
+    u32.EnumWindows(EnumWindowsProc(cb), 0)
+    print(f"--- 窗口快照 {label} ---", flush=True)
+    for h, vis, x, y, w, ht, t in rows:
+        print(f"  hwnd={h} vis={vis} pos=({x},{y}) size={w}x{ht} title={t!r}", flush=True)
+    return rows
+
+
+def find_window_ex(exe_name, extra, exclude=(), timeout=25, title_sub=""):
+    """在同一 PID 下找**另一个**可见顶层窗口（设置对话框）。"""
+    hits, pids = [], [set(extra)]
+
+    def cb(h, _):
+        if h in exclude:
+            return True
+        if u32.IsWindowVisible(h) and wpid(h) in pids[0]:
+            if title_sub and title_sub not in wtitle(h):
+                return True
+            r = wt.RECT()
+            u32.GetWindowRect(h, ctypes.byref(r))
+            w, ht = r.right - r.left, r.bottom - r.top
+            if w > 300 and ht > 200:
+                hits.append((w * ht, h))
+        return True
+
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        pids[0] = pids_of_exe(exe_name) | set(extra)
+        hits.clear()
+        u32.EnumWindows(EnumWindowsProc(cb), 0)
+        if hits:
+            hits.sort(reverse=True)
+            return hits[0][1]
+        time.sleep(0.8)
+    return None
+
+
+VK_RETURN, WM_KEYDOWN, WM_KEYUP = 0x0D, 0x0100, 0x0101
+
+
+def find_modal(exe_name, extra, exclude=(), timeout=8):
+    """找模态确认框：本进程里「除主窗 / 工具窗外」的可见顶层窗口。
+
+    门槛比 find_window_ex 低 —— QMessageBox 常见尺寸只有 ~420x180，
+    用 w>300 / h>200 会漏掉它，于是「找不到确认框」被误当成「没有确认框」。
+    """
+    hits, pids = [], [set(extra)]
+
+    def cb(h, _):
+        if h in exclude:
+            return True
+        if u32.IsWindowVisible(h) and wpid(h) in pids[0]:
+            r = wt.RECT()
+            u32.GetWindowRect(h, ctypes.byref(r))
+            w, ht = r.right - r.left, r.bottom - r.top
+            if w > 150 and ht > 80:
+                hits.append((w * ht, h))
+        return True
+
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        pids[0] = pids_of_exe(exe_name) | set(extra)
+        hits.clear()
+        u32.EnumWindows(EnumWindowsProc(cb), 0)
+        if hits:
+            hits.sort(reverse=True)
+            return hits[0][1]
+        time.sleep(0.4)
+    return None
+
+
+def press_ok(hwnd, tries=4):
+    """给确认框按一次回车（Qt 的默认按钮 = 「确定」）；返回是否真的关掉了。"""
+    u32.SetForegroundWindow(hwnd)
+    time.sleep(0.4)
+    for _ in range(tries):
+        u32.PostMessageW(hwnd, WM_KEYDOWN, VK_RETURN, 0)
+        time.sleep(0.12)
+        u32.PostMessageW(hwnd, WM_KEYUP, VK_RETURN, 0)
+        time.sleep(0.8)
+        if not u32.IsWindow(hwnd):
+            return True
+    return not bool(u32.IsWindow(hwnd))
+
+
+def bottom_button_centers(pm):
+    """从确认框截图里找出底部按钮的横向中心（左 → 右）。
+
+    为什么不用固定坐标：QMessageBox 的按钮宽度随文案 / 字体 / DPI 变化，写死会在
+    改文案后**静默点空**。这里直接扫「底部条带里的亮像素列」——确认框底部只有按钮
+    是亮的（本主题下按钮是浅色圆角块），聚类即得每个按钮的中心，天然自适应。
+    """
+    img = pm.toImage()
+    w, h = img.width(), img.height()
+    cols = []
+    for x in range(w):
+        n = 0
+        for y in range(max(0, h - 34), max(1, h - 4)):
+            c = img.pixelColor(x, y)
+            if c.red() > 90 and c.green() > 90 and c.blue() > 90:
+                n += 1
+        cols.append(n)
+    groups, cur = [], None
+    for x, n in enumerate(cols):
+        if n > 0 and cur is None:
+            cur = x
+        elif n == 0 and cur is not None:
+            if x - cur >= 8:
+                groups.append(((cur + x - 1) // 2, x - cur))
+            cur = None
+    if cur is not None:
+        groups.append(((cur + w - 1) // 2, w - cur))
+    groups.sort()
+    return groups
+
+
+def confirm_modal_yes(app, hwnd, label="确认框"):
+    """点确认框里**最左边**那个按钮（Qt 的 `Yes | No` 顺序是 Yes 在前）。
+
+    ⚠ 不能图省事按回车（v1.25.0 真机验收第二轮踩坑）：
+    `ui_settings._tagopt_apply()` 是
+        QMessageBox.question(..., Yes | No, QMessageBox.No)
+    —— 默认按钮**刻意设成 No**（破坏性动作的安全默认）。回车 = 触发默认按钮 = No
+    = 立刻 return，表现是「确认框消失了、目标文件一个字节没变、日志毫无异常」。
+    """
+    pm = grab(app, hwnd, tries=6, settle=3)
+    grp = bottom_button_centers(pm)
+    print(f"[{label}] 底部按钮中心(宽度): {grp}", flush=True)
+    if not grp:
+        print(f"[{label}] 没扫到按钮，退回「按回车」", flush=True)
+        return press_ok(hwnd)
+    cx = grp[0][0]
+    cy = max(0, pm.height() - 22)
+    print(f"[{label}] 点最左按钮 @({cx},{cy})", flush=True)
+    click(hwnd, cx, cy)
+    time.sleep(1.2)
+    ok = not bool(u32.IsWindow(hwnd))
+    if not ok:
+        print(f"[{label}] 点完还在，改按回车兜底", flush=True)
+        ok = press_ok(hwnd)
+    return ok
+
+
+def ring_blue_count(pm, ring_xywh, pad=14):
+    """只数「转圈区域」里的亮蓝像素数（不裁不存），用来在连拍里挑最佳帧。"""
+    x, y, w, h = ring_xywh
+    img = pm.toImage()
+    W, H = img.width(), img.height()
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(W, x + w + pad), min(H, y + h + pad)
+    if x1 <= x0 or y1 <= y0:
+        return 0
+    crop = img.copy(x0, y0, x1 - x0, y1 - y0)
+    n = 0
+    for yy in range(crop.height()):
+        for xx in range(crop.width()):
+            c = crop.pixelColor(xx, yy)
+            if c.blue() > 150 and c.blue() > c.red() + 40 and c.green() > 90:
+                n += 1
+    return n
+
+
+def grab_ring_burst(app, hwnd, ring_xywh, rounds=16, gap=0.12):
+    """v1.39.3：**连拍**抓运行中导航项旁的转圈，返回 (最佳帧, 亮蓝像素数)。
+
+    为什么必须连拍而不是「点完等 5 秒抓一张」：
+    上一轮真机日志实锤 —— 点击后 30 秒等待期结束时状态栏已显示
+    「5341 位演员 · 291 对候选 · 建议合并 223 簇 … 耗时 0.3 秒」，
+    即**检测 0.3 秒就跑完了**，等 5 秒再去裁，转圈早已消失 → 亮蓝像素恒为 0。
+    所以改成点完立刻每 120ms 抓一帧、跑 16 轮（约 2 秒），全程覆盖检测窗口，
+    取亮蓝像素最多的那一帧。这里用**不带 settle 的裸抓**（grab() 默认 settle=40
+    会额外连拍 40 帧 × 0.5s = 20 秒，那时检测必然已结束），必要时才 PrintWindow 兜底。
+    """
+    best, best_n = None, 0
+    for i in range(rounds):
+        pm = app.primaryScreen().grabWindow(hwnd)
+        if pm.width() <= 1 or pm.height() <= 1:
+            pm2 = grab_pw(hwnd)
+            if pm2 is None:
+                time.sleep(gap)
+                continue
+            pm = pm2
+        n = ring_blue_count(pm, ring_xywh)
+        if n > best_n:
+            best, best_n = pm, n
+        if best_n > 0:
+            print("  [转圈] 第 %d 帧即抓到转圈（亮蓝 %d 像素），提前收工" % (i + 1, n),
+                  flush=True)
+            break
+        time.sleep(gap)
+        app.processEvents()
+    print("  [转圈] 连拍 %d 帧，最佳亮蓝像素 = %d" % (rounds, best_n), flush=True)
+    return best, best_n
+
+
+# ---------------- v1.39.3：真机「选择」列复选框可见性的像素取证 ----------------
+# v1.39.0 声称复选框已修好，但真机上一个都没画（裁图实锤）。
+# v1.39.3 定位到真根因：style.qss 里 `QTreeView::indicator` 未勾选态写的是
+# `background: rgba(255,255,255,0.05)`。**只要 QSS 给 ::indicator 设了 width/height，
+# Qt 就不再走默认绘制、而改走 QSS 分支，并按 subElementRect 的矩形重铺一遍背景**；
+# 5% 白在深色面板上等于「无背景」→ QStyleSheetStyle 直接跳过绘制 → 未勾选态一格不画。
+# 修法：未勾选态改**实色** `#2a241c`。
+#
+# 断言方法学（v1.39.0 的探针错在这里，必须记住）：
+# v1.39.0 量的是「Checked vs Unchecked 差分面积」（46 → 279px），
+# 差分对得上只证明**两状态有差别**，完全证明不了**有复选框** ——
+# 两者都没画时差分同样可以非零。本函数改为：把「选择」列整条带切出来，
+# 数其中**既不是行底色、也不是交替行底色**的像素数（复选框的描边/填充），
+# 阈值 > 200px 才算「真画出来了」。
+# 「选择」列带：从真机图 40_live_tools_actorcheck_detect.png 实测 ——
+# 结果树包围盒 x∈[165,680] y∈[217,452]，第 0 列实测 x∈[167,229]（左边界 167 + 列宽 62），行区 y∈[217,452]。
+# 表头占y<240，所以带子从 y=240 起，避开表头文字被误计成「非底色像素」。
+# 只取行区（跳过表头 y<240），避开表头文字本身被误计成「非底色像素」。
+SEL_COL_BAND = (167, 229, 240, 450)
+ROW_BGS = ((29, 26, 23), (18, 15, 12))   # 树行底色 / 交替行底色
+
+
+def crop_sel_column(pm, out_path, band=SEL_COL_BAND, scale=5):
+    """裁出真机「选择」列并做复选框可见性断言，返回「非底色像素数」。"""
+    from PIL import Image
+    x0, x1, y0, y1 = band
+    img = pm.toImage()
+    W, H = img.width(), img.height()
+    x0, x1 = max(0, x0), min(W, x1)
+    y0, y1 = max(0, y0), min(H, y1)
+    if x1 <= x0 or y1 <= y0:
+        print("  [复选框] 选择列区域越界 %s（窗 %dx%d）" % (band, W, H), flush=True)
+        return 0
+    crop = img.copy(x0, y0, x1 - x0, y1 - y0)
+    n = 0
+    for yy in range(crop.height()):
+        for xx in range(crop.width()):
+            c = crop.pixelColor(xx, yy)
+            if any(abs(c.red() - r) <= 3 and abs(c.green() - g) <= 3
+                   and abs(c.blue() - b) <= 3 for r, g, b in ROW_BGS):
+                continue
+            n += 1
+    crop.save(out_path)
+    try:
+        im = Image.open(out_path).convert("RGB")
+        im.resize((im.width * scale, im.height * scale), Image.NEAREST).save(out_path)
+    except Exception as e:
+        print("  [复选框] 放大失败 %s" % e, flush=True)
+    ok = "是" if n > 200 else "否"
+    print("[复选框] 真机「选择」列非底色像素 = %d（>200 即复选框真的画出来了）-> %s [%s]"
+          % (n, os.path.basename(out_path), ok), flush=True)
+    return n
+
+
+# ---------------- v1.39.3：导航转圈的裁剪与像素断言 ----------------
+def crop_nav_ring(pm, ring_xywh, key, out_path, pad=14, scale=6):
+    """从工具窗截图里裁出某个导航项旁的转圈区域，放大存档。
+
+    ring_xywh = [x, y, w, h] 来自 ui_coords 的 dialog_nav_rings（dialog 相对坐标）。
+    返回该区域里的「亮蓝像素」数 —— ScanRing 的弧线颜色是 #5fb0ff，而导航区
+    背景是深色，所以亮蓝像素数 > 0 即「转圈真的画出来了」的干净判据。
+    """
+    from PIL import Image
+    x, y, w, h = ring_xywh
+    img = pm.toImage()
+    W, H = img.width(), img.height()
+    x0, y0 = max(0, x - pad), max(0, y - pad)
+    x1, y1 = min(W, x + w + pad), min(H, y + h + pad)
+    crop = img.copy(x0, y0, x1 - x0, y1 - y0)
+    crop.save(out_path)
+    # 像素断言：亮蓝（弧线 #5fb0ff）像素数
+    n = 0
+    for yy in range(crop.height()):
+        for xx in range(crop.width()):
+            c = crop.pixelColor(xx, yy)
+            if c.blue() > 150 and c.blue() > c.red() + 40 and c.green() > 90:
+                n += 1
+    # 再存一份放大的（NEAREST 保持像素块清晰，便于肉眼数弧段）
+    try:
+        im = Image.open(out_path).convert("RGB")
+        im.resize((im.width * scale, im.height * scale), Image.NEAREST).save(out_path)
+    except Exception as e:
+        print(f"  [转圈] 放大失败 {e}", flush=True)
+    print(f"  [转圈] {key}: 区域 ({x0},{y0})-({x1},{y1}) 亮蓝像素={n} -> "
+          f"{os.path.basename(out_path)}", flush=True)
+    return n
+
+
+def scan_sidebar(path):
+    """扫描侧边栏文字行的纵向中心，用于刷新 SIDEBAR 坐标。"""
+    from PIL import Image
+    im = Image.open(path).convert("L")
+    px = im.load()
+    bands, cur = [], None
+    for y in range(60, 700):
+        bright = sum(1 for x in range(10, 135) if px[x, y] > 90)
+        if bright >= 3 and cur is None:
+            cur = y
+        elif bright < 3 and cur is not None:
+            if y - cur >= 6:
+                bands.append((cur + y - 1) // 2)
+            cur = None
+    print("[侧边栏行中心]", bands, flush=True)
+    return bands
+
+
+def make_temp_settings(scope_favorites=True):
+    """写一份**临时** settings.json，让打包后的 exe 用它启动（v1.24.1）。
+
+    为什么需要：反馈 4 要验的「画像概览统计范围选我的收藏」是个下拉项，靠 PostMessage
+    在两个进程之间点下拉列表非常不可靠。改成预置偏好 —— 而预置偏好绝不能碰用户真实的
+    `settings.json`，所以把真实配置**拷一份到临时目录**、改掉 `insight` 再通过
+    `LMC_CONFIG` 环境变量指过去（见 `config.config_path()`）。数据库仍读真实索引。
+    """
+    src = os.path.join(ROOT, "settings.json")
+    dst = os.path.join(os.path.dirname(LOG), "lmc_live_settings.json")
+    try:
+        with open(src, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[警告] 读不到 {src}（{e}），用空配置", flush=True)
+        data = {}
+    data["insight"] = {"scope": "", "favorites_only": bool(scope_favorites)}
+    # v1.25.0（反馈 4）：标签优化页要真按一次「扫描并预览」+「执行写入」才算验过。
+    # 写入目标是 %TEMP% 下的**夹具 nfo**，绝不碰用户真实媒体文件。
+    fixdir = make_tagopt_fixture()
+    data["tagopt"] = {"scope": "folder", "path": fixdir, "library": "",
+                      "algo": "normal", "translate": True, "overwrite": False,
+                      "complete": True, "backup": True}
+    with open(dst, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"[临时配置] {dst} insight={data['insight']} tagopt={data['tagopt']}",
+          flush=True)
+    return dst
+
+
+def make_tagopt_fixture():
+    """在 %TEMP%/lmc_live_tagopt/fix 下造 3 个 nfo，供真机验收「标签优化」写入。
+
+    刻意混入：① 日文标签（要能译成中文）② 技术标签 1080p（必须原样保留）
+    ③ 片商 / 系列伪标签（要能从 nfo 推断出来）④ 中文标签（不该被动）。
+    """
+    import xml.etree.ElementTree as ET
+    base = os.path.join(os.path.dirname(LOG), "lmc_live_tagopt", "fix")
+    os.makedirs(base, exist_ok=True)
+    rows = [
+        ("ABC-001", "ABC-001 単体作品 巨乳 中出し", ["中出し", "巨乳", "単体作品", "1080p"],
+         "冒烟社", "冒烟系列"),
+        ("ABC-002", "ABC-002 潮吹き 痴女", ["潮吹き", "痴女", "720p"], "冒烟社", ""),
+        ("ABC-003", "ABC-003 3P 顔射 巨乳", ["3P", "顔射", "巨乳", "1080p"], "试作社", ""),
+    ]
+    for code, title, genres, studio, series in rows:
+        root = ET.Element("movie")
+        ET.SubElement(root, "title").text = title
+        ET.SubElement(root, "plot").text = "真机验收夹具，可随时删除。"
+        for g in genres:
+            ET.SubElement(root, "genre").text = g
+        ET.SubElement(root, "studio").text = studio
+        if series:
+            st = ET.SubElement(root, "set")
+            ET.SubElement(st, "name").text = series
+        ET.SubElement(root, "uniqueid", {"type": "tmdb", "default": "true"}).text = "70000"
+        tree = ET.ElementTree(root)
+        try:
+            ET.indent(tree, space="  ")
+        except Exception:
+            pass
+        tree.write(os.path.join(base, code + ".nfo"), encoding="utf-8",
+                   xml_declaration=True)
+    print(f"[夹具] {base} -> {len(rows)} 个 nfo", flush=True)
+    return base
+
+
+APPLOG = os.path.join(ROOT, "index_data", "logs", "app.log")
+
+
+def log_size():
+    """真机 app.log 的当前字节数（启动前拍一张，结束时只看新增部分）。"""
+    try:
+        return os.path.getsize(APPLOG)
+    except Exception:
+        return 0
+
+
+def check_new_log(before):
+    """只看启动后新增的日志，抓「未捕获异常 / Traceback」。
+
+    v1.34.3 的真机缺陷（打包镜像「杂交」→ 运行时 AttributeError）就是这样发现的：
+    离屏冒烟全绿、打包零警告，只有真机日志里留下痕迹。
+    """
+    try:
+        with open(APPLOG, "rb") as f:
+            f.seek(before)
+            raw = f.read()
+    except Exception as e:
+        print(f"[日志] 读不到 {APPLOG}: {e}", flush=True)
+        return
+    text = raw.decode("utf-8", "replace")
+    if not text.strip():
+        print("[日志] 本次运行没有新增日志", flush=True)
+        return
+    print(f"[日志] 新增 {len(text.splitlines())} 行 / {len(text)} 字符", flush=True)
+    bad = [ln for ln in text.splitlines()
+           if ("未捕获异常" in ln or "Traceback (most recent call last)" in ln
+               or "RuntimeError" in ln or "AttributeError" in ln)]
+    if bad:
+        print("[日志] ⚠ 发现异常痕迹 %d 条：" % len(bad), flush=True)
+        for ln in bad[-40:]:
+            print("    " + ln, flush=True)
+    else:
+        print("[日志] 未发现未捕获异常 / Traceback / RuntimeError / AttributeError",
+              flush=True)
+    # v1.39.3：写入地雷 —— 验收脚本绝不允许碰真实索引的破坏性写操作。
+    # 一旦出现（说明有点歪的按钮被按下去了），立刻高声报警而不是安静通过。
+    for ln in text.splitlines():
+        if ("批量合并到" in ln or "批量确认" in ln or "clear_media" in ln
+                or "删除媒体" in ln):
+            print("[地雷] 🚨🚨 验收脚本误触破坏性操作！%s" % ln.strip(), flush=True)
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    exe = newest_exe()
+    exe_name = os.path.basename(exe).lower()
+    pages = args or PAGES
+    print("[EXE]", exe, flush=True)
+
+    env = dict(os.environ)
+    env["LMC_CONFIG"] = make_temp_settings()
+
+    _log_before = log_size()          # 只看本次启动新增的日志
+    proc = subprocess.Popen([exe], close_fds=True, env=env)
+    # 主窗口标题里带 "(Build …)"，用它把启动画面（标题只有软件名）区分开
+    hwnd = find_window(exe_name, {proc.pid}, title_sub="Build")
+    if not hwnd:
+        print("[警告] 按标题没找到主窗口，回退到「最大可见窗口」", flush=True)
+        hwnd = find_window(exe_name, {proc.pid})
+    if not hwnd:
+        print("[失败] 未发现主窗口", flush=True)
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+        return 1
+    print(f"[窗口] hwnd={hwnd} pid={wpid(hwnd)} title={wtitle(hwnd)!r}", flush=True)
+
+    u32.ShowWindow(hwnd, 9)
+    u32.SetForegroundWindow(hwnd)
+    time.sleep(2.5)
+
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    os.makedirs(SHOT_DIR, exist_ok=True)
+    home_png = os.path.join(SHOT_DIR, "17_live_window.png")
+    grab(app, hwnd).save(home_png)
+    print("[基准页]", home_png, flush=True)
+
+    slug = {"全部": "grid", "最近播放": "recent", "演员库": "actors", "首页": "home",
+            "文件夹": "folders", "智能推荐": "smart", "导演库": "directors",
+            "合集": "collections"}
+    # 注意：页面截图编号从 18 起连续（最多 5 页 → 18~22），工具窗口占 30 起，不撞号。
+    for i, name in enumerate(pages, start=18):
+        if name not in SIDEBAR:
+            print(f"[跳过] 未知页面 {name}", flush=True)
+            continue
+        x, y = SIDEBAR[name]
+        print(f"[点击] {name} @({x},{y})", flush=True)
+        click(hwnd, x, y)
+        time.sleep(4.0)
+        out = os.path.join(SHOT_DIR, "%d_live_%s.png" % (i, slug.get(name, name)))
+        pm = grab(app, hwnd)
+        print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} {pm.save(out)}",
+              flush=True)
+
+    # ---------------- 工具窗口（v1.24.0 起「设置」改名「工具」）
+    # onefile 下引导器/应用是两个进程，主窗口句柄可能已经失效（wpid()==0）→ 重新找
+    if not u32.IsWindow(hwnd) or wpid(hwnd) == 0:
+        print("[重建] 主窗口句柄失效，重新查找", flush=True)
+        _hw = find_window(exe_name, {proc.pid}, title_sub="Build")
+        if _hw:
+            hwnd = _hw
+            print(f"[窗口] 重新定位 hwnd={hwnd} pid={wpid(hwnd)}", flush=True)
+    coords = load_coords()
+    if coords:
+        sx, sy = coords["main_settings_btn"]
+        # 单击可能被上一拍的事件吞掉（v1.13.0 实测）→ 重试几次，每次之间给足反应时间
+        dlg = None
+        for attempt in range(3):
+            print(f"[点击] 顶栏「工具」@({sx},{sy}) 第 {attempt + 1} 次", flush=True)
+            u32.SetForegroundWindow(hwnd)
+            click(hwnd, sx, sy)
+            dlg = find_window_ex(exe_name, {proc.pid}, exclude={hwnd},
+                                 title_sub="工具", timeout=8)
+            if dlg:
+                break
+        if not dlg:
+            print("[失败] 工具窗口没出来；主窗口 hwnd=%s pid=%s；当前 pid 集合=%s"
+                  % (hwnd, wpid(hwnd), sorted(pids_of_exe(exe_name) | {proc.pid})),
+                  flush=True)
+            dump_windows(pids_of_exe(exe_name) | {proc.pid}, "工具点击失败现场")
+        else:
+            r = wt.RECT()
+            u32.GetWindowRect(dlg, ctypes.byref(r))
+            print(f"[工具窗口] hwnd={dlg} {r.right - r.left}x{r.bottom - r.top} "
+                  f"title={wtitle(dlg)!r}", flush=True)
+            # v1.39.3 事故根因：ui_coords 是按离屏 1000x900 算的控件坐标，而真机
+            # 工具窗客户区是 1318x900 —— 横向多 300+px，后面所有坐标全偏。直接
+            # 把窗**缩回**离屏同尺寸，让两套坐标真正可比（比事后猜偏移可靠得多）。
+            _cw = (r.right - r.left) - COORDS_CLIENT_W
+            _ch = (r.bottom - r.top) - COORDS_CLIENT_H
+            if abs(_cw) > 8 or abs(_ch) > 8:
+                u32.SetWindowPos(dlg, 0, 0, 0, COORDS_CLIENT_W + _cw,
+                                 COORDS_CLIENT_H + _ch, 0)
+                u32.GetWindowRect(dlg, ctypes.byref(r))
+                print(f"[尺寸校正] 已把工具窗调成与 ui_coords 一致的 "
+                      f"{r.right - r.left}x{r.bottom - r.top}", flush=True)
+                time.sleep(1.0)
+            time.sleep(2.5)
+            out = os.path.join(SHOT_DIR, "30_live_tools_personal.png")
+            pm = grab(app, dlg)
+            print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                  f"{pm.save(out)}", flush=True)
+
+            # v1.24.0：画像概览页真点一次「重新分析」—— insight 只是 hidden-import，
+            # 打开页面 + 跑一遍才会真正 import 到它，漏打包就在这一步炸。
+            # v1.24.1（反馈 4）：exe 是用**临时配置**启动的，其中 insight 预设成
+            # 「★ 我的收藏」，所以进页面自动算出来的就是收藏范围 —— 截图即证据。
+            dn = coords["dialog_nav"].get("画像概览")
+            if dn:
+                nx, ny = dn
+                print(f"[点击] 工具·画像概览 @({nx},{ny})（统计范围预设为「我的收藏」）",
+                      flush=True)
+                click(dlg, nx, ny)
+                time.sleep(6.0)          # 进页面会自动算一次，多等一会
+                ib = coords.get("insight_run_btn")
+                if ib:
+                    print(f"[点击] 重新分析 @({ib[0]},{ib[1]})", flush=True)
+                    click(dlg, ib[0], ib[1])
+                    time.sleep(5.0)
+                out = os.path.join(SHOT_DIR, "31_live_tools_insight.png")
+                pm = grab(app, dlg)
+                print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                      f"{pm.save(out)}", flush=True)
+
+            # 智能推荐设置页 —— recommend 模块的唯一入口
+            # v1.24.1（反馈 2）：顺便真点一次「检测本地 AI 引擎」，截图应拍到
+            # **带时间戳的结论**（本机没装 Ollama → ⚠ 未检测到）。
+            dn2 = coords["dialog_nav"].get("智能推荐")
+            if dn2:
+                nx, ny = dn2
+                print(f"[点击] 工具·智能推荐 @({nx},{ny})", flush=True)
+                click(dlg, nx, ny)
+                time.sleep(2.0)
+                out = os.path.join(SHOT_DIR, "32_live_tools_smart.png")
+                pm = grab(app, dlg)
+                print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                      f"{pm.save(out)}", flush=True)
+
+                ai = coords.get("ai_test_btn")
+                if ai:
+                    ax, ay = ai
+                    print(f"[点击] 检测本地 AI 引擎 @({ax},{ay})", flush=True)
+                    click(dlg, ax, ay)
+                    time.sleep(3.0)
+                    out = os.path.join(SHOT_DIR, "32b_live_tools_ai_probe.png")
+                    pm = grab(app, dlg)
+                    print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                          f"{pm.save(out)}", flush=True)
+                else:
+                    print("[跳过] 坐标里没有 ai_test_btn", flush=True)
+
+            # 标签优化（v1.25.0 反馈 4）：tagopt 只是 hidden-import，只有打开这一页
+            # 并真的跑一次读写才会 import 到它 —— 漏打包就在这里炸。
+            dn_to = coords["dialog_nav"].get("标签优化")
+            if dn_to:
+                nx, ny = dn_to
+                print(f"[点击] 工具·标签优化 @({nx},{ny})", flush=True)
+                click(dlg, nx, ny)
+                time.sleep(2.5)
+                out = os.path.join(SHOT_DIR, "36_live_tools_tagopt.png")
+                pm = grab(app, dlg)
+                print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                      f"{pm.save(out)}", flush=True)
+
+                sb = coords.get("tagopt_scan_btn")
+                if sb:
+                    print(f"[点击] 扫描并预览 @({sb[0]},{sb[1]})", flush=True)
+                    click(dlg, sb[0], sb[1])
+                    time.sleep(6.0)
+                    out = os.path.join(SHOT_DIR, "37_live_tools_tagopt_scan.png")
+                    pm = grab(app, dlg)
+                    print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                          f"{pm.save(out)}", flush=True)
+                    rb = coords.get("tagopt_run_btn")
+                    if rb:
+                        print(f"[点击] 执行写入 @({rb[0]},{rb[1]})", flush=True)
+                        click(dlg, rb[0], rb[1])
+                        time.sleep(1.5)
+                        # 「执行写入」是个破坏性动作，代码里先弹一次确认框（模态）。
+                        # 不把它点掉的话：主窗与工具窗都被置 disabled，后续所有点击
+                        # 全部失效，而脚本日志照样一路写「抓取成功」（踩过）。
+                        mb = find_modal(exe_name, {proc.pid},
+                                        exclude={hwnd, dlg}, timeout=8)
+                        if mb:
+                            rmb = wt.RECT()
+                            u32.GetWindowRect(mb, ctypes.byref(rmb))
+                            print(f"[确认框] hwnd={mb} "
+                                  f"{rmb.right - rmb.left}x{rmb.bottom - rmb.top} "
+                                  f"title={wtitle(mb)!r}", flush=True)
+                            out = os.path.join(
+                                SHOT_DIR, "38a_live_tools_tagopt_confirm.png")
+                            pm = grab(app, mb, tries=6, settle=3)
+                            print(f"  [抓取] {pm.width()}x{pm.height()} -> "
+                                  f"{os.path.basename(out)} {pm.save(out)}", flush=True)
+                            print(f"[确认框] 已确认={confirm_modal_yes(app, mb)}",
+                                  flush=True)
+                        else:
+                            print("[警告] 没等到确认框；后续点击可能全部失效", flush=True)
+                        time.sleep(9.0)
+                        out = os.path.join(SHOT_DIR, "38_live_tools_tagopt_run.png")
+                        pm = grab(app, dlg)
+                        print(f"  [抓取] {pm.width()}x{pm.height()} -> "
+                              f"{os.path.basename(out)} {pm.save(out)}", flush=True)
+            else:
+                print("[跳过] 坐标里没有「标签优化」页（ui_coords 需重跑）", flush=True)
+
+            dn3 = coords["dialog_nav"].get("演员刮削")
+            if dn3:
+                nx, ny = dn3
+                print(f"[点击] 工具·演员刮削 @({nx},{ny})", flush=True)
+                click(dlg, nx, ny)
+                time.sleep(2.0)
+                out = os.path.join(SHOT_DIR, "33_live_tools_scraper.png")
+                pm = grab(app, dlg)
+                print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                      f"{pm.save(out)}", flush=True)
+
+                # v1.39.0（需求 1）：真点一次 minnano 的「测试」—— 打包版里
+                # cookie 罐 / 首页预热 / 连续 403 计数 / curl_cffi 降级链是否真的
+                #  import 得进来、跑得起来，全在这一下。第 0 个「测试」按钮 =
+                #  minnano（SOURCE 顺序），第 1 个是 IMDB。
+                # v1.39.4（反馈 1）：真点 minnano 与 IMDB 两个「测试」——
+                # 本版改了 test_source 的文案（不再报误导性的「可访问，但检索无结果」），
+                # 真机必须确认新文案**真的出现在界面上**，而不是只在源码里好看。
+                # 两站在本机都应报「TLS 被对端断开 / 命中反爬挑战页」+ 换网络出路。
+                _tests = coords.get("scraper_test_btns") or []
+                for _i in range(min(SCRAPER_ROUNDS, len(_tests))):
+                    tx, ty = _tests[_i]
+                    _src = "minnano" if _i == 0 else "IMDB"
+                    print(f"[点击] 测试 {_src} 数据源 @({tx},{ty})", flush=True)
+                    click(dlg, tx, ty)
+                    time.sleep(SCRAPER_WAIT_FIRST if _i == 0 else SCRAPER_WAIT_LATER)
+                    out = os.path.join(
+                        SHOT_DIR, "33%sb_live_tools_scraper_test_%s.png"
+                        % ("b" if _i == 0 else "c", "minnano" if _i == 0 else "imdb"))
+                    pm = grab(app, dlg)
+                    print(f"  [抓取] {pm.width()}x{pm.height()} -> "
+                          f"{os.path.basename(out)} {pm.save(out)}", flush=True)
+                if _tests:
+                    print("[演员刮削] 两个数据源测试均已触发，"
+                          "结果文案见 33b/33c 截图与 app.log", flush=True)
+                else:
+                    print("[跳过] 坐标里没有 scraper_test_btns（ui_coords 需重跑）",
+                          flush=True)
+
+            # ---------------- 演员检测（v1.38.0 需求 2：多选批量确认关联）
+            # 只读验收：进页 → 开始检测（纯计算，不写库）→ 全选（只改复选框）→ 截图。
+            # ⚠ 绝不点「批量确认关联」：它会对**真实索引**执行 db.merge_people
+            #   （删演员记录 + 搬移作品关联），是不可逆写操作。
+            dn_ac = coords["dialog_nav"].get("演员检测")
+            if dn_ac:
+                nx, ny = dn_ac
+                print(f"[点击] 工具·演员检测 @({nx},{ny})", flush=True)
+                click(dlg, nx, ny)
+                time.sleep(2.0)
+                _hdr = coords.get("actorcheck_tree_header") or []
+                print("[演员检测] 结果树表头：%s" % " | ".join(map(str, _hdr)), flush=True)
+                _ok_hdr = (len(_hdr) == 5 and _hdr[0] == "选择")
+                print("[演员检测] 表头含「选择」复选框列：%s" % ("是" if _ok_hdr else "否"),
+                      flush=True)
+                out = os.path.join(SHOT_DIR, "39_live_tools_actorcheck.png")
+                pm = grab(app, dlg)
+                print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                      f"{pm.save(out)}", flush=True)
+                # v1.39.3：真机复选框可见性取证（这是 v1.39.0 漏掉的那条证据）。
+                # 检出后结果树有行，才能取「选择」列；空树时该带全是底色、像素=0。
+                n_cb = crop_sel_column(
+                    pm, os.path.join(SHOT_DIR,
+                                     "43_live_sel_column_zoom.png"))
+                if n_cb <= 200:
+                    print("[复选框] ⚠ 本轮未取到有效证据（可能树是空的，"
+                          "检测完成后的 41 号图会再取一次）", flush=True)
+
+                ac_run = coords.get("actorcheck_run_btn")
+                if ac_run:
+                    # v1.39.3：坐标沿用 ui_coords 原值（已用真机截图折算证伪「y 偏下」的怀疑）。
+                    # 真正的缺陷是**时序**：检测只跑 0.3 秒（真机 5341 位演员），
+                    # 原脚本点完 `time.sleep(5.0)` 再裁，转圈早画完又抹掉了 →
+                    # 上一轮亮蓝像素恒为 0。改成点完立刻连拍（120ms × 16 帧）。
+                    bx, by = ac_run
+                    print(f"[点击] 开始检测 @({bx},{by})", flush=True)
+                    click(dlg, bx, by)
+                    _ring_xywh = (coords.get("dialog_nav_rings") or {}).get("演员检测")
+                    if _ring_xywh:
+                        _bpm, _n = grab_ring_burst(app, dlg, _ring_xywh)
+                        if _bpm is not None:
+                            crop_nav_ring(
+                                _bpm, _ring_xywh, "演员检测",
+                                os.path.join(
+                                    SHOT_DIR,
+                                    "42_live_tools_nav_ring_running.png"))
+                        print("[转圈] 运行中导航「演员检测」亮蓝像素 = %d（>0 即转圈在画）"
+                              % _n, flush=True)
+                    else:
+                        print("[跳过] 坐标里没有 dialog_nav_rings（ui_coords 需重跑）",
+                              flush=True)
+                    # 真实库 5 千+ 演员的普通算法检测，给足时间
+                    time.sleep(30.0)
+                    out = os.path.join(SHOT_DIR, "40_live_tools_actorcheck_detect.png")
+                    pm = grab(app, dlg)
+                    print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                          f"{pm.save(out)}", flush=True)
+                    # 检测结束后转圈应消失（再裁一张同区域做对照）
+                    if _ring_xywh:
+                        n_blue2 = crop_nav_ring(
+                            pm, _ring_xywh, "演员检测(结束后)",
+                            os.path.join(SHOT_DIR,
+                                         "42b_live_tools_nav_ring_idle.png"))
+                        print("[转圈] 结束后同区域亮蓝像素 = %d（应显著小于运行中）"
+                              % n_blue2, flush=True)
+
+                    # v1.39.3 事故后**彻底删掉**「全选建议合并 / 全不选」这两个点击。
+                    # 事故经过：本脚本用 `ui_coords.py` 的 1000x900 离屏坐标点击，而真机
+                    # 工具窗客户区是 1318x900（横向多 318px）→ 所有控件坐标整体偏移，
+                    # `actorcheck_sel_all @ (218,486)` 实际落在「批量确认关联」上，
+                    # 对真实索引执行了 543 次 db.merge_people。
+                    # 「全选」只勾复选框、不产生任何视觉证据（勾选态靠 41 号图，
+                    # 而那张图同样依赖上面的坐标），所以直接删掉比修坐标更安全。
+                    out = os.path.join(
+                        SHOT_DIR, "41_live_tools_actorcheck_selected.png")
+                    pm = grab(app, dlg)
+                    print(f"  [抓取] {pm.width()}x{pm.height()} -> "
+                          f"{os.path.basename(out)} {pm.save(out)}", flush=True)
+                    # v1.39.3：检测已完成、结果树满行 —— 这才是复选框取证的**最佳时机**
+                    #（上面 39 号图树是空的，带内全是底色、必然 0 像素）。
+                    n_cb2 = crop_sel_column(
+                        pm, os.path.join(SHOT_DIR,
+                                         "43b_live_sel_column_zoom_full.png"))
+                    print("[复选框] 满树状态下非底色像素 = %d（>200 即真机复选框可见）"
+                          % n_cb2, flush=True)
+                else:
+                    print("[跳过] 坐标里没有 actorcheck_run_btn（ui_coords 需重跑）",
+                          flush=True)
+            else:
+                print("[跳过] 坐标里没有「演员检测」页（ui_coords 需重跑）", flush=True)
+
+            # 重复检测：证明打包后的 exe 里 duplicates 模块真的可用
+            # （它只是 hidden-import，打开页面才会 import，漏了就在这里炸）。
+            dn4 = coords["dialog_nav"].get("重复检测")
+            if dn4:
+                nx, ny = dn4
+                print(f"[点击] 工具·重复检测 @({nx},{ny})", flush=True)
+                click(dlg, nx, ny)
+                time.sleep(2.0)
+                out = os.path.join(SHOT_DIR, "34_live_tools_dedupe.png")
+                pm = grab(app, dlg)
+                print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                      f"{pm.save(out)}", flush=True)
+                # 真按一次「开始检测」，确认后台线程 + 失效行剪枝 + 结果树在打包版里跑得通。
+                # 真机 4.8 万条要逐条 os.path.exists 校验，实测 ~880 条/秒 → 全量约 57 秒；
+                # 等 12 秒只能截到 24%、55 秒才到 96%（v1.24.0 踩了两次），给足 85 秒。
+                db_start = coords.get("dedupe_start_btn")
+                if db_start:
+                    bx, by = db_start
+                    print(f"[点击] 开始检测 @({bx},{by})", flush=True)
+                    click(dlg, bx, by)
+                    time.sleep(85.0)
+                    out = os.path.join(SHOT_DIR, "35_live_tools_dedupe_done.png")
+                    pm = grab(app, dlg)
+                    print(f"  [抓取] {pm.width()}x{pm.height()} -> {os.path.basename(out)} "
+                          f"{pm.save(out)}", flush=True)
+
+            u32.PostMessageW(dlg, WM_CLOSE, 0, 0)
+            time.sleep(1.0)
+            print("[工具窗口] 已关闭", flush=True)
+
+            # ---------------- 真机日志体检（v1.38.0）
+            time.sleep(1.5)
+            check_new_log(_log_before)
+    else:
+        print("[跳过] 工具窗口验收", flush=True)
+
+    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    time.sleep(1.5)
+    print("[结束] 残留同名进程:", sorted(pids_of_exe(exe_name)), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

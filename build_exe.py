@@ -128,11 +128,27 @@ def main():
         "--hidden-import", "nfo_parser",     # v1.25.0：标签优化要读/写 nfo
         "--hidden-import", "sysmon",         # v1.27.0：侧栏实时状态（采集线程 + 自绘横条）
         "--hidden-import", "guide_translate",  # v1.36.0：引导向量「中文 → 日文」候选词表
+        # v1.39.0（需求 1）：minnano-av.com 的 Cloudflare 指纹墙降级依赖。
+        # curl_cffi 带原生二进制（libcurl / BoringSSL 的 pyd 与 dll），用
+        # --collect-all 把二进制、requests 子模块一起收进来；运行时 import
+        # 失败有 try 兜底（自动退回纯标准库模式，不影响主流程）。
+        "--collect-all", "curl_cffi",
         # v1.27.0：实时状态的 CPU / 内存 / 网络采集。venv 里有 psutil 7.2.2，
         # _pyinstaller_hooks_contrib/stdhooks/hook-psutil.py 会把它连
         # _psutil_windows.pyd 一起收进来（已核实 hook 存在）；万一没收到，
         # sysmon.py 里有 ctypes 兜底分支，软件照样能跑，只是少了网速读数。
         "--hidden-import", "psutil",
+        # v1.40.1（反馈 3）：站点验证的「内置浏览器取 cookie」依赖 pywebview。
+        # 它复用**系统自带的 WebView2 运行时**（不打包 Chromium，体积代价近零），
+        # Windows 后端要 pythonnet + clr_loader 才拉得起 winforms/edgechromium，
+        # 所以三个都显式带上（--collect-all 会把各自的子模块与数据一并收进来）。
+        # src/cf_browser.py 对 import 失败有兜底（退回「高级 ▾ 手动粘贴 cookie」）。
+        "--collect-all", "webview",
+        "--collect-all", "pythonnet",
+        "--collect-all", "clr_loader",
+        "--hidden-import", "cf_browser",     # v1.40.1：--cf-browser 子进程入口
+        "--hidden-import", "bottle",         # pywebview 的 http_server 后端依赖
+        "--hidden-import", "proxy_tools",    # pywebview 的 http_proxy 依赖
         "--distpath", BUILD_TMP,
         "--workpath", BUILD_TMP,
         "--specpath", BUILD_TMP,

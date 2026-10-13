@@ -35,6 +35,7 @@ import applog
 import recommend as rec_mod         # v1.34.0：推荐墙顶部「引导向量」要用来解析 / 取常量
 import guide_translate as gt_mod    # v1.36.0：引导向量「中文 → 日文」候选（纯离线词表，叶子模块）
 import sysmon                    # v1.27.0：侧栏「实时状态」面板（叶子模块，无循环导入）
+from scan_ring import ScanRing   # v1.39.0（需求 3）：抽出到独立模块，工具窗导航复用
 import i18n                      # v1.32.0：界面语言（叶子模块，无循环导入；查不到原样返回中文）
 from ui_hero import HeroView, circle_pixmap, cover_pixmap, placeholder_pixmap, compact_button
 from ui_home import HomeListView
@@ -225,6 +226,48 @@ def _clip_text(s, n: int = 12) -> str:
     """卡片小字限宽：超长按字符数截断加省略号（本机 QLabel 无 setTextElideMode）。"""
     s = (s or "").strip()
     return s if len(s) <= n else s[:n] + "…"
+
+
+def _esc_html(s):
+    """卡片富文本小字里的人名可能含 & < > 等字符，转义后再进 QLabel 富文本。"""
+    return html.escape(s or "", quote=True)
+
+
+def _crew_names_html(crew, fallback_text):
+    """把一组 (name, fav, pin) 渲染成「 / 」分隔的富文本片段（v1.37.0 反馈 2）。
+
+    收藏(fav) → 金色(#d4af37)；置顶(pin) → 加粗；二者兼有 → 金色加粗。
+    无结构化数据(crew 为空)时退回纯文本兜底（冒烟 / 旧调用路径）。
+    """
+    chunks = []
+    if crew:
+        for nm, fav, pin in crew:
+            cn = _clip_text(nm)
+            if not cn:
+                continue
+            esc = _esc_html(cn)
+            if fav and pin:
+                chunks.append('<span style="color:#d4af37;font-weight:bold;">%s</span>' % esc)
+            elif fav:
+                chunks.append('<span style="color:#d4af37;">%s</span>' % esc)
+            elif pin:
+                chunks.append('<b>%s</b>' % esc)
+            else:
+                chunks.append(esc)
+    if chunks:
+        return " / ".join(chunks)
+    return _esc_html(_clip_text(fallback_text) or "—")
+
+
+def _build_crew_lines(show_actors, show_directors, actor_crew, director_crew,
+                      actor_text, director_text):
+    """按内容卡片开关，生成卡片小字的两行富文本（演员 / 导演）。"""
+    lines = []
+    if show_actors:
+        lines.append("演员：" + _crew_names_html(actor_crew, actor_text))
+    if show_directors:
+        lines.append("导演：" + _crew_names_html(director_crew, director_text))
+    return lines
 
 
 def _fit_lines(text, width: int, lines: int, fm) -> str:
@@ -1370,75 +1413,6 @@ class SmartWorker(QThread):
         self.done.emit(res)
 
 
-class ScanRing(QWidget):
-    """侧边栏媒体库名旁边的**圆形进度环**（v1.24.0 反馈 11）。
-
-    需求：正在扫描的媒体库旁边显示一个像进度环一样的圆形，展示进度、并能一眼看出
-    「该库正在刷新」。所以这里不只是显示百分比：扫描中会**转圈**（`QTimer` 驱动弧线旋转），
-    扫完/空闲时整个环淡化消失。
-    """
-
-    RING = 18
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedSize(self.RING, self.RING)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WA_StyledBackground, False)
-        self._pct = 0
-        self._busy = False
-        self._phase = 0.0
-        self._tip = ""
-        self._timer = QTimer(self)
-        self._timer.setInterval(45)
-        self._timer.timeout.connect(self._tick)
-        self.hide()
-
-    def set_state(self, busy, pct=0, tip=""):
-        """busy=False → 淡出隐藏。pct 为 0~100。"""
-        changed = (busy != self._busy) or (int(pct) != self._pct)
-        self._busy = bool(busy)
-        self._pct = max(0, min(100, int(pct)))
-        if tip:
-            self._tip = tip
-        if self._busy:
-            if not self._timer.isActive():
-                self._timer.start()
-            self.show()
-            self.raise_()
-        else:
-            self._timer.stop()
-            self.hide()
-        if changed:
-            self.update()
-
-    def is_busy(self):
-        return self._busy
-
-    def _tick(self):
-        self._phase = (self._phase + 0.09) % 1.0
-        self.update()
-
-    def paintEvent(self, e):
-        if not self._busy:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        r = QRectF(1.5, 1.5, self.RING - 3.0, self.RING - 3.0)
-        # 槽
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 38), 2.0))
-        p.drawEllipse(r)
-        # 进度弧（0% 时改为一段旋转的弧，做成「转圈」的观感）
-        span = -int(360 * 16 * (self._pct / 100.0)) if self._pct else 0
-        if not span:
-            span = -int(360 * 16 * 0.22)
-        start = int(-90 * 16 - (self._phase * 360 * 16 if not self._pct else 0))
-        p.setPen(QPen(QColor("#5fb0ff"), 2.4))
-        p.drawArc(r, start, span)
-        p.end()
-
-
 class FolderScanDialog(QDialog):
     """文件夹（媒体库）扫描：先统计数量 → 用户确认 → 扫描并显示进度。
 
@@ -1528,6 +1502,8 @@ class FolderScanDialog(QDialog):
         if self._on_tick:
             self._worker.tick.connect(self._on_tick)
         self._worker.done.connect(self._on_done)
+        # v1.38.0 修复反馈：文件夹扫描对话框扫描中实时刷新首页数量
+        self._worker.live.connect(self._on_scan_live)
         self._worker.start()
 
     def _on_done(self, counts):
@@ -1572,7 +1548,7 @@ class PosterCard(QFrame):
 
     def __init__(self, media, on_open, actor_text="", director_text="",
                  on_select=None, parts_count=0, on_play=None, on_fav=None,
-                 reason=""):
+                 reason="", actor_crew=None, director_crew=None):
         super().__init__()
         self.media = media
         # v1.24.0（反馈 8）：智能推荐页把「为什么推它」挂到卡片 tooltip 上
@@ -1599,11 +1575,9 @@ class PosterCard(QFrame):
             parts.append(str(media.get("year") or "?"))
         if cc.get("show_quality", True) and media.get("quality"):
             parts.append(media["quality"])
-        crew_lines = []
-        if cc.get("show_actors", True):
-            crew_lines.append("演员：%s" % (_clip_text(actor_text) or "—"))
-        if cc.get("show_directors", True):
-            crew_lines.append("导演：%s" % (_clip_text(director_text) or "—"))
+        crew_lines = _build_crew_lines(
+            cc.get("show_actors", True), cc.get("show_directors", True),
+            actor_crew, director_crew, actor_text, director_text)
         self.setFixedSize(POSTER_CARD_W,
                           poster_card_height(len(crew_lines), bool(parts)))
         self.setAttribute(Qt.WA_StyledBackground, False)   # 自绘底色，避免被样式背景覆盖
@@ -1644,8 +1618,9 @@ class PosterCard(QFrame):
         # 小字：演员 + 导演（按开关逐行生成；缺数据用「—」占位，行数变化时卡高同步变化）
         crew = None
         if crew_lines:
-            crew = QLabel("\n".join(crew_lines))
+            crew = QLabel("<br>".join(crew_lines))
             crew.setObjectName("CardCrew")
+            crew.setTextFormat(Qt.RichText)
             crew.setStyleSheet("font-size:10px;color:#9b8e7a;line-height:1.4;")
             crew.setAlignment(Qt.AlignTop | Qt.AlignLeft)
             crew.setWordWrap(False)
@@ -3338,16 +3313,17 @@ class MainWindow(QMainWindow):
         v1.15.0：`parts_counts` 同样按 id 批量取「每个顶层条目有几个分片」。
         """
         ids = [r.get("id") for r in rows if r.get("id")]
-        crew = db.cast_crew_map(ids)
+        crew = db.cast_crew_map_ex(ids)
         parts = db.parts_counts(ids)
         return [(r, crew.get(r.get("id"), {}), parts.get(r.get("id"), 0)) for r in rows]
 
     def _poster_card(self, pair):
         m, c, parts_n = pair
-        return PosterCard(m, self._open_media, c.get("actors", ""), c.get("directors", ""),
+        return PosterCard(m, self._open_media, "", "",
                           on_select=self._select_card, parts_count=parts_n,
                           on_play=self._play_media, on_fav=self._toggle_favorite_card,
-                          reason=m.get("reason", ""))
+                          reason=m.get("reason", ""),
+                          actor_crew=c.get("actors", []), director_crew=c.get("directors", []))
 
     def _grid(self, items):
         """已备好数据的小列表（最近播放等）：同样走增量网格，避免一次性建大量控件。"""
@@ -4459,6 +4435,8 @@ class MainWindow(QMainWindow):
         # v1.24.0（反馈 11）：进度环跟着扫描走 —— 库名旁边转圈 + 显示百分比
         self._worker.tick.connect(
             lambda d, t, m: self._lib_ring(name, True, (100 * d / t) if t else 0, m))
+        # v1.38.0 修复反馈：依次扫描过程中也要实时刷新首页数量（侧栏库名（N）/统计/首页列表）
+        self._worker.live.connect(self._on_scan_live)
         self._worker.done.connect(
             lambda c, n=name: (self._lib_ring(n, False), self._on_cat_scan_done(c, n)))
         self._worker.start()
@@ -4630,6 +4608,8 @@ class MainWindow(QMainWindow):
         lib = self._bg_queue.pop(0)
         w = ScanWorker(lib.get("paths", []), library_name=lib["name"], mode="new")
         w.done.connect(lambda c: self._bg_scan_next())
+        # v1.38.0 修复反馈：后台定时扫描也要实时刷新首页数量
+        w.live.connect(self._on_scan_live)
         w.start()
 
     def _refresh_stats(self):

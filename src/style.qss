@@ -94,6 +94,13 @@ QWidget#GuideChip {
     border-radius: 9px;
 }
 QWidget#GuideChip:hover { border-color: __ACCENT_LIGHT__; }
+/* ---------- 首页右侧「影片详细信息」面板边框（v1.37.0 反馈 4） ----------
+   detail_host 是个普通 QWidget，不画 QSS 边框，所以 ui_home 里开了
+   WA_StyledBackground；背景保持透明（不要盖掉磨砂玻璃），只描一条高亮色边框。 */
+QWidget#DetailHost {
+    background: transparent;
+    border: 1px solid rgba(__ACCENT_LIGHT__, 0.55);
+}
 /* ---------- 「关于」里的联系图标按钮（v1.33.0 反馈 4） ----------
    固定 34x30，**必须显式 padding:0** —— 全局 QPushButton 的 padding:7px 14px 会把
    内容区压成负数，图标整个被裁掉（v1.11.1「箭头按钮看不见」同款坑）。
@@ -310,9 +317,45 @@ QListWidget::item:selected { background: rgba(__ACCENT_DARK__, 0.72); color: #ff
 QListWidget::item:checked { color: #f7e3b4; }
 QListWidget::indicator {
     width: 15px; height: 15px; border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.22); background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.22); background: #2a241c;
 }
+QListWidget::indicator:hover { background: #362e23; }
 QListWidget::indicator:checked { background: __ACCENT__; border-color: __ACCENT_LIGHT__; }
+/* v1.38.0（需求 2）：树控件行内复选框（如「演员检测」的选择列）——
+   树用的是 QTreeView::indicator（不是 QCheckBox::indicator），缺了它复选框会回落到
+   默认浅色样式，在暗色主题下几乎看不见。口径与上面的列表勾选框保持一致。
+
+   ⚠ v1.39.1 修正：未勾选态原本写 `background: rgba(255,255,255,0.05)`（半透明），
+   结果**真机一个复选框都画不出来**（用户截图实锤）。根因：只要 QSS 给 `::indicator`
+   设了 width/height，Qt 就不再走默认绘制而走 QSS 分支，此时它按 subElementRect
+   给的矩形 **重新铺一遍背景**；`rgba(255,255,255,0.05)` 在深色面板上等于「无背景」，
+   Qt 的 QStyleSheetStyle 直接跳过绘制 → 未勾选态**一格不画**。
+   离屏探针之所以漏掉：它量的是「Checked vs Unchecked 的差分面积」（46→279px），
+   差分对得上只说明两状态有差别，**证明不了未勾选态本身有复选框**。
+   修法：未勾选态必须给**实色**背景（不能是半透明），这样 Qt 一定会铺。
+   验证：`dev/_scratch/probe_checkbox.py` 用「空树逐像素差分」分别量三种列宽下的
+   未勾选 / 已勾选像素数，未勾选必须 > 0。 */
+/* v1.39.5（反馈 3）：树**基类**规则。此前 style.qss 里只有 `QTreeView::indicator`
+   （子控件），没有基类 `QTreeView::item` —— 于是行高就是纯文本高（约 20px），
+   而 indicator 是 15px，真机上「方框上下几乎相接、一排挤成一条栅栏」（用户截图）。
+   这里给行加垂直 padding 抬高到 ~28px，方框上下各有 ~6px 余量，整列才透气。
+   ⚠ 只加 padding，**不碰 indicator 的定位属性**（subcontrol-position / 负 margin
+   那一套在 v1.39.0 已全部证伪）。 */
+QTreeView::item { padding: 4px 2px; border: none; }
+/* v1.40.10（反馈 2）：演员检测的候选树**选中行**走软件强调色。
+   之前只有 `QListWidget::item:selected` / `QTableWidget::item:selected`，
+   缺 `QTreeView::item:selected` → 树（QTreeWidget 即 QTreeView 子类）选中回落到
+   Qt 默认蓝/紫高亮，与全站强调色（__ACCENT_DARK__）不一致。这里补齐，并加
+   `:selected:!active`（失去焦点时稍淡）两态，与列表/表格选中完全同款。 */
+QTreeView::item:selected { background: rgba(__ACCENT_DARK__, 0.72); color: #ffffff; }
+QTreeView::item:selected:!active { background: rgba(__ACCENT_DARK__, 0.55); color: #ffffff; }
+
+QTreeView::indicator {
+    width: 15px; height: 15px; border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.22); background: #2a241c;
+}
+QTreeView::indicator:hover { border-color: __ACCENT__; background: #362e23; }
+QTreeView::indicator:checked { background: __ACCENT__; border-color: __ACCENT_LIGHT__; }
 
 QTableWidget, QTableView {
     background: rgba(18, 16, 12, __SURF__); color: #ece5d8;
@@ -346,11 +389,16 @@ QGroupBox::title {
 
 /* ---------- 勾选 ---------- */
 QCheckBox, QRadioButton { background: transparent; color: #ece5d8; spacing: 8px; }
+/* v1.39.1：同 QTreeView/QListWidget —— 设了 width/height 后 Qt 走 QSS 绘制分支，
+   未勾选态的 `rgba(255,255,255,0.05)` 会被判成「无背景」而整块跳过 → 框不显示。
+   必须给实色背景。 */
 QCheckBox::indicator, QRadioButton::indicator {
     width: 16px; height: 16px; border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.22); background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.22); background: #2a241c;
 }
-QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: __ACCENT__; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: __ACCENT__; background: #362e23;
+}
 QCheckBox::indicator:checked, QRadioButton::indicator:checked {
     background: __ACCENT__; border-color: __ACCENT_LIGHT__;
 }
@@ -397,6 +445,21 @@ QMenu::item { padding: 7px 22px 7px 14px; border-radius: 7px; }
 QMenu::item:selected { background: rgba(__ACCENT_DARK__, 0.9); color: #ffffff; }
 QMenu::separator { height: 1px; background: rgba(255, 255, 255, 0.10); margin: 5px 8px; }
 QSplitter::handle { background: rgba(255, 255, 255, 0.06); width: 1px; }
+/* v1.40.10（反馈 6）：演员检测的**可拖动高度条**（竖向 splitter，handleWidth=8）
+   与树/详情分隔条（横向 splitter，handleWidth=6）上强调色 + 留白。
+   原规则把 handle 画成 1px 近乎隐形的灰线，与全站风格脱节、也不易抓。
+   这里用 objectName 限定只作用于演员检测，避免影响主页等其他 splitter：
+   - 竖向高度条：强调色填充 + margin-top/bottom 2px（上下各留 2px 空隙，不贴组框边）；
+   - 横向分隔条：强调色（更淡）+ margin-left/right 2px（左右各留 2px 空隙）。
+   `margin` 在 splitter handle 上会被 Qt 当作 grip 内缩，正好做出「悬空一段强调色」的观感。 */
+QSplitter#ActorSplitV::handle:vertical {
+    background: rgba(__ACCENT__, 0.30);
+    margin-top: 2px; margin-bottom: 2px;
+}
+QSplitter#ActorSplitH::handle:horizontal {
+    background: rgba(__ACCENT__, 0.22);
+    margin-left: 2px; margin-right: 2px;
+}
 
 /* ---------- 悬停缩略图预览卡 ---------- */
 QFrame#HoverCard {

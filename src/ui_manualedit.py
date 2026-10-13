@@ -16,7 +16,7 @@
 """
 import os
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QComboBox, QListWidget, QListWidgetItem, QLineEdit,
                                QTextEdit, QGroupBox, QFileDialog, QMessageBox,
@@ -52,6 +52,13 @@ class ManualEditPage(QWidget):
     """检索选片 → 编辑 nfo → 换图 → 保存。"""
 
     SEARCH_LIMIT = 300
+
+    #: v1.40.8：右栏内容被整块重建（换片 / 清空）后发一次 —— 让外层的
+    #: 「固定宽画布」（`ui_settings.SettingsDialog._freeze`）重算画布最小高。
+    #: 不重算的话，画布还按上一部影片的内容高钉着：
+    #:   · 新的更高 → 底部被切（正是用户截图 1 的问题）；
+    #:   · 新的更矮 → 底部一片死黑。
+    contentChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -137,6 +144,9 @@ class ManualEditPage(QWidget):
         self.scroll.setWidget(host)
         if old is not None and old is not host:
             old.deleteLater()
+        # v1.40.8：右栏换了根 widget = 内容高变了。延到布局激活后再广播 ——
+        # 构造/换片途中量出来的还是估算值（真值要等一轮事件循环）。
+        QTimer.singleShot(0, self.contentChanged.emit)
 
     def _show_placeholder(self, text):
         host = QWidget()

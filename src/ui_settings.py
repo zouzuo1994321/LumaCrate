@@ -12,6 +12,8 @@ import math
 import re
 import subprocess
 import sys
+import time
+import urllib.parse
 import zipfile
 
 from PySide6.QtCore import (Qt, QThread, Signal, QPropertyAnimation, Property, QTime,
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QGridLayout, QMessageBox, QCheckBox, QRadioButton, QInputDialog,
     QSpinBox, QProgressBar, QPlainTextEdit, QApplication, QSlider, QSizePolicy,
     QTableWidget, QTableWidgetItem, QHeaderView, QTreeWidget, QTreeWidgetItem,
-    QDoubleSpinBox,
+    QDoubleSpinBox, QScrollArea,   # v1.40.7：`_freeze()` 要用（原来是函数内局部 import）
 )
 
 import config as cfg
@@ -40,7 +42,31 @@ import ui_imagedetect              # v1.30.0 反馈 2：图像检测
 import ui_manualedit               # v1.30.0 反馈 3：手动修改
 import ui_actorcheck               # v1.31.0 反馈 3：演员检测
 import i18n                        # v1.32.0 反馈 3：界面语言（19 种）
+from scan_ring import ScanRing     # v1.39.0（需求 3）：导航项「进行中」转圈
+
+# v1.40.11：执行日志框（sc_log）与「运行日志（实时）」框（_log_view）统一为同一套样式。
+# 等宽字体 + 半透明深色底 + 浅色字，复制运行日志的观感（仅样式复刻，不做实时文件 tail）。
+LOG_BOX_STYLE = (
+    "font-family: Consolas, 'Courier New', Menlo, monospace; "
+    "font-size:11px; background:rgba(0,0,0,0.25); color:#d9cfbf;"
+)
 from ui_hero import compact_button
+
+
+def cf_browser_snapshot_path():
+    """v1.40.2（反馈 2）：内置浏览器留下的**持久 cookie 快照**路径。
+
+    与 `cf_browser.py` 里 `SNAPSHOT_NAME` 必须一致 —— 那边每次成功取到 cookie
+    都会额外写一份到这里，这样**关窗之后**「读取 Cookie」按钮仍读得到，
+    不必重新过一次人机校验。
+    """
+    try:
+        import cf_browser
+        return cf_browser.snapshot_path()
+    except Exception:
+        import tempfile
+        return os.path.join(tempfile.gettempdir(), "lmc_cf_snapshot.json")
+
 
 # v1.13.0：拉大行距，避免列表里内容被裁（反馈 1/2）；导航菜单列表高度改为按条目数自适应（反馈 7）
 # v1.22.0：再整体加大一档 —— 用户反馈「提高行距以保证按钮完整显示」，行内 28~30px 的
@@ -748,6 +774,538 @@ class GlassDialog(QDialog):
             pass
 
 
+class CloudflareDialog(GlassDialog):
+    """v1.40.1（反馈 3）：Cloudflare / AWS WAF 验证助手 —— **内置浏览器**取 cookie。
+
+    用户原话：「站点验证使用内置浏览器，参考 微博bot小助手 那种方式来获取 cookie」。
+
+    v1.40.0 的做法是「用系统浏览器打开 → F12 抠 document.cookie → 粘回来」。用户
+    实测觉得太绕（要开 DevTools、要找到 cf_clearance、还要手动粘贴）。改成**内置
+    浏览器**：本对话框点「打开内置浏览器」后，弹出一个内嵌 WebView2 的窗口，用户
+    在里面把 Cloudflare / AWS WAF 的验证过掉，窗口右下角有个「✅ 我已完成验证，
+    读取 Cookie」按钮，点一下 cookie 就自动取回、注入刮削器并复测 —— 全程不用碰
+    DevTools。
+
+    为什么走子进程（关键取舍）
+      · 复刻的是 微博bot小助手 的 `pywebview` + `window.get_cookies()` 路线
+        （它复用的是系统自带的 **WebView2 运行时**，exe 只 58.7MB，不打包 Chromium）；
+      · 但 pywebview 有硬约束：`webview.start()` **必须在 MainThread**（源码断言
+        「pywebview must be run on a main thread.」）。而本软件是 PySide6/Qt，
+        `app.exec()` 独占主线程 → 同进程调不了。微博bot 整个 GUI 就是 pywebview，
+        所以它在主线程；我们只能**另起一个子进程**跑浏览器（`src/cf_browser.py`）。
+      · 父子通信走**结果 JSON 文件**（子进程原子写、父进程轮询），零 IPC 依赖，
+        子进程崩了也只丢一次验证、不会拖垮主界面。
+
+    为什么不用 QWebEngineView：它要拖进 ~150MB 的 Chromium 运行时（Qt6WebEngineCore.dll
+    194MB + icudtl.dat 10MB …），对「单文件 exe」是灾难级代价；且它自己的指纹同样
+    可能被 Cloudflare 挡（等于白加）。pywebview 复用系统 WebView2，代价近乎为零。
+
+    保留的手动通路：内置浏览器不可用时（WebView2 未装 / pywebview 缺失），仍可
+    「手动粘贴 cookie」—— 折叠在「高级 ▾」里，不占主视线。
+    """
+
+    def __init__(self, host_url, title, parent=None, on_done=None):
+        super().__init__(parent)
+        self.host_url = host_url
+        self.on_done = on_done
+        self._proc = None
+        self._resfile = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(500)
+        self._timer.timeout.connect(self._poll_result)
+        self.setWindowTitle(title or "站点验证")
+        self.setMinimumWidth(660)
+
+        v = QVBoxLayout(self)
+        # v1.40.2（反馈 1）：用户截图指出「行与行间隔太大」—— 把外边距与行距都收紧
+        # （16→10 / 12→7），并把两步说明压成单行显示（原来每步各占一行还多留白）。
+        v.setContentsMargins(14, 10, 14, 10)
+        v.setSpacing(7)
+
+        head = QLabel(
+            f"<b>{html_esc(host_url)}</b> 命中了站点的人机校验"
+            "（Cloudflare / AWS WAF）。本软件的无头请求过不去，"
+            "现在用<b>内置浏览器</b>过一次校验，cookie 会自动取回来复用。")
+        head.setWordWrap(True)
+        head.setTextFormat(Qt.RichText)
+        head.setStyleSheet("color:#e8d9b6;font-size:12px;")
+        v.addWidget(head)
+
+        steps = QLabel(
+            "<b>两步走：</b>① 点「打开内置浏览器」，在弹出的窗口里等它自动通过"
+            "（若弹验证码，勾一下「我不是机器人」）；"
+            "② 点「<b>读取 Cookie</b>」把通行 cookie 取回来并复测（直接关窗也可以）。")
+        steps.setWordWrap(True)
+        steps.setTextFormat(Qt.RichText)
+        steps.setStyleSheet("color:#a2967f;font-size:11px;")
+        v.addWidget(steps)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.btn_open = QPushButton("打开内置浏览器")
+        self.btn_open.setObjectName("Primary")
+        self.btn_open.setToolTip("弹出内置 WebView2 窗口，在里面完成站点的人机校验")
+        self.btn_open.clicked.connect(self._open_builtin)
+        row.addWidget(self.btn_open)
+        # v1.40.2（反馈 2）：**独立**的「读取 Cookie」按钮 —— 用户明确要求
+        # 「单独安排一个按钮进行 cookie 读取」。之前唯一入口是内置浏览器窗口右下角
+        # 那个按钮，窗口一关就没了；现在主对话框里直接可读：
+        #   · 内置浏览器还开着 → 直接去问它要（走结果文件 / 请求它 dump）；
+        #   · 已经关掉了 → 读内置浏览器上次留下的用户数据目录里的 cookie。
+        self.btn_read = QPushButton("读取 Cookie")
+        self.btn_read.setObjectName("Primary")
+        self.btn_read.setToolTip(
+            "从内置浏览器读取该站点的 cookie（含 cf_clearance）并注入刮削器。\n"
+            "内置浏览器还开着会直接取；已关闭则读上次留下的一份。")
+        self.btn_read.clicked.connect(self._read_cookie)
+        row.addWidget(self.btn_read)
+        self.btn_webview = QPushButton("检查环境")
+        self.btn_webview.setObjectName("Ghost")
+        self.btn_webview.setToolTip("确认 pywebview 与系统 WebView2 运行时是否就绪")
+        self.btn_webview.clicked.connect(self._check_webview)
+        row.addWidget(self.btn_webview)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.state = QLabel("—")
+        self.state.setWordWrap(True)
+        self.state.setStyleSheet("color:#a2967f;font-size:11px;")
+        v.addWidget(self.state)
+
+        # ---------- 高级 ▾：手动粘贴 cookie（内置浏览器不可用时的兜底） ----------
+        self.btn_adv = QPushButton("高级 ▾（手动粘贴 cookie）")
+        self.btn_adv.setObjectName("Ghost")
+        self.btn_adv.setCheckable(True)
+        self.btn_adv.toggled.connect(self._toggle_adv)
+        v.addWidget(self.btn_adv)
+
+        self.adv = QWidget()
+        av = QVBoxLayout(self.adv)
+        av.setContentsMargins(0, 2, 0, 0)
+        av.setSpacing(5)
+        tip = QLabel("在系统浏览器里按 F12 → Console 执行 <code>document.cookie</code>，"
+                     "把整串结果（重点含 <code>cf_clearance</code>）粘到下面：")
+        tip.setWordWrap(True)
+        tip.setTextFormat(Qt.RichText)
+        tip.setStyleSheet("color:#a2967f;font-size:11px;")
+        av.addWidget(tip)
+        self.ed = QPlainTextEdit()
+        self.ed.setPlaceholderText("cf_clearance=…")
+        self.ed.setMinimumHeight(64)
+        av.addWidget(self.ed)
+        self.adv.setVisible(False)
+        v.addWidget(self.adv)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(6)
+        self.btn_save = QPushButton("保存并校验")
+        self.btn_save.setObjectName("Primary")
+        self.btn_save.setToolTip("把「高级」里粘贴的 cookie 保存下来并复测")
+        self.btn_save.clicked.connect(self._save_and_verify)
+        btns.addWidget(self.btn_save)
+        self.btn_clear = QPushButton("清除已存 cookie")
+        self.btn_clear.setObjectName("Ghost")
+        self.btn_clear.clicked.connect(self._clear)
+        btns.addWidget(self.btn_clear)
+        btns.addStretch(1)
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.setObjectName("Ghost")
+        self.btn_close.clicked.connect(self.close)
+        btns.addWidget(self.btn_close)
+        v.addLayout(btns)
+
+        self._refresh_state()
+
+    # ---------- 行为 ----------
+    def _refresh_state(self):
+        st = scraper_mod.cookie_state(self.host_url)
+        if st["count"]:
+            mark = "✅ 已含通行 cookie" if st["has_pass"] else "⚠ 有 cookie 但没看到 cf_clearance"
+            self.state.setText(
+                f"{mark}：该站点已保存 {st['count']} 条（{', '.join(st['names'][:6])}）"
+                f"，保存于 {st['at']}。")
+            self.state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+        else:
+            self.state.setText("当前该站点没有保存任何手工 cookie，请求仍会被拦。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+
+    def _toggle_adv(self, on):
+        self.adv.setVisible(bool(on))
+        self.btn_adv.setText("高级 ▴（手动粘贴 cookie）" if on else "高级 ▾（手动粘贴 cookie）")
+        self.adjustSize()
+
+    # ---------- 内置浏览器（pywebview 子进程） ----------
+    def _helper_cmd(self):
+        """构造子进程命令行：优先用冻结 exe（同目录 exe 自身 + `--cf-browser`），
+        源码运行时用当前 python 解释器 + src/cf_browser.py。"""
+        import tempfile
+        resfile = os.path.join(tempfile.gettempdir(), "lmc_cf_result.json")
+        try:
+            if os.path.exists(resfile):
+                os.remove(resfile)
+        except Exception:
+            # Windows 下偶尔被占用；换个名字即可
+            resfile = os.path.join(tempfile.gettempdir(),
+                                   "lmc_cf_result_%d.json" % int(time.time()))
+        host = urllib.parse.urlparse(self.host_url).netloc
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cf_browser.py")
+        if getattr(sys, "frozen", False):
+            # 打包后 cf_browser.py 已进 exe；主程序 main.py 里识别 `--cf-browser`
+            # 这个开关并把控制权交给 cf_browser.main()。
+            cmd = [sys.executable, "--cf-browser", self.host_url, resfile, host]
+        else:
+            cmd = [sys.executable, script, self.host_url, resfile, host]
+        return cmd, resfile
+
+    def _webview_ready(self):
+        """探测 pywebview 与系统 WebView2 是否就绪，返回 (ok, 说明)。"""
+        if getattr(sys, "frozen", False):
+            return True, "内置 exe（已随包带上 pywebview）"
+        try:
+            import webview            # noqa: F401
+        except Exception as e:
+            return False, f"pywebview 未安装（{e}）"
+        # WebView2 运行时（Edge）
+        exe = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                           "Microsoft", "EdgeWebView", "Application")
+        found = ""
+        try:
+            for n in os.listdir(exe):
+                p = os.path.join(exe, n, "msedgewebview2.exe")
+                if os.path.exists(p):
+                    found = n
+                    break
+        except Exception:
+            pass
+        if found:
+            return True, f"pywebview 就绪，WebView2 运行时 {found}"
+        return False, "未找到系统 WebView2 运行时（请安装 Microsoft Edge WebView2 Runtime）"
+
+    def _check_webview(self):
+        ok, msg = self._webview_ready()
+        self.state.setText(("✅ " if ok else "❌ ") + msg)
+        self.state.setStyleSheet(
+            "color:#9ecf8a;font-size:11px;" if ok else "color:#e08a7a;font-size:11px;")
+
+    def _read_cookie(self):
+        """v1.40.2（反馈 2）：**独立**的「读取 Cookie」按钮。
+
+        用户原话：「cookie 读取存在问题，单独安排一个按钮进行 cookie 读取」。
+        读 cookie 的两条通路，按优先级：
+          ① 内置浏览器**还开着**（子进程在跑）→ 令它立刻 dump 一次到结果文件，
+             轮询到就注入（复用 `_poll_result` 那条既有链路）；
+          ② 内置浏览器**已关闭** → 去读子进程写下的「持久快照」文件
+             （`cf_browser.py` 每次成功取 cookie 都会额外存一份到固定路径，
+             这样关窗之后仍然读得到，不必重新过一次校验）。
+        两条都拿不到就明确告诉用户「先点『打开内置浏览器』过一次校验」。
+        """
+        # 通路 ①：内置浏览器还开着 → 直接问它要
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                import tempfile
+                resfile = os.path.join(tempfile.gettempdir(), "lmc_cf_result.json")
+                # 让子进程主动 dump：结果文件先删掉，再由对话框发一个「请求读取」信号文件
+                try:
+                    if os.path.exists(resfile):
+                        os.remove(resfile)
+                except Exception:
+                    pass
+                reqfile = os.path.join(tempfile.gettempdir(), "lmc_cf_request.json")
+                with open(reqfile, "w", encoding="utf-8") as f:
+                    f.write('{"action":"dump"}')
+                self._resfile = resfile
+                self._on_builtin_snapshot = True
+                self.state.setText("正在向内置浏览器请求 cookie…（若窗口无响应，"
+                                   "请在窗口里点「读取 Cookie」）")
+                self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+                applog.log("[站点验证] 读取 Cookie：内置浏览器在运行，请求 dump")
+                if not self._timer.isActive():
+                    self._timer.start()
+                # 2.5 秒还没等到 → 退回快照
+                QTimer.singleShot(2500, self._read_cookie_snapshot)
+                return
+            except Exception as e:
+                applog.log(f"[站点验证] 请求内置浏览器 dump 失败：{e}")
+        self._read_cookie_snapshot()
+
+    def _read_cookie_snapshot(self):
+        """去读内置浏览器留下的**持久快照**（关窗后仍可用）。"""
+        if getattr(self, "_on_builtin_snapshot", False) and self._resfile \
+                and os.path.exists(self._resfile):
+            return          # 已经读到结果文件了，`_poll_result` 会接手
+        snap = cf_browser_snapshot_path()
+        if not snap or not os.path.exists(snap):
+            self.state.setText("❌ 还没读到任何 cookie —— 请先点「打开内置浏览器」，"
+                               "在弹出的窗口里过一次校验再点本按钮。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            applog.log("[站点验证] 读取 Cookie：无快照文件，需先过一次校验")
+            return
+        try:
+            with open(snap, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            self.state.setText(f"❌ 快照文件解析失败：{e}")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            return
+        want = urllib.parse.urlparse(self.host_url).netloc
+        if data.get("host") and want and data["host"] != want:
+            self.state.setText(f"⚠ 快照是给 {data['host']} 的，与本站 {want} 不符 ——"
+                               "请先在内置浏览器里打开本站过一次校验。")
+            self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            return
+        self.state.setText("已从内置浏览器快照读回 cookie，正在注入并复测…")
+        self._on_helper_done(data)
+
+    def _focus_builtin_window(self, pid=None):
+        """把内置浏览器（pywebview）窗口**拉到前台**。
+
+        v1.40.3（本轮反馈 2「点击没反应」）：真机复现证明窗口建得出来但**被主程序挡住**
+        （它是独立顶层窗口、默认不置顶），用户看不到 → 以为点击无效。
+        `cf_browser.py` 里已给窗口 `on_top=True`；这里再主动找一次它的窗口并
+        `SetForegroundWindow`，双保险（窗口创建有延迟，故由调用方分几次调）。
+        """
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            target_pid = pid or (self._proc.pid if self._proc is not None else 0)
+            found = []
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+            def _cb(h, _l):
+                n = u.GetWindowTextLengthW(h)
+                if n <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(h, buf, n + 1)
+                if "站点验证" in buf.value and "内置浏览器" in buf.value:
+                    found.append(h)
+                return True
+
+            u.EnumWindows(WNDENUMPROC(_cb), 0)
+            for h in found:
+                try:
+                    u.ShowWindow(h, 9)          # SW_RESTORE
+                    u.SetForegroundWindow(h)
+                except Exception:
+                    pass
+            return bool(found)
+        except Exception:
+            return False
+
+    def _open_builtin(self):
+        ok, msg = self._webview_ready()
+        if not ok:
+            self.state.setText(f"❌ {msg}　可点「高级 ▾」手动粘贴 cookie。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.btn_adv.setChecked(True)
+            return
+        # 已有子进程在跑就不重复开
+        if self._proc is not None and self._proc.poll() is None:
+            self.state.setText("内置浏览器已在运行 —— 请在弹出的窗口里完成验证。")
+            self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            # v1.40.3：窗口可能被主程序挡住 → 顺手把它拉回前台（修「点了没反应」）
+            self._focus_builtin_window()
+            return
+        try:
+            import tempfile
+            cmd, resfile = self._helper_cmd()
+            logp = os.path.join(tempfile.gettempdir(), "lmc_cf_browser.log")
+            self._resfile = resfile
+            flags = 0
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                # 子进程自己会开 pywebview 窗口；不要多弹一个控制台黑框。
+                flags = subprocess.CREATE_NO_WINDOW
+            self._logf = open(logp, "wb")
+            self._proc = subprocess.Popen(cmd, stdout=self._logf, stderr=self._logf,
+                                          creationflags=flags)
+            applog.log(f"[站点验证] 启动内置浏览器子进程 pid={self._proc.pid} "
+                       f"url={self.host_url}")
+            self.state.setText("已在弹出的窗口里打开站点 —— 完成验证后点窗口右下角的"
+                              "「✔ 我已完成验证，读取 Cookie」（或直接关窗）。")
+            self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            self._timer.start()
+            # ★ v1.40.3（本轮反馈 2）：点击后**给即时反馈 + 主动把窗口拉前台**。
+            #   子进程要解压 onefile + 起 WebView2，真实窗口出现约需 2~5 秒；
+            #   这期间旧代码界面毫无变化 → 用户以为「点了没反应」反复点。
+            #   这里：① 按钮先进入「已打开…」禁用态（避免连点重复 spawn）；
+            #   ② 分几次（1.5s / 3s / 5s）尝试把内置浏览器窗口拉到前台。
+            self.btn_open.setEnabled(False)
+            self.btn_open.setText("已打开 · 等待验证…")
+            if not hasattr(self, "_open_restore_timer"):
+                self._open_restore_timer = QTimer(self)
+                self._open_restore_timer.setSingleShot(True)
+                self._open_restore_timer.timeout.connect(self._restore_open_btn)
+            self._open_restore_timer.start(6000)
+            for delay in (1500, 3000, 5000):
+                QTimer.singleShot(delay, self._focus_builtin_window)
+        except Exception as e:
+            applog.log(f"[站点验证] 启动内置浏览器失败：{e}")
+            self.state.setText(f"❌ 启动失败：{e}　可点「高级 ▾」手动粘贴。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self._restore_open_btn()
+
+    def _restore_open_btn(self):
+        """把「打开内置浏览器」按钮恢复成可点态（v1.40.3）。"""
+        try:
+            self.btn_open.setEnabled(True)
+            self.btn_open.setText("打开内置浏览器")
+        except Exception:
+            pass
+
+    def _poll_result(self):
+        if not self._resfile or not os.path.exists(self._resfile):
+            # 子进程已退出但没写结果 → 大概率是启动就崩了
+            if self._proc is not None and self._proc.poll() is not None:
+                self._timer.stop()
+                self._on_helper_done(None)
+            return
+        self._timer.stop()
+        data = None
+        try:
+            with open(self._resfile, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            data = {"ok": False, "error": f"结果文件解析失败：{e}"}
+        self._on_helper_done(data)
+
+    def _on_helper_done(self, data):
+        # v1.40.3：内置浏览器已结束 → 「打开内置浏览器」按钮恢复可点态
+        self._restore_open_btn()
+        if self._proc is not None:
+            try:
+                if self._proc.poll() is None:
+                    self._proc.terminate()
+            except Exception:
+                pass
+            self._proc = None
+        try:
+            if self._logf:
+                self._logf.close()
+        except Exception:
+            pass
+        if not data or not data.get("ok"):
+            err = (data or {}).get("error") or "内置浏览器未取到 cookie"
+            self.state.setText(f"❌ {err}　可再试一次，或点「高级 ▾」手动粘贴。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            return
+        pairs = scraper_mod.parse_cookie_header(data.get("cookie", ""))
+        if not pairs:
+            self.state.setText("❌ 取回的 cookie 解析为空，请重试。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            return
+        n = scraper_mod.inject_cookies(self.host_url, pairs)
+        has_pass = any(k in scraper_mod._PASS_COOKIE_NAMES for k in pairs)
+        applog.log(f"[站点验证] 内置浏览器取回 {n} 条 cookie -> {self.host_url}"
+                   f"（含通行 cookie: {has_pass}）")
+        self._refresh_state()
+        if self.on_done:
+            self.on_done(n)
+        self._verify_now()
+
+    def _copy_snippet(self):
+        try:
+            QApplication.clipboard().setText("document.cookie")
+        except Exception:
+            pass
+        self.state.setText("已把 `document.cookie` 复制到剪贴板 —— "
+                           "到浏览器 Console 里粘贴、回车，再把输出整串复制回来。")
+        self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+
+    def _save_and_verify(self):
+        pairs = scraper_mod.parse_cookie_header(self.ed.toPlainText())
+        if not pairs:
+            self.state.setText("没解析出任何 cookie —— 请确认粘贴的是 `name=value` 形式的内容。")
+            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            return
+        n = scraper_mod.inject_cookies(self.host_url, pairs)
+        has_pass = any(k in scraper_mod._PASS_COOKIE_NAMES for k in pairs)
+        self._refresh_state()
+        applog.log(f"[站点验证] 注入 {n} 条 cookie -> {self.host_url}"
+                   f"（含通行 cookie: {has_pass}）")
+        if self.on_done:
+            self.on_done(n)
+        # 保存完自动跑一次测连，让用户立刻看到是否真的通了（不等他回上一页点「测试」）
+        self._verify_now()
+
+    def _verify_now(self):
+        src = "minnano" if "minnano" in self.host_url else "imdb"
+        self.state.setText(self.state.text() + "　正在用新 cookie 复测…")
+        self._verify = TestSourceWorker(src, "", 12)
+        self._verify.done.connect(self._on_verified)
+        self._verify.start()
+
+    def _on_verified(self, key, res):
+        ok = bool(res.get("ok"))
+        msg = res.get("msg") or ""
+        diag = res.get("diag") or {}
+        if ok:
+            self.state.setText(f"✅ 复测通过：{msg}（{res.get('ms')} ms）")
+            self.state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            applog.log(f"[站点验证] 复测通过 -> {self.host_url}（{res.get('ms')} ms）")
+            return
+        # v1.40.2（反馈 2）：**修掉误导性结论**。老文案不管什么原因都甩一句
+        # 「cookie 过期」—— 而探针实测（TCP 通 / TLS 被 RST / 各种指纹都一样）
+        # 证明这类失败是**连接在 TLS 握手阶段就被掐断**，HTTP 请求根本没发出去，
+        # cookie 压根没机会被发送。再让用户去折腾 cookie 是把他往死路上引。
+        #
+        # ★ v1.40.4（反馈 2「握手成功了也不太行」）：上一版只分 tls / tcp 两支，
+        #   其余一律落到「若持续失败，请查日志」—— 而**最需要说清的那一支**
+        #   （TLS 通、正文是挑战页）恰恰落在这里，用户刚过完一次验证就看到
+        #   「复测未通过 … 若持续失败请查日志」，自然觉得「握手成功了也不太行」。
+        #   现在按 `stage` 四支分开，waf 那支直接说「过完验证也可能仍被挑战」。
+        verdict = diag.get("verdict") or ""
+        if diag.get("stage") == "tls":
+            tail = ("　—— ★ 判因（分层探针）：连接在 **TLS 握手阶段**就被重置，"
+                    "**这不是 cookie 的问题**（请求还没发出，cookie 没用上）。"
+                    "请换网络 / 换代理，或检查本机防火墙与安全软件是否按进程拦截。")
+        elif diag.get("stage") == "tcp":
+            tail = "　—— 连 TCP 都连不上，是 DNS / 网络问题，与 cookie 无关。"
+        elif diag.get("stage") == "waf":
+            tail = ("　—— ★ 判因（分层探针）：**TCP + TLS 都通**，但站点回的正文是"
+                    "反爬挑战页（HTTP 200/202 也会是挑战页）。这类挑战要浏览器**执行 JS**"
+                    "换放行凭据，手工粘 cookie 一般无效 —— 本机实测该站的挑战凭据"
+                    "拿不到，请改用另一数据源，或换网络 / 换代理。")
+        elif diag.get("stage") == "http":
+            tail = ("　—— 链路通、但 HTTP 层被硬拒（应用层拦截），"
+                    "可试换代理 / 换出口 IP 后复测。")
+        else:
+            tail = "　—— 若持续失败，请查运行日志（工具 → 数据 → 日志）确认具体原因。"
+        self.state.setText(f"❌ 复测未通过：{msg}（{res.get('ms')} ms）{tail}")
+        self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+        # 把分层诊断结论写进运行日志 —— 用户明确要求「查看运行日志，查明失败原因」
+        applog.log(f"[站点验证] 复测未通过 -> {self.host_url}：{msg}（{res.get('ms')} ms）")
+        if diag:
+            applog.log(f"[站点验证·诊断] stage={diag.get('stage')} "
+                       f"waf={diag.get('waf')} body_len={diag.get('body_len')} "
+                       f"ok={diag.get('ok')} verdict={verdict}")
+            for line in (diag.get("detail") or []):
+                applog.log(f"[站点验证·诊断] {line}")
+
+    def _clear(self):
+        scraper_mod.clear_cookies(self.host_url)
+        self.ed.clear()
+        self._refresh_state()
+
+    def closeEvent(self, ev):
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        try:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.terminate()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_logf", None):
+                self._logf.close()
+        except Exception:
+            pass
+        super().closeEvent(ev)
+
+
 # ---------- 媒体库编辑 / 新建对话框：名称 / 类型 / 媒体文件夹 ----------
 
 class AutoFillDialog(GlassDialog):
@@ -1191,15 +1749,53 @@ class LibraryEditDialog(GlassDialog):
 
 # ---------- 设置对话框 ----------
 class SettingsDialog(QDialog):
+    # ★ v1.40.7（本轮）：**固定默认尺寸 1320×960**，切页不再让窗口长高/收矮。
+    # 用户反馈原文：「界面默认大小改为 1320x960px，不随着工具内的内容进行调整，
+    #   内部模块不随着界面调整，直接冻结。」
+    # 经澄清：「打开默认 1320x960（撤销自适应）但可以手动再调整宽度和高度」+
+    #          「窗口可拖，但内容不跟着拉伸」。
+    #
+    # v1.40.6 的「按页自适应高度」（切到矮页自动收矮、切到高页自动长高）副作用太多：
+    # 窗口在用户切页时**自己跳高度**，观感上是「界面在跟着内容变」；且不同页的高度
+    # 折算依赖 `stack.height()`（还受 chrome 影响），实测换算容易偏。
+    # ⇒ 本版直接**取消自动收放**：打开即 1320×960，之后只有用户自己能改尺寸。
+    #
+    # 保留 MIN_H：仅作为**拖拽下限**（避免被拖到极窄导致导航文字挤没），
+    # 不再参与「自动收矮」。MAX_H 保留给下面的 `_fit_page`（兜底值，正常不生效）。
+    MIN_H = 560
+    MAX_H = 960
+    #: v1.40.7：打开时的默认逻辑尺寸 1320×960（用户指定）。
+    DEF_W = 1320
+    DEF_H = 960
+    #: v1.40.7（Task #236）：左侧导航固定宽（`_build()` 里 `nav_frame.setFixedWidth(150)`）。
+    NAV_W = 150
+    #: v1.40.7（Task #236）：页面内容**固定绘制宽度** = 默认窗口宽 - 导航宽。
+    # 窗口拉宽时画布仍按这个宽度绘制并居中（两侧留白），组框尺寸纹丝不动。
+    # ⚠ 必须扣掉 NAV_W：`QDialog` 的有效最小宽 = `max(显式最小宽, 布局最小宽)`，
+    #   若页宽取 1320，加上 150 的导航布局最小宽就被顶到 1470（探针实测），
+    #   `resize(1320)` 会被 Qt 静默忽略 → 窗口比要求的宽。
+    CONTENT_W = DEF_W - NAV_W       # = 1170
+
     def __init__(self, parent=None, on_changed=None):
         super().__init__(parent)
         # v1.24.0（反馈 5）：入口与标题由「设置」改为「工具」
         self.setWindowTitle("工具")
-        # 放大对话框，确保「演员刮削」整页一屏显示、无需滚动
+        # ★ v1.40.7（本轮）：默认尺寸固定 1320×960 —— 不再跟屏幕宽度缩到 1000，
+        #   也不再看屏幕可用高。仅在屏幕确实装不下时才收敛（小屏兜底）。
         sw = self.screen()
         avail = sw.availableGeometry() if sw is not None else None
-        w = min(1000, (avail.width() if avail else 1280) - 40)
-        h = min(900, (avail.height() if avail else 1040) - 40)
+        if avail is not None:
+            w = min(self.DEF_W, max(760, avail.width() - 40))
+            h = min(self.DEF_H, max(self.MIN_H, avail.height() - 40))
+        else:
+            w, h = self.DEF_W, self.DEF_H
+        # v1.40.7：`setMinimumHeight(MIN_H)` 保留 —— 用户要「可以手动再调整宽度和
+        # 高度」，所以**不能** `setFixedSize`，只需给一个拖拽下限。
+        # ⚠ 注意：`QDialog` 的有效最小高 = `max(显式最小高, 布局最小高)`。
+        #   v1.40.6 真机踩过「高内容页（个性化设置 1413px）把窗口顶到 1408px」——
+        #   修法是那些页**保持 QScrollArea 形态**吸收大最小高（见 `_build()` 里
+        #   `_page_scroll` 的用法），而不是去调 `setMinimumHeight`。
+        self.setMinimumHeight(self.MIN_H)
         self.resize(w, h)
         self.s = cfg.get_settings()
         self.on_changed = on_changed
@@ -1227,9 +1823,14 @@ class SettingsDialog(QDialog):
         # v1.24.0：画像概览内容很高（雷达 + 概览 + 高频榜 + 分布 + 共现），**必须套滚动** ——
         # 不套的话它会把整窗最小高度顶到 1733px（真机 1080p 屏幕上底部够不着，live_verify 抓到过）。
         # v1.30.0：手动修改（左列表 + 右表单，自带滚动）／图像检测（结果树，必须套滚动）
-        self._pg_manual = self._page_scroll(ui_manualedit.ManualEditPage())
+        self._manual_page = ui_manualedit.ManualEditPage()
+        # v1.40.8：手动修改右栏换片后内容高会变（nfo 字段多的影片能到 1400+），
+        # 画布最小高必须跟着重算，否则新内容被切 / 底部一片死黑（用户截图 1）。
+        self._manual_page.contentChanged.connect(
+            lambda: self._refresh_frozen_height(self._manual_page))
+        self._pg_manual = self._page_scroll(self._manual_page)
         self._pg_insight = self._page_scroll(self._build_insight())
-        self._pg_scraper = self._build_scraper()      # 紧凑布局，整页一屏、不套滚动
+        self._pg_scraper = self._freeze(self._build_scraper(), lock_height=True)   # v1.40.9：子模块锁定高度
         self._pg_smart = self._page_scroll(self._build_smart())     # v1.24.0：智能推荐
         self._pg_tagopt = self._page_scroll(self._build_tagopt())   # v1.25.0：标签优化
         self._pg_service = self._page_scroll(self._build_service())
@@ -1237,7 +1838,9 @@ class SettingsDialog(QDialog):
         self._pg_dedupe = self._page_scroll(self._build_dedupe())   # v1.23.0：重复检测
         # v1.31.0（反馈 3）：演员检测自带上下两块 + 内外滚动，**不再套 _page_scroll**
         # （外面再包一层滚动区会让两个分隔条的高度互相打架）。
-        self._pg_actorcheck = ui_actorcheck.ActorCheckPage()
+        # v1.40.7（Task #236）：但**宽度仍要冻结** —— 改用 `_freeze()`（只钉固定宽、
+        # 不再包一层滚动区），既不打架又让窗口拉宽时内容纹丝不动。
+        self._pg_actorcheck = self._freeze(ui_actorcheck.ActorCheckPage(), scroll=False)
         self._pg_imagedetect = self._page_scroll(ui_imagedetect.ImageDetectPage())
         self._pg_data = self._page_scroll(self._build_data())   # v1.13.0：数据 / 日志导出
         for pg in (self._pg_personal, self._pg_manual, self._pg_insight, self._pg_scraper,
@@ -1247,7 +1850,203 @@ class SettingsDialog(QDialog):
             self.stack.addWidget(pg)
         root.addWidget(self.stack, 1)
 
+        # v1.39.0（需求 3）：左侧导航「进行中」转圈的轮询定时器。集中轮询而不在各
+        # worker 启动点插桩 —— 页面重建/销毁都不影响这里的判定（全部 getattr 兜底）。
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(400)
+        self._busy_timer.timeout.connect(self._refresh_nav_rings)
+
+        # v1.40.0（反馈 1）：挂一个「内容比可视区矮就别让它被压」的守卫。
+        #
+        # 这条守卫针对的是**真根因**（而不是症状）：设置窗是**不套滚动区**的写死高度，
+        # 一旦某页内容超过可视高度，Qt 不会滚动，而是**把控件往下压** —— 被压的总是
+        # 排在最后那个 QLabel（QGroupBox 的高度由布局分配，标签可被压到只剩描边）。
+        # 用户截图 1 那条「空白带」就是这么来的：`src_hint` 的 sizeHint 是 60px
+        # （文案折成 4 行），实际只被分到 15px —— 文字整段看不见，只剩一条细边。
+        #
+        # 修法不靠「猜一个够大的窗口」：`_fit_page()` 量当前页的 sizeHint，
+        # 需要时把**窗口**长高（上限屏幕可用高度），长不动了才让页面自己滚动。
+        self._install_fit_guard()
         self._show("个性化设置")
+
+    @staticmethod
+    def _pin_min_height(box, lay):
+        """把 `box` 的最小高钉成「它内容真正需要的高度」。
+
+        v1.40.0（反馈 1）。取 **layout 里逐子项 sizeHint 之和**，而不是
+        `lay.sizeHint().height()` —— 后者有个致命陷阱：布局一旦被压缩过，
+        `sizeHint()` 返回的就**已经是缩水值**（探针实测：同一个组框，空间够时
+        报 262，被压过之后报 247）。照它钉等于把「被压扁的状态」固化下来，
+        白钉一场。逐子项累加绕开了这个陷阱：每个子控件自己的 `sizeHint()`
+        不受父布局压缩影响（实测 QListWidget 恒报 192，哪怕实际只分到 120）。
+
+        必须**等布局激活后**才取值（`QTimer.singleShot(0, ...)`）—— 构造途中
+        `sizeHint()` 是未布局的估算值，照它钉会在真机上重新压扁内容。
+        另取 `lay.minimumSize()` 兜底，保证「一个字都别裁」。
+
+        v1.40.1（反馈 1 回修）：探针实测出**「逐子项累加」自己也会虚高** ——
+        上面的注释里那句「QListWidget 恒报 192，哪怕实际只分到 120」正是
+        病根被写成了论据：`src_list` 在真源里是 `setFixedHeight(120)`，但
+        `sizeHint()` 仍返回 QListWidget 的通用默认 192；`src_hint` 折行标签
+        按当前宽只需 15~30，却因 `sizeHint()` 报 60 而被算成 60。两者相加
+        把组框钉到 280，而真实内容只需 ~208 → **底部凭空多出 70px 空白**
+        （用户截图 1）。修法两步：
+          ① `need` 一律用 `min(need, maximumHeight())` 夹一次 —— `setFixedHeight`
+             出的控件 min==max，这一夹就把 `sizeHint()` 的 `192` 拉回真实 `120`；
+          ② 折行子项只要 `heightForWidth(当前宽)` 拿得到正数，就**不再**回退
+             `sizeHint()`（那正是「宽度未知」的保守估算，与真实宽无关）。
+        """
+        try:
+            total = 0
+            n = 0
+            for i in range(lay.count()):
+                it = lay.itemAt(i)
+                w = it.widget()
+                if w is None:
+                    continue          # 弹簧 / 间隔项不占内容高
+                # ★ 折行 QLabel 特殊处理：它的 `sizeHint().height()` 是「宽度未知」
+                # 的保守估算（本例 60 = 4 行），而按真实宽算只要 15（1 行）。
+                # 用它会把组框钉得虚高、平白多出一大段空白。改用 `heightForWidth`
+                # 按当前宽算真实需求 —— 这正是「不裁字」与「不虚高」的平衡点。
+                need = 0
+                try:
+                    if w.hasHeightForWidth() and w.width() > 0:
+                        need = w.heightForWidth(w.width())
+                except Exception:
+                    need = 0
+                if need <= 0:
+                    need = w.sizeHint().height()
+                need = max(need, w.minimumSizeHint().height())
+                # ★ 固定高控件（`setFixedHeight` / `setMaximumHeight`）不该按
+                # `sizeHint()` 算：它的通用默认值（QListWidget 的 192）与实际
+                # 占据高度（120）无关。夹一次 maximumHeight 即可归真。
+                try:
+                    cap = w.maximumHeight()
+                    if 0 < cap < need:
+                        need = cap
+                except Exception:
+                    pass
+                total += need
+                n += 1
+            if n > 1:
+                total += (n - 1) * max(0, lay.spacing())
+            m = lay.contentsMargins()
+            total += m.top() + m.bottom()
+            h = max(total, lay.minimumSize().height())
+            if h > box.minimumHeight():
+                box.setMinimumHeight(h)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _pin_label_height(lb):
+        """给折行 QLabel 按「它真正需要的高度」钉死 minimumHeight。
+
+        v1.40.0（反馈 1）。折行 QLabel 是**唯一** `hasHeightForWidth()` 的子项，
+        因此在空间不足时永远是第一个被 Qt 压缩的对象 —— 而它的 `minimumSizeHint()`
+        默认只报「一行」，所以能被压到一行高、文字整段消失（用户截图里那条空白带）。
+        把 minimumHeight 钉成 `heightForWidth(当前宽)` 之后，任何布局都压不动它。
+
+        必须等布局跑完（`singleShot(0)`）才能拿到真实宽度 —— 宽度不同，折行数不同，
+        所需高度也就不同。宽度变化时用 `resizeEvent` 再钉一次（见 `_HintLabel` 的用法：
+        这里直接在 resize 后重算，无需子类化）。
+        """
+        try:
+            w = lb.width()
+            if w <= 0:
+                w = lb.sizeHint().width()
+            need = lb.heightForWidth(w)
+            if need <= 0:
+                need = lb.sizeHint().height()
+            if need > lb.minimumHeight():
+                lb.setMinimumHeight(need)
+        except Exception:
+            pass
+
+    def _install_fit_guard(self):
+        """★ v1.40.7：**已停用**。
+
+        v1.40.0 建立它是为了让 `_fit_page` 可重入安全（`_make_scrollable()` 会动
+        `QStackedWidget` 的索引 → 触发 `currentChanged` → 又回调进 `_fit_page`）。
+        本版 `_fit_page` / `_make_scrollable` 都已停用，不再有重入路径。
+        保留空壳仅为兼容旧调用点（`_build()` 里仍会调一次）。
+        """
+        self._in_fit = False
+
+    def _fit_page(self, *_):
+        """★ v1.40.7（本轮）：**整体停用** —— 切页不再收放窗口高度。
+
+        用户反馈：「界面默认大小改为 1320x960px，**不随着工具内的内容进行调整**」。
+        v1.40.6 的「按页自适应」（切到矮页 `_compact_to()` 收矮、切到高页
+        `_grow_to()` 长高）正是在「跟着内容调整」，与本轮要求直接冲突。
+
+        保留函数体（而不是删掉）的理由：`stack.currentChanged` 已经连到它、
+        `_show()` 里也有 `QTimer.singleShot(0, self._fit_page)`，删掉会得
+        `AttributeError`；留一个早退的空壳风险最低。
+
+        仍然*要做*的一件事：**保证高内容页保持滚动区形态**（不要被 `_wrap_*`
+        解开成裸页）。原因见 v1.40.6 真机踩到的坑 —— `QDialog` 的有效最小高 =
+        `max(setMinimumHeight(MIN_H), 布局最小高)`，裸页会把窗口顶穿到 1408px。
+        本版所有页在 `_build()` 阶段就已经是「画布 + 滚动区」形态（`_freeze()`），
+        不再有人解包，所以这里只是**兜底**：万一有人把页面换成了裸高页，
+        给它补一层滚动。
+        """
+        return
+
+    def _unwrap_page(self, sc):
+        """★ v1.40.7：**已停用**。
+
+        v1.40.6 的「解包」是把 `_freeze()` 出来的「画布 + 滚动区」还原成裸页，
+        好让窗口能收矮。本版取消自适应后**没有任何理由再解包** ——
+        解包反而会破坏「内容固定宽」的画布结构。保留空壳仅为兼容旧调用点。
+        """
+        return None
+
+    def _compact_to(self, need_content_h):
+        """★ v1.40.7：**已停用**（切页不再收矮窗口）。
+
+        保留空壳仅为兼容可能的旧调用点；`_fit_page()` 已直接 `return`，
+        正常路径上不会再走到这里。
+        """
+        return
+
+    def _grow_to(self, need_content_h):
+        """★ v1.40.7：**已停用**（切页不再长高窗口）。同 `_compact_to()`。"""
+        return
+
+    @staticmethod
+    def _content_height(pg):
+        """粗估页面「不被压缩时」需要的总高：外层竖向布局里各子项 sizeHint 之和 + 间距。
+
+        为什么不用 `pg.sizeHint()`：Qt 的布局在空间不足时会**直接返回缩水后的值**，
+        用它当判据必然自证「装得下」（v1.40.0 探针踩到的坑）。这里改成逐子项累加，
+        并取 `layout().sizeHint()` 与手工累加中的较大值兜底。
+        """
+        lay = pg.layout()
+        if lay is None:
+            return pg.sizeHint().height()
+        total = 0
+        for i in range(lay.count()):
+            it = lay.itemAt(i)
+            w = it.widget()
+            if w is not None:
+                total += w.sizeHint().height()
+            else:
+                total += it.sizeHint().height()
+        total += max(0, lay.count() - 1) * max(0, lay.spacing())
+        m = lay.contentsMargins()
+        total += m.top() + m.bottom()
+        return max(total, lay.sizeHint().height())
+
+    def _make_scrollable(self, pg):
+        """★ v1.40.7：**已停用**。
+
+        旧语义是「把裸页包进 QScrollArea 以吸收大最小高」（v1.40.0/v1.40.6 用）。
+        本版所有页在 `_build()` 阶段就经 `_freeze()` 定型，**不需要**运行时再包；
+        且现在包出来的是裸滚动区（没有固定宽画布），会破坏「内容冻结」。
+        保留空壳仅为兼容旧调用点。
+        """
+        return
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1257,13 +2056,306 @@ class SettingsDialog(QDialog):
         # v1.18.0 反馈 98：打开即开始刷新「实时运行状态」
         if getattr(self, "_rt_timer", None) is not None:
             self._rt_timer.start()
+        # v1.39.0（需求 3）：打开即开始轮询「进行中任务」，驱动左侧导航转圈
+        if getattr(self, "_busy_timer", None) is not None:
+            self._busy_timer.start()
+
+    def resizeEvent(self, e):
+        """★ v1.40.7：窗口尺寸**完全交给用户**，这里不再做任何自动调整。
+
+        v1.40.6 曾在这里区分「用户拖动 vs 程序 resize」（靠 `_auto_h` /
+        `_program_resize` / `_user_resized_h` 三个状态）以支持「按页自适应」——
+        本版取消了自适应，那套状态机也就没有存在意义，全部移除。
+        保留覆写只为**将来**在此挂钩（例如记住用户改过的尺寸）留个位置。
+        """
+        super().resizeEvent(e)
+
+    def _freeze(self, widget, scroll=True, lock_height=False):
+        """把一页「冻结」成**固定宽度**画布（v1.40.7，Task #236；v1.40.8 修正高度）。
+
+        `lock_height=True`（v1.40.9，反馈「演员刮削各子模块锁定高度」）：画布**不随
+        视口拉伸** —— 钉死成「内容真实需要的高度」，窗口再高也不给页面多余高度，于是
+        页内 `Expanding` 子控件（数据源的 QListWidget / 执行的日志框）再也吸不到余量、
+        子模块高度恒定。仅内容**矮于视口**的页需要（演员刮削内容 ~807 < 视口 ~950）；
+        内容**高于视口**的页（个性化设置 / 画像概览等）画布本就取内容高、永不收到多余
+        高度，用不到这个开关，保持默认 `False` 走可滚逻辑。
+
+        用户要求「窗口可拖，但**内容不跟着拉伸**」：窗口一拉宽，组框不该跟着摊宽、
+        文字行不该变长。这条是**宽度**诉求。
+
+        ⚠ v1.40.7 误把「宽度冻结」实现成了「宽 + 高都钉死」，用
+        `page.setFixedHeight(page.sizeHint().height())`。两个致命后果（真机截图确认）：
+
+          ① `sizeHint()` 是**构造途中**（未布局）的估算值，普遍偏小。实测
+             手动修改页 356、画像概览 792，而真实内容分别需要 ~1400 / ~1200。
+          ② 「整页自带滚动区」的页面（手动修改 = 左右分裂 + 右栏自己的
+             `_NoHScroll`；画像概览 = 雷达/概览/高频榜/分布/共现）被钉死在一个
+             比视口还矮的高度后，**页面内部的滚动区拿不到该有的高度** ——
+             内容在固定高度处被**硬切**，底部留一大片死黑，页内滚动条也因
+             高度不足而形同虚设。
+
+        ⇒ v1.40.8 修正：**只钉宽度，高度交给画布/视口**。结构::
+
+            [QScrollArea]视口可任意拉伸
+              └─ [QWidget canvas]宽固定 CONTENT_W（左对齐），**高度=视口高**
+                   └─ 真页面 widget（宽度 CONTENT_W，高度随画布）
+
+        效果：
+          · 拉宽窗口 → 画布仍 CONTENT_W、右侧纯留白，**组框宽度一字不变**；
+          · 拉高窗口 → 画布跟着长高，页面拿到完整可视高 —— 内部自带滚动区的页
+            （手动修改 / 画像概览）滚动条正常工作，内容**不再被硬切**；
+          · 窗口本身不会因为页面内容变高而变高（画布高 = 视口高，不取内容高）。
+
+        「内部模块尺寸不随窗口重排」这条仍然成立：**宽度**被钉死，组框的宽度、
+        列数、文字折行全部不随窗口宽度变化；纵向那些 `Expanding` 控件（日志框/
+        列表/树）会跟着视口高变化，但这是**页内滚动**的正常语义，不是重排。
+
+        `scroll=False`（演员检测页）只做「固定宽」，**不额外套** `QScrollArea` ——
+        该页自带内外两块滚动，再包一层会让两个分隔条的高度互相打架（v1.31.0 的坑）。
+        """
+        page = widget
+        # ★ 只钉**宽度**。不再 `setFixedHeight`（见上面 v1.40.8 说明）。
+        #   同时清掉可能存在的固定高（`setFixedHeight` 会把 min==max 一起设死），
+        #   否则页面回到画布里仍是硬切状态。
+        try:
+            page.setMinimumHeight(0)
+            page.setMaximumHeight(16777215)
+        except Exception:
+            pass
+        page.setFixedWidth(self.CONTENT_W)
+        if not scroll:
+            return page
+        canvas = QWidget()
+        canvas.setObjectName("LmcFreezeCanvas")   # v1.40.8：供 `_refresh_frozen_height` 反查
+        # ★ 水平方向**左对齐**：用户截图里内容紧贴左侧导航，拉宽窗口时也应当是
+        #   「左边不动、右边留白」。
+        # ⚠ v1.40.8 踩坑：**不能**用 `addWidget(page, 1, Qt.AlignLeft)` —— Qt 里给
+        #   布局项传对齐旗标会让该项在**两个方向**都退化成 `sizeHint` 尺寸（对齐
+        #   旗标与「拉伸填充」互斥）。实测页面高只剩 478（= sizeHint 一档），
+        #   而不是铺满视口高 → 页内滚动区拿不到高度，内容又回到硬切状态。
+        #   正解：**不带对齐旗标**地 `addWidget(page, 1)`（纵向填满画布高），
+        #   横向靠「页面自身 `setFixedWidth` + 末尾一份零宽弹簧」自然左对齐 ——
+        #   页面宽度被钉死，多余的横向空间全部落到弹簧上，视觉上就是「左边不动」。
+        cv = QHBoxLayout(canvas)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(0)
+        cv.addWidget(page, 1)                 # 无对齐旗标 → 纵向填满画布高
+        cv.addStretch(0)                      # 横向多余空间全给弹簧 → 页面靠左
+        # ★ v1.40.8：画布的**最小高** = 页面内容真正需要的高度（布局激活后测）。
+        #   `setWidgetResizable(True)` 下画布高 = `max(视口高, minimumSizeHint高)`：
+        #     · 内容矮于视口（手动修改选片前 354）→ 画布取视口高，页面铺满、无滚动条；
+        #     · 内容高于视口（个性化设置 1384 / 画像概览 ~1200）→ 画布取内容高，
+        #       外侧滚动区出现滚动条，页面拿到完整高度、内容**不被压扁也不被硬切**。
+        #   ⚠ 必须在**布局激活后**取值 —— 构造途中 `sizeHint()` 是估算值（实测手动
+        #   修改报 354、画像概览报 792，真值远不止）。而且**一轮 `singleShot(0)`
+        #   还不够**：画像概览分析完成后文本从「—」涨成 8 行、AI 引擎设置的表单
+        #   还在等子控件自己的 `_pin_min_height` —— 都要过几轮事件循环才稳定。
+        #   所以这里用「重试到稳定」的写法（见 `_defer_canvas_height`）。
+        canvas.setMinimumHeight(0)           # 先给 0，避免构造途中报出虚高值卡住窗口
+        self._defer_canvas_height(canvas, page, lock=lock_height)
+        sc = QScrollArea()
+        # ★ v1.40.9：lock_height 时**关掉** resizable —— 画布高度由下方延迟钉死成
+        #   内容高，窗口拉高时画布停在内容高、多余高度落在滚动区视口里（页面脚下留白），
+        #   页面与子模块都不再被拉长。非 lock 时保持 True（画布铺满视口 / 内容超高可滚）。
+        sc.setWidgetResizable(not lock_height)
+        sc.setWidget(canvas)
+        # v1.40.10（反馈 5）：冻结页**永不出现底部横向滚轴**。
+        # 根因：页面被 `setFixedWidth(CONTENT_W=1170)` 钉死；但内容高过视口（个性化设置
+        # ≈1384 > 视口 ≈950）时竖向滚轴出现、吃掉 ~10px → 视口宽变成 1160 < 页面 1170
+        # → Qt 判定内容比视口宽，于是补一条底部横向滚轴（用户截图实锤）。
+        # 修法：`ScrollBarAlwaysOff` 关掉横向滚轴；页面右侧 18px 页边距足以吸收那 10px，
+        # 组框内容不被裁（所有冻结页都是「组框 + 页边距」结构，关横向滚轴零副作用）。
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sc.setProperty("lmc_frozen", True)      # 供冒烟 / 探针识别
+        return sc
+
+    def _defer_canvas_height(self, canvas, page, tries=6, grown=False, lock=False):
+        """延到布局稳定后，把画布最小高钉成「页面内容真正需要的高度」（v1.40.8）。
+
+        ★ 为什么要「重试」而不是量一次：v1.40.8 冒烟抓到两处**静默偏小** ——
+          画像概览 899（真值 1242，分析完成后文本才涨）、AI 引擎设置 468
+          （真值 481，表单内子控件自己的 `_pin_min_height` 还没跑完）。
+        一轮 `singleShot(0)` 量出来的是「半稳定态」，画布钉矮了 → 内容仍被切。
+        修法：**每轮量一次，只要比上轮大就继续排下一轮**，最多 `tries` 轮；
+        量到不再增长即收敛（正常 2~3 轮）。
+
+        ★ 还必须是**单调变大**语义：内容变高才更新，变矮不缩（避免抖动）。
+          内容真的变矮（换片）走 `_refresh_frozen_height`，那里允许缩小。
+
+        ★ v1.40.9：`lock=True` 时，收敛的那一轮把画布**钉死成固定高**
+          （`setFixedHeight(need)`）—— 画布既不再随视口拉伸、也不再被后续重算改小，
+          页面与子模块高度彻底恒定（演员刮削用）。非 lock 时只动最小高、保留可滚。
+        """
+        def _apply():
+            try:
+                if canvas is None or page is None:
+                    return
+                need = self._content_need_height(page)
+            except RuntimeError:
+                return        # C++ 侧已析构（窗口关了 / 页被重建）
+            except Exception:
+                return
+            if need <= 0:
+                return
+            try:
+                if need > canvas.minimumHeight():
+                    canvas.setMinimumHeight(need)
+                    # 变高了 → 布局还要再走一轮，继续量（最多 tries 轮）
+                    if tries > 1:
+                        QTimer.singleShot(0, lambda: self._defer_canvas_height(
+                            canvas, page, tries - 1, grown=True, lock=lock))
+                elif lock:
+                    # 已收敛 + 要求锁定 → 钉死固定高（min==max），画布不再随视口变。
+                    # 用「页面真实所需的自然高」取大，确保 >= 内容：sizeHint 比
+                    # minimumSizeHint 更全，漏掉会把锁高页面底部切掉（与 v1.40.7 同源 bug）。
+                    real = need
+                    try:
+                        real = max(real, page.minimumSizeHint().height(),
+                                   page.sizeHint().height())
+                    except Exception:
+                        pass
+                    canvas.setFixedHeight(real)
+                elif grown:
+                    # 本轮已是最后一轮，或不再增长 → 收敛，不再排
+                    pass
+                else:
+                    # 首轮就与初值持平 → 多半还没稳定，再给一次机会
+                    if tries > 1:
+                        QTimer.singleShot(0, lambda: self._defer_canvas_height(
+                            canvas, page, tries - 1, grown=False, lock=lock))
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+        QTimer.singleShot(0, _apply)
+
+    @staticmethod
+    def _content_need_height(page):
+        """量一个页面「真正需要的高度」（v1.40.8）。
+
+        取 `max(layout 逐子项 sizeHint 累加, layout.minimumSize().height())`，
+        再与 `page.minimumSizeHint()` 取大 —— 三条路取最保险的那条。
+        `layout.sizeHint()` 单用不行（被压缩过就缩水），`minimumSizeHint` 单用
+        也不行（Qt 对很多控件给的默认值偏保守）。
+        """
+        try:
+            lay = page.layout()
+        except RuntimeError:
+            return 0
+        best = 0
+        if lay is not None:
+            try:
+                total = 0
+                for i in range(lay.count()):
+                    it = lay.itemAt(i)
+                    w = it.widget()
+                    if w is None:
+                        continue
+                    h = 0
+                    # 折行标签优先按真实宽算（`sizeHint()` 是「宽度未知」的保守估算）
+                    try:
+                        if w.hasHeightForWidth() and w.width() > 0:
+                            h = w.heightForWidth(w.width())
+                    except Exception:
+                        h = 0
+                    if h <= 0:
+                        try:
+                            h = w.sizeHint().height()
+                        except Exception:
+                            h = 0
+                    try:
+                        h = max(h, w.minimumSizeHint().height())
+                    except Exception:
+                        pass
+                    # v1.40.9：还要采纳「被显式钉死的 minimumHeight」（如 _pin_min_height
+                    # 钉过的子模块）—— minimumSizeHint() 不一定反映它，漏掉会把画布量矮、
+                    # 锁高页面底部被切（与 v1.40.7 同源的低估 bug）。
+                    try:
+                        mh = w.minimumHeight()
+                        if mh > h:
+                            h = mh
+                    except Exception:
+                        pass
+                    total += h
+                # 纵向 spacing 与上下边距要算进去，否则量出来比真值小
+                try:
+                    total += lay.spacing() * max(0, lay.count() - 1)
+                    m = lay.contentsMargins()
+                    total += m.top() + m.bottom()
+                except Exception:
+                    pass
+                best = max(best, total)
+            except Exception:
+                pass
+            try:
+                best = max(best, lay.minimumSize().height())
+            except Exception:
+                pass
+        try:
+            best = max(best, page.minimumSizeHint().height())
+        except Exception:
+            pass
+        try:
+            best = max(best, page.minimumHeight())
+        except Exception:
+            pass
+        return best
+
+    def _refresh_frozen_height(self, page):
+        """页面内容重建（换片/换选）后，重算所属画布的最小高（v1.40.8）。
+
+        手动修改换一部影片后右栏内容高会变（有的 nfo 字段多、有的少），画布若
+        还按旧值钉着，就会把新内容切掉或留白。这里从页面反查它所在的画布并补量。
+
+        与 `_defer_canvas_height` 的区别：这里**允许缩小**（换一部字段少的影片，
+        画布应跟着变矮，否则底部留一大片死黑），所以直接 `setMinimumHeight(need)`；
+        并且重跑一遍「重试到稳定」的循环，等新内容的布局落定。
+        """
+        try:
+            canvas = page.parentWidget()
+            while canvas is not None and canvas.objectName() != "LmcFreezeCanvas":
+                canvas = canvas.parentWidget()
+            if canvas is None:
+                return
+            need = self._content_need_height(page)
+            if need <= 0:
+                return
+            canvas.setMinimumHeight(need)
+            # 新内容可能还要几轮才稳定（尤其右栏表单里的折行标签）
+            self._defer_canvas_height(canvas, page)
+        except RuntimeError:
+            pass
+        except Exception:
+            pass
+
+    def _show_refresh_frozen(self, scroll_or_page):
+        """切页后补量画布最小高（v1.40.8）。
+
+        隐藏页的布局是「半稳定态」：折行标签不知道真实宽、自带滚动区的页拿不到
+        视口高。切到该页后它的几何才成立，此时量才准。延一轮事件循环再量。
+        """
+        def _go():
+            try:
+                pg = scroll_or_page
+                if isinstance(pg, QScrollArea):
+                    if not pg.property("lmc_frozen"):
+                        return
+                    cv = pg.widget()
+                    if cv is None or cv.layout() is None or cv.layout().count() == 0:
+                        return
+                    pg = cv.layout().itemAt(0).widget()
+                if pg is None:
+                    return
+                self._refresh_frozen_height(pg)
+            except RuntimeError:
+                pass
+            except Exception:
+                pass
+        QTimer.singleShot(0, _go)
 
     def _page_scroll(self, widget):
-        from PySide6.QtWidgets import QScrollArea
-        sc = QScrollArea()
-        sc.setWidgetResizable(True)
-        sc.setWidget(widget)
-        return sc
+        """v1.40.7：改为 `_freeze()` 的薄包装（保留旧名字，调用点很多）。"""
+        return self._freeze(widget, scroll=True)
 
     @staticmethod
     def _section(text):
@@ -1309,18 +2401,32 @@ class SettingsDialog(QDialog):
         old.setContentsMargins(8, 12, 8, 10)
         old.setSpacing(4)
         self.sub_btns = {}
+        self.nav_rings = {}          # v1.39.0（需求 3）：key -> ScanRing（进行中任务转圈）
         # `ORDER` 保持「扁平、按可见顺序」—— dev/ 下的 live_verify 与 render 脚本
         # 都按它遍历页面，分组只是显示层的包装。
         self.ORDER = [k for _g, keys in self.NAV_GROUPS for k in keys]
         for group, keys in self.NAV_GROUPS:
             old.addWidget(self._section(group))
             for key in keys:
+                # v1.39.0（需求 3）：按钮右侧挂一枚 ScanRing（运行中任务转圈）。
+                # 包一层 row 容器而不是给 QPushButton 加子控件 —— 按钮自己的
+                # padding/文字布局不动，ring 隐藏时按钮铺满整行（几何与旧版一致，
+                # live_verify 的点击坐标不受影响）。
+                row = QWidget()
+                rh = QHBoxLayout(row)
+                rh.setContentsMargins(0, 0, 6, 0)
+                rh.setSpacing(4)
                 b = QPushButton(i18n.tr(key))
                 b.setObjectName("Nav")
                 b.setToolTip("%s · %s" % (i18n.tr(key), key))   # 悬停能看回原名，排查方便
                 b.clicked.connect(lambda _c, k=key: self._show(k))
-                old.addWidget(b)
+                rh.addWidget(b, 1)
+                ring = ScanRing(row, size=14)
+                ring.hide()          # 空闲不可见，也不占布局空间
+                rh.addWidget(ring)
+                old.addWidget(row)
                 self.sub_btns[key] = b
+                self.nav_rings[key] = ring
         old.addStretch(1)
         if build:
             self._rebuild_nav_highlight()
@@ -1339,6 +2445,65 @@ class SettingsDialog(QDialog):
         if getattr(self, "stack", None) is None:
             return
         self._show(getattr(self, "_current_key", None) or self.ORDER[0])
+
+    # ---------- 左侧导航「进行中」转圈（v1.39.0 需求 3） ----------
+    def _running_tasks(self):
+        """当前正在跑的任务 → 对应导航页 key 的集合。
+
+        判定全部走 getattr + isRunning()，不持有 worker 引用；worker 随页面
+        重建/销毁都不影响这里。跨页任务（演员检测 / 图像检测）问页面要状态
+        （各自实现 `is_busy()`）。
+        """
+        keys = set()
+        for attr, key in (
+            ("_worker", "服务管理"),            # 媒体库扫描（ScanNamedWorker）
+            ("_scrape_worker", "演员刮削"),     # ScrapeWorker
+            ("_to_scan_worker", "标签优化"),    # TagOptScanWorker
+            ("_to_run_worker", "标签优化"),     # TagOptRunWorker
+            ("_to_ai_worker", "标签优化"),      # 标签优化页的 AI 探测
+            ("_dd_worker", "重复检测"),         # DedupeWorker
+            ("_insight_worker", "画像概览"),    # PortraitWorker
+            ("_ai_worker", "AI引擎设置"),
+            ("_ae_probe_worker", "AI引擎设置"),
+            ("_ae_models_worker", "AI引擎设置"),
+            ("_ae_launch_worker", "AI引擎设置"),
+        ):
+            w = getattr(self, attr, None)
+            if w is not None and w.isRunning():
+                keys.add(key)
+        for t in (getattr(self, "_test_workers", None) or []):   # 数据源测试（TestSourceWorker）
+            if t.isRunning():
+                keys.add("演员刮削")
+                break
+        for attr, key in (("_pg_actorcheck", "演员检测"),
+                          ("_pg_imagedetect", "图像检测")):
+            if self._page_busy(getattr(self, attr, None)):
+                keys.add(key)
+        return keys
+
+    @staticmethod
+    def _page_busy(pg):
+        """跨页任务忙碌判定。
+
+        ⚠ 必须容忍页面被 `_page_scroll` 包成 QScrollArea —— 图像检测页就是
+        （`self._pg_imagedetect = self._page_scroll(ImageDetectPage())`），
+        演员检测页没包。直接 `pg.is_busy()` 会在 QScrollArea 上抛
+        AttributeError，400ms 轮询每次都炸在这儿 → 所有转圈都不更新
+        （v1.39.0 冒烟当场抓到，见 dev/smoke_v1390.py）。
+        """
+        from PySide6.QtWidgets import QScrollArea
+        if isinstance(pg, QScrollArea):
+            pg = pg.widget()
+        fn = getattr(pg, "is_busy", None)
+        return bool(callable(fn) and fn())
+
+    def _refresh_nav_rings(self):
+        """按 _running_tasks() 更新左侧导航按钮旁的转圈（与主页侧栏同款 ScanRing）。"""
+        if not getattr(self, "nav_rings", None):
+            return
+        keys = self._running_tasks()
+        for key, ring in self.nav_rings.items():
+            ring.set_state(key in keys, 0, "%s 正在进行" % key)
 
     def _show(self, key):
         self._current_key = key
@@ -1359,6 +2524,14 @@ class SettingsDialog(QDialog):
             "图像检测": self._pg_imagedetect,
             "数据与日志": self._pg_data,
         }.get(key, self._pg_personal))
+        # v1.40.0（反馈 1）：切页后按需长高窗口 / 给该页套滚动。
+        # 用 singleShot(0) 而不是直接调 —— 此刻 `setCurrentWidget` 刚换完，
+        # 布局还没重新算过，直接量会拿到上一页的几何。
+        # v1.40.7：`_fit_page` 已停用（不再收放窗口），这行保留仅为兼容调用点。
+        QTimer.singleShot(0, self._fit_page)
+        # v1.40.8：切到某页时补量一次画布最小高 —— 隐藏页的布局是「半稳定态」，
+        # 有些内容（折行标签 / 自带滚动区的页）只有真正可见时才能量准。
+        self._show_refresh_frozen(self.stack.currentWidget())
         # v1.24.0：画像概览第一次打开时自动分析一次（后续手动点「重新分析」）
         if key == "画像概览" and not self._insight_data:
             self._run_insight()
@@ -1681,29 +2854,79 @@ class SettingsDialog(QDialog):
     def _build_scraper(self):
         page = QWidget()
         v = QVBoxLayout(page)
-        v.setContentsMargins(16, 12, 16, 12)
-        v.setSpacing(10)
+        # v1.40.2（反馈 1/3）：整体收紧留白 —— 用户反馈「行与行间隔太大 / 底部留白太多」。
+        # 上下 12→8、组间 10→7，四个组框更紧凑，也把高度省给日志区。
+        v.setContentsMargins(16, 8, 16, 8)
+        v.setSpacing(7)
         sc = self.s.scraper
 
-        # 总开关 + 数据源（合并为一组，压缩竖向高度）
-        g0 = QGroupBox("演员刮削数据源（自上而下依次尝试，命中后补其缺失字段）")
-        g0v = QVBoxLayout(g0)
-        g0v.setSpacing(8)
+        # v1.40.0（反馈 1）：把「总开关」与「资料统计」从数据源组框里**整体抽出来**，
+        # 各自成立独立模块。
+        #
+        # 为什么原来那样不行（用户三张截图）：
+        #   ① 统计条夹在「启用演员刮削」行与数据源列表之间，视觉上属于数据源那一段，
+        #      而这行讲的其实是**演员库资料的总体状况**，与「数据源」毫无关系；
+        #   ② 数据源组框的内容本来就高（开关行 + 统计行 + 2 行列表 + 测试按钮 + 提示），
+        #      窗口是**不套滚动区**的写死高度（SettingsDialog.resize 上限 900）——
+        #      内容一旦超过可视高度，Qt 就把最后那个 `src_hint` 标签压到只剩描边
+        #      （真机实测被压成 5~7px，文字整段看不见，形成截图 1 红框那条「空白带」）。
+        # 抽出来之后：数据源组框少两行、统计模块自带标题与边框，两个问题一起消失。
+
+        # 模块一 + 模块二（v1.40.5 反馈 1 —— 用户截图：「左右分布压缩到一行」）
+        #
+        # v1.40.0 曾把「总开关」与「资料统计」拆成**两个独立组框**；用户本轮截图指出：
+        # 两个组框各自只有**一行**内容，各自却被 `QGroupBox` 默认的
+        # `contentsMargins=(9,9,9,9)` + 约 20px 标题撑到 78 / 81px（探针实测内容仅需
+        # 48 / 51px，各多出 **30px**）—— 两块加起来 159px 的纵向空间，只为了放两行字。
+        #
+        # ⇒ 正解：**合成一个组框、一行**。左边是「启用演员刮削」的文字 + 开关，
+        #   右边是统计串 + 「刷新统计」按钮，用 `addStretch(1)` 在中间弹性分隔。
+        #   纵向占用从 159px 降到约 50px，组框内那两处 30px 空白一并消失。
+        #
+        # ⚠ 属性名 `self.sc_enabled` / `self.sc_stats` 必须保留 ——
+        #   `_refresh_scraper_stats()` 与 `dev/_scratch/ui_coords.py` 都按名引用。
+        # v1.40.10（反馈 1）：压缩「演员刮削」顶部开关区高度 —— 用户用红框圈出此区，
+        # 要求压矮。三项收紧：① 组内上下留白 4→2；② 列间距 12→8；
+        # ③ 启用说明标签 **禁止换行**（`setWordWrap(False)`）—— 它在窄窗口会折成两行
+        # 把整行顶高（实测是 108px 的主因），锁成单行后行高回到开关本高。
+        # `_pin_min_height(ge)` 在下方按「改后的真实 sizeHint」重新钉最小高，
+        # 所以上面三项会直接反映到组框最终高度上（不再被旧布局撑高）。
+        ge = QGroupBox("演员刮削")
+        geh = QHBoxLayout(ge)
+        geh.setContentsMargins(9, 2, 9, 2)
+        geh.setSpacing(8)
         self.sc_enabled = ToggleSwitch(checked=bool(sc.get("enabled")))
         self.sc_enabled.toggled.connect(lambda c: self.s.set_scraper(enabled=c))
-        g0v.addWidget(self._row("启用演员刮削（补齐演员头像 / 别名 / 生日 / 简介）", self.sc_enabled))
-        rf = QWidget()
-        rfh = QHBoxLayout(rf)
-        rfh.setContentsMargins(0, 0, 0, 0)
+        _en_lab = QLabel("启用演员刮削（补齐演员头像 / 别名 / 生日 / 简介）")
+        _en_lab.setWordWrap(False)
+        geh.addWidget(_en_lab, 0)
+        geh.addWidget(self.sc_enabled, 0)
+        geh.addStretch(1)
         self.sc_stats = QLabel("—")
         self.sc_stats.setStyleSheet("color:#a2967f;font-size:11px;")
-        self.sc_stats.setWordWrap(True)
-        rfh.addWidget(self.sc_stats, 1)
+        # v1.39.5（反馈 2）：原为 setWordWrap(True) —— 统计串有 6 段（演员 / 头像 / 生日 /
+        # 别名 / 已刮削 / 待修复），窄窗口下会折成 2~3 行，把「刷新统计」按钮顶到中间、
+        # 整条看起来像没对齐（用户截图要求「单独成行」）。
+        # 改为**不换行 + 左侧弹性**：统计串永远只占一行，超宽时由 QLabel 自己省略。
+        self.sc_stats.setWordWrap(False)
+        self.sc_stats.setMinimumWidth(0)
+        from PySide6.QtWidgets import QSizePolicy as _SP
+        self.sc_stats.setSizePolicy(_SP.Ignored, _SP.Preferred)
+        geh.addWidget(self.sc_stats, 1)
         refresh = QPushButton("刷新统计")
         refresh.setObjectName("Ghost")
         refresh.clicked.connect(self._refresh_scraper_stats)
-        rfh.addWidget(refresh)
-        g0v.addWidget(rf)
+        geh.addWidget(refresh, 0)
+        v.addWidget(ge)
+        # v1.40.9：把每个子模块的最小高钉成「内容真实需求」—— 与其他工具一致，
+        # 即使窗口被拉高、画布锁定后也不让组框被布局压扁（数据源 g0 在下方单独钉）。
+        QTimer.singleShot(0, lambda box=ge, lay=geh: self._pin_min_height(box, lay))
+
+        # 模块三：数据源（自上而下依次尝试，命中后补其缺失字段）
+        g0 = QGroupBox("演员刮削数据源（自上而下依次尝试，命中后补其缺失字段）")
+        g0v = QVBoxLayout(g0)
+        # v1.40.5（反馈 2）：组内 spacing 8 → 4，收紧「列表 / 按钮+提示」之间的空档。
+        g0v.setSpacing(4)
         self.src_list = QListWidget()
         self.src_list.setSelectionMode(QAbstractItemView.NoSelection)   # 点「测试」不再整行变红
         self.src_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1714,17 +2937,74 @@ class SettingsDialog(QDialog):
         srcbtns = QWidget()
         sbh = QHBoxLayout(srcbtns)
         sbh.setContentsMargins(0, 0, 0, 0)
+        sbh.setSpacing(8)
         test_all = QPushButton("测试全部数据源")
         test_all.setObjectName("Ghost")
         test_all.clicked.connect(self._test_all_sources)
         sbh.addWidget(test_all)
-        sbh.addStretch(1)
-        g0v.addWidget(srcbtns)
+        # v1.40.0（反馈 4）：Cloudflare / WAF 验证助手的入口。
+        # 放这里而不是塞进「刮削策略」参数网格 —— 网格是 6 项定值参数，多一个按钮
+        # 会破坏 2 列对齐；而且它属于「连不上时怎么办」的处置动作，与「测试」同类。
+        self.sc_cf = QPushButton("Cloudflare 验证…")
+        self.sc_cf.setObjectName("Ghost")
+        self.sc_cf.setToolTip(
+            "站点被人机校验（Cloudflare / AWS WAF）挡住时点这里：\n"
+            "借你的系统浏览器过一次校验，把通行 cookie 取回来复用。")
+        self.sc_cf.clicked.connect(self._open_cloudflare)
+        sbh.addWidget(self.sc_cf)
+        # v1.40.5（反馈 2 —— 用户截图：「行间距太大，上下留白太多」）：
+        #   原来是「按钮行」与「提示行」上下两行（组框 spacing=8），中间隔出一段空档。
+        #   ⇒ 正解：**合到同一行** —— 按钮在左、提示在右，中间用 `addStretch` 弹性分隔；
+        #     提示用 wordWrap 折行，窄窗时自己向下长，不再靠换行拉开距离。
         self.src_hint = QLabel("提示：minnano-av 面向日本 AV 女优（日文名检索）；IMDB 面向普通影视演员（英文名检索）；"
                               "无法直连 minnano-av 时在下方填写代理。")
         self.src_hint.setStyleSheet("color:#a2967f;font-size:11px;")
         self.src_hint.setWordWrap(True)
-        g0v.addWidget(self.src_hint)
+        # ⚠ v1.40.5 血泪：折行 QLabel 与按钮同行时**不能**用 `SizePolicy.Ignored`。
+        #   `Ignored` 让布局把它当「宽度可以为 0」——`heightForWidth(0)` 于是算出
+        #   4 行（60px），组框 sizeHint 直接爆到 831px（探针实测）。
+        #   用 `Minimum`：允许它缩到 `minimumSizeHint`，但 `sizeHint` 仍按自己的
+        #   文本宽算 → 组框 sizeHint = 231（120 列表 + 4 + 33 按钮 + 边距，正确）。
+        #   （微探针实测：Ignored 无 min → 831；Ignored+min240 → 231；Minimum → 231。）
+        self.src_hint.setMinimumWidth(0)
+        self.src_hint.setSizePolicy(_SP.Minimum, _SP.Preferred)
+        sbh.addStretch(1)
+        sbh.addWidget(self.src_hint, 3)
+        # v1.40.0（反馈 1）：给折行标签钉住最小高 —— **宽度未知时**的兜底。
+        #
+        # ⚠ 先纠正一个我在本轮排查中一度搞错的判断（探针逐值实锤后修正）：
+        # `sizeHint().height()` 在这条标签上返回 **60**（按 198px 窄宽估算的 4 行），
+        # 但那是「宽度未知」的保守估算。在**真实窗口宽**下量 `heightForWidth(1092)`
+        # 只有 **15**（11px 字体行距），78 个字的文案在 1092px 里确实**一行放得下**。
+        # 所以用户的截图里 `src_hint h=15` **不是**被压扁的 bug —— 文字是完整的。
+        # 那条「空白带」的真实构成是：数据源列表被压到 120px（sizeHint 192），
+        # 加上组框自身的留白，在「统计行」与「刮削策略」之间形成一段视觉空档。
+        #
+        # 这条钉高依然保留，因为它在**窄窗口**下是真有用的（W=900 时
+        # `heightForWidth` 返回 30，标签需要两行；不钉的话 Qt 有把折行 QLabel
+        # 压到一行、文字被截的风险 —— 折行 QLabel 是组框里唯一 `hasHeightForWidth()`
+        # 的子项，空间不足时永远是第一个被牺牲的）。钉法是「按当前宽算真实需求」，
+        # 所以宽窗口下它钉出的就是 15（不会平白占地方），窄窗口下自动变 30。
+        g0v.addWidget(srcbtns)
+        # v1.40.0（反馈 1）：**钉住组框最小高**，让「数据源列表」不再被压。
+        #
+        # 探针实测（E 盘 v1.40.0 / 真机 1085px 宽 / 离屏）：
+        #   组框 h=247  sizeHint=262   → 差 15px
+        #   ├─ QListWidget  h=120  sh=192   ★ 这里才是被压得最狠的（少 72px）
+        #   ├─ QWidget(按钮行) h=33  sh=33
+        #   └─ QLabel(src_hint) h=15  sh=15  （一行放得下，没被裁）
+        # 也就是说：老版本「列表只露一两行就断、下面一段空」的观感，主因是
+        # QListWidget 被布局压掉 72px，而不是提示标签出问题。
+        #
+        # 光靠「把窗口调高」治不了：屏幕可用高只有 800，窗口顶到 1093 仍不够时
+        # `_fit_page()` 的长高路线就失效了。所以按**内容真实需求**钉最小高 ——
+        # 布局宁可让**页面**滚动，也不会再牺牲组框里的列表。
+        #
+        # ⚠ 不用 `lay.sizeHint().height()`：那玩意儿在被压缩过一次之后返回的就是
+        # 缩水值（本例 247），拿它钉等于把「被压扁的状态」固化下来，白钉。
+        # `_pin_min_height()` 内部改成**逐子项 sizeHint 累加**（与 `_content_height`
+        # 同一套算法），取到的才是 262 这个真实需求。
+        QTimer.singleShot(0, lambda box=g0, lay=g0v: self._pin_min_height(box, lay))
         v.addWidget(g0)
 
         # 策略
@@ -1774,6 +3054,21 @@ class SettingsDialog(QDialog):
         self.sc_proxy.setPlaceholderText("可留空；例如 http://127.0.0.1:7890")
         self.sc_proxy.editingFinished.connect(
             lambda: self.s.set_scraper(proxy=self.sc_proxy.text().strip()))
+        # v1.40.0（反馈 3）：代理显式开关 —— 之前只有输入框，靠「填没填」隐式决定，
+        # 用户没法表达「我要直连、别用系统的那个代理」。关掉时代码走 cfg.scraper_proxy()
+        # 返回空串（连系统代理都不套），同时把输入框置灰给出即时视觉反馈。
+        self.sc_proxy_on = ToggleSwitch(checked=bool(sc.get("proxy_enabled", False)))
+        self.sc_proxy_on.toggled.connect(self._on_proxy_toggled)
+        proxyw = QWidget()
+        proxyh = QHBoxLayout(proxyw)
+        proxyh.setContentsMargins(0, 0, 0, 0)
+        proxyh.setSpacing(8)
+        proxyh.addWidget(self.sc_proxy, 1)
+        proxyh.addWidget(QLabel("使用代理"))
+        proxyh.addWidget(self.sc_proxy_on)
+        self._apply_proxy_enabled(self.sc_proxy_on.isChecked())
+        # v1.40.0（反馈 3）：把落盘的开关状态同步给引擎（不只影响本页——后台刮削也算）。
+        scraper_mod.set_proxy_disabled(not self.sc_proxy_on.isChecked())
         self.sc_dir = QLineEdit(sc.get("photo_dir") or "")
         self.sc_dir.setPlaceholderText(self.s.scraper_photo_dir())
         self.sc_dir.editingFinished.connect(
@@ -1790,16 +3085,19 @@ class SettingsDialog(QDialog):
         for i, (lab, wid) in enumerate((
                 ("请求间隔", self.sc_delay), ("请求超时", self.sc_timeout),
                 ("失败重试", self.sc_retry), ("单次上限", self.sc_limit),
-                ("代理", self.sc_proxy), ("头像缓存目录", dirw))):
+                ("代理", proxyw), ("头像缓存目录", dirw))):
             r, c = i // 2, (i % 2) * 2
             nf.addWidget(QLabel(lab), r, c)
             nf.addWidget(wid, r, c + 1)
         g2v.addLayout(nf)
         v.addWidget(g2)
+        QTimer.singleShot(0, lambda box=g2, lay=g2v: self._pin_min_height(box, lay))
 
         # 执行：四种刮削模式（v1.22.0 反馈 1 —— 全量 / 增量 / 补齐 / 修复）
         g3 = QGroupBox("执行")
         g3v = QVBoxLayout(g3)
+        # v1.40.2（反馈 3）：组内行距收紧，减少「执行」区整体的竖向占用与底部漂浮感。
+        g3v.setSpacing(6)
         self._mode_specs = (
             ("full", "全量刮削",
              "全部重新刮削：对**所有**演员强制覆盖已有信息（耗时最久，会覆盖既有资料）"),
@@ -1842,7 +3140,25 @@ class SettingsDialog(QDialog):
         g3v.addWidget(self.sc_prog)
         self.sc_log = QPlainTextEdit()
         self.sc_log.setReadOnly(True)
-        self.sc_log.setFixedHeight(48)
+        # v1.40.0（反馈 2）：用户要求「加大执行日志显示区域」。
+        # 原来写死 setFixedHeight(48) —— 在默认字体下只有 ~3 行，一条完整的测连结果
+        # （「[测试] IMDB：不可用 — 命中反爬挑战页…」这类文案本身就要折 2 行）都把框撑满，
+        # 历史日志一滚就看不见了。
+        # v1.40.1（反馈 2 回修）：v1.40.0 直接提到 240px（约 14 行）又**占得太多**，
+        # 用户要求「缩小一半」。取 120px（约 7 行）作**默认弹性高度**。
+        # ★ v1.40.3（本轮，反馈 1「压缩执行的高度」）：**上一版修错了方向**。
+        #   上一版让执行组框吃 stretch=1，本意是「组框底边贴页底、不留白」，实际效果是
+        #   **多余高度全进了日志框**（QPlainTextEdit 的水平/垂直 sizePolicy = Expanding，
+        #   组内只有它一个 Expanding 项）→ 真机 1080p 下日志框被撑到 200px+，
+        #   用户看到的就是「执行区一大片空的日志区」（本轮截图）。
+        #   ⇒ 正解：**日志框固定高度**（`setFixedHeight`，彻底不参与拉伸），
+        #   执行组框也**不再吃 stretch**，多余高度交回页级弹簧（放到页尾）。
+        #   这样执行区高度 = 内容固有高度（与窗口大小无关），页面总高变大时
+        #   多余空间出现在**页底空白**而不是**日志框里**，符合「压缩执行的高度」。
+        self.sc_log.setFixedHeight(96)          # 约 6 行；固定值 → 不再随窗口长高
+        # v1.40.11：样式复刻「运行日志（实时）」—— 等宽字体 + 半透明深色底 + 浅色字 + 不自动换行。
+        self.sc_log.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.sc_log.setStyleSheet(LOG_BOX_STYLE)
         self.sc_log.setPlaceholderText("刮削日志…")
         g3v.addWidget(self.sc_log)
         note = QLabel("说明：仅补齐演员资料并下载头像，不修改任何媒体文件；遵守目标站点 robots / 使用条款，"
@@ -1850,10 +3166,28 @@ class SettingsDialog(QDialog):
         note.setStyleSheet("color:#a2967f;font-size:11px;")
         note.setWordWrap(True)
         g3v.addWidget(note)
+        # v1.40.2（反馈 3）：曾把执行组框改成 stretch=1（「让组框吃满余量、底边贴页底」）。
+        # ★ v1.40.3（本轮，反馈 1「压缩执行的高度」）：**这条改法是错的，现在回退**。
+        #   实测（探针 probe_exec_h.py）：`QPlainTextEdit` 的 sizePolicy 是 Expanding，
+        #   组内只有它一个 Expanding 项 → stretch=1 时**所有余量都灌进日志框**，
+        #   真机 1080p 下日志框被撑到 200px+，用户看到的正是「执行区一大片空的日志区」
+        #   （本轮截图 1086×320 的核心问题）。
+        #   ⇒ 正解：执行组框**不吸 stretch**（=0），日志框**固定高度**（setFixedHeight），
+        #   页尾放回一段弹簧 —— 余量出现在**页面底部空白**，而不是**日志框里**。
+        #   效果：执行区高度 = 内容固有高度（与窗口大小无关），即「压缩执行的高度」。
+        # ★ v1.40.4（本轮，反馈 1「取消执行窗的弹性，让界面高度锁死在 960px」）：
+        #   上一版把余量放在「页尾弹簧」里 —— 它仍然是一种弹性（弹簧会吃掉所有
+        #   剩余高度，页面总高不变时看不出，但窗口被 `_fit_page` 撑高时那段空白就
+        #   会变长，视觉上仍是「执行区在长高」）。用户要求**彻底取消弹性**。
+        #   ⇒ 正解：**去掉页尾弹簧**。执行组框之下不再有任何可伸缩项 →
+        #   页面 = 5 个组框的固有高度之和（严格恒定），而窗口本身已被
+        #   `setFixedHeight(960)` 钉死 → 两者都不再随任何操作变化。
+        #   余量的去处：由上层 `QStackedWidget` 吸收（页面在 stack 里顶端对齐、
+        #   底部留白归 stack，与执行区无关）。
         v.addWidget(g3)
+        QTimer.singleShot(0, lambda box=g3, lay=g3v: self._pin_min_height(box, lay))
 
         self._refresh_scraper_stats()
-        v.addStretch(1)
         return page
 
     def _rebuild_source_list(self):
@@ -1913,6 +3247,35 @@ class SettingsDialog(QDialog):
             self.sc_dir.setText(d)
             self.s.set_scraper(photo_dir=d)
 
+    # ---------- v1.40.0（反馈 3）：代理显式开关 ----------
+    def _apply_proxy_enabled(self, on):
+        """开关状态 → 输入框可用性 + 即时视觉反馈。
+
+        关（直连）：输入框置灰、值仍保留（下次打开还在，不丢用户填过的地址）；
+        开：输入框恢复，占位提示写明「留空则用系统代理」。
+        """
+        on = bool(on)
+        self.sc_proxy.setEnabled(on)
+        self.sc_proxy.setPlaceholderText(
+            "留空则用系统代理；例如 http://127.0.0.1:7890" if on
+            else "代理已关闭（直连）—— 打开右侧开关后才生效")
+        self.sc_proxy.setToolTip(
+            "已启用：请求会走这个代理；留空时回落到系统代理设置。\n"
+            "关闭时：完全直连，**连系统代理也不套**。" if on
+            else "当前为直连模式：不看这个输入框、也不读系统代理。")
+
+    def _on_proxy_toggled(self, checked):
+        self.s.set_scraper(proxy_enabled=bool(checked))
+        self._apply_proxy_enabled(checked)
+        # 同步告诉 scraper 引擎「用户要的就是纯直连」——否则 http_get 里
+        # `if not proxy: proxy = _system_proxy()` 会把关掉的代理又补回来。
+        scraper_mod.set_proxy_disabled(not bool(checked))
+        self._log("[代理] 已%s —— %s" % (
+            "启用" if checked else "关闭（直连）",
+            ("使用 " + self.sc_proxy.text().strip())
+            if checked and self.sc_proxy.text().strip()
+            else ("使用系统代理" if checked else "忽略代理与系统代理设置")))
+
     def _refresh_scraper_stats(self):
         try:
             st = db.scraper_stats()
@@ -1943,7 +3306,7 @@ class SettingsDialog(QDialog):
         if lbl is not None:
             lbl.setText("测试中…")
             lbl.setStyleSheet("color:#d4af37;font-size:11px;")
-        w = TestSourceWorker(key, self.sc_proxy.text().strip(), int(self.sc_timeout.value()))
+        w = TestSourceWorker(key, self.s.scraper_proxy(), int(self.sc_timeout.value()))
         w.done.connect(self._on_test_done)
         w.start()
         if not hasattr(self, "_test_workers"):
@@ -1954,16 +3317,66 @@ class SettingsDialog(QDialog):
         for key in self.s.scraper.get("sources", []):
             self._test_source(key)
 
+    # ---------- v1.40.0（反馈 4）：Cloudflare / WAF 验证助手 ----------
+    def _open_cloudflare(self):
+        """打开验证对话框；站点由用户**已启用且排在最前**的数据源决定。"""
+        key = (self.s.scraper_sources() or ["minnano"])[0]
+        host = {"minnano": scraper_mod.MINNANO_BASE,
+                "imdb": scraper_mod.IMDB_BASE}.get(key, scraper_mod.MINNANO_BASE)
+        name = scraper_mod.SOURCE_NAMES.get(key, key)
+        if getattr(self, "_cf_dlg", None) is None:
+            self._cf_dlg = CloudflareDialog(host, f"站点验证 · {name}", parent=self)
+        else:
+            self._cf_dlg.host_url = host
+            self._cf_dlg.setWindowTitle(f"站点验证 · {name}")
+            self._cf_dlg._refresh_state()
+        self._cf_dlg.show()
+        self._cf_dlg.raise_()
+        self._cf_dlg.activateWindow()
+
     def _on_test_done(self, key, res):
         name = scraper_mod.SOURCE_NAMES.get(key, key)
         self._log(f"[测试] {name}：{'可用' if res.get('ok') else '不可用'} — "
                   f"{res.get('msg')} （{res.get('ms')} ms）")
+        # v1.40.2（反馈 2）：用户要求「查看运行日志，查明失败原因」。把分层诊断结论
+        # 直接写进日志框（用户看的就是这里），一眼能看出「拦在 TLS 握手」还是「cookie 问题」。
+        #
+        # ★ v1.40.4（反馈 2「握手成功了也不太行」）：上一版只打 stage + verdict，
+        #   而 stage 只有 tcp/tls/http 三档 → **TLS 通了但正文是挑战页**（IMDB 的
+        #   真实情形）与「HTTP 层被硬拒」都被混进 `stage=http`，用户看到的就是
+        #   「失败层：http」配一句「若仍被拦，才是 cookie / WAF 层的问题」——
+        #   等于没回答。现在 `diagnose_host` 已探到 HTTP 正文层，新增 `waf` /
+        #   `body_len` 两个字段，这里**按真实层**给一句明确结论 + 下一步。
+        diag = res.get("diag") or {}
+        if not res.get("ok") and diag:
+            stage = diag.get("stage")
+            self._log(f"[诊断] 失败层：{self._stage_cn(stage)}　{diag.get('verdict')}")
+            if stage == "waf":
+                self._log(f"[诊断] 正文 {diag.get('body_len')} 字节，"
+                          f"HTTP {diag.get('http_code')} —— 挑战页靠浏览器执行 JS 放行，"
+                          "取 cookie 无效；出路见上一条。")
+            for line in (diag.get("detail") or []):
+                self._log(f"[诊断] {line}")
+            applog.log(f"[刮削测试·诊断] {name} stage={stage} "
+                       f"waf={diag.get('waf')} body_len={diag.get('body_len')} "
+                       f"verdict={diag.get('verdict')}")
         lbl = self._src_rows.get(key)
         if lbl is not None:
             ok = bool(res.get("ok"))
             lbl.setText("可用" if ok else "不可用")
             lbl.setStyleSheet("color:#6fae6f;font-size:11px;" if ok
                               else "color:#e07a6a;font-size:11px;")
+
+    @staticmethod
+    def _stage_cn(stage):
+        """失败层的中文名。★ v1.40.4（反馈 2）：上一版直接打英文 `tls` / `http`，
+        用户得自己猜是哪一层；而 `http` 这一个词把「被硬拒」与「拿到挑战页」
+        混在一起，正是「握手成功了也不太行」的成因。"""
+        return {"tcp": "TCP 连接（DNS / 路由）",
+                "tls": "TLS 握手",
+                "waf": "HTTP 正文（反爬挑战页）",
+                "http": "HTTP 应用层",
+                "ok": "无（链路与正文都正常）"}.get(stage or "", stage or "未知")
 
     def _scrape_opts(self):
         """当前配置好的刮削参数（含数据源、头像目录）。"""
@@ -1973,6 +3386,9 @@ class SettingsDialog(QDialog):
             return None
         sc["sources"] = sources
         sc["photo_dir"] = self.s.scraper_photo_dir()
+        # v1.40.0（反馈 3）：代理由开关决定 —— 关掉时这里就是空串（直连），
+        # scraper 侧的 `if not proxy: proxy = _system_proxy()` 也就不会兜回系统代理。
+        sc["proxy"] = self.s.scraper_proxy()
         return sc
 
     def _run_mode(self, mode):
@@ -2000,7 +3416,7 @@ class SettingsDialog(QDialog):
                 self, "全量刮削",
                 rich(f"将**强制覆盖重刮全部 {len(people)} 位演员**的资料（含头像）。\n"
                      f"会联网请求数据源，间隔 {sc.get('delay_ms')}ms，"
-                     + (f"代理 {sc.get('proxy')}。" if sc.get('proxy') else "当前未配置代理。")
+                     + (f"代理 {sc.get('proxy')}。" if sc.get('proxy') else "**直连**（未启用代理）。")
                      + "\n\n会覆盖既有资料，只改演员、不动媒体文件。是否继续？")
             ) != QMessageBox.Yes:
                 return
@@ -2153,12 +3569,15 @@ class SettingsDialog(QDialog):
         if w and w.isRunning():
             w.stop()
             w.wait(4000)
-        for t in getattr(self, "_test_workers", []):
+        for t in (getattr(self, "_test_workers", None) or []):
             if t.isRunning():
                 t.wait(3000)
         # v1.18.0 反馈 98：关闭即停止刷新定时器
         if getattr(self, "_rt_timer", None) is not None:
             self._rt_timer.stop()
+        # v1.39.0（需求 3）：导航转圈轮询也停掉（任务仍在后台跑，只是不刷了）
+        if getattr(self, "_busy_timer", None) is not None:
+            self._busy_timer.stop()
         super().closeEvent(e)
 
     def _build_service(self):
@@ -2272,7 +3691,7 @@ class SettingsDialog(QDialog):
         page = QWidget()
         v = QVBoxLayout(page)
         v.setContentsMargins(18, 16, 18, 16)
-        v.setSpacing(12)
+        v.setSpacing(10)
 
         top = QHBoxLayout()
         top.setSpacing(8)
@@ -2324,6 +3743,9 @@ class SettingsDialog(QDialog):
         g1 = QGroupBox("八维偏好雷达")
         g1v = QVBoxLayout(g1)
         self.ins_radar = RadarChart()
+        # v1.40.9（反馈「画像概览不用下滚轴」）：把雷达钉到 260 高，免得它把
+        # 「雷达 + 概览」整行撑到 ~384，从而给下方省出高度让全页塞进一屏。
+        self.ins_radar.setFixedHeight(220)
         g1v.addWidget(self.ins_radar, 1)
         self.ins_radar_tip = QLabel("—")
         self.ins_radar_tip.setWordWrap(True)
@@ -2352,16 +3774,11 @@ class SettingsDialog(QDialog):
                          "studios": "片商", "series": "系列"}[key])
             lb.setStyleSheet("color:#d4af37;font-size:12px;font-weight:bold;")
             g3v.addWidget(lb, 0, col)
-            body = QLabel("—")
-            body.setWordWrap(True)
-            body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-            body.setStyleSheet("color:#b9ad97;font-size:11px;"
-                               "font-family:Consolas,'Courier New',monospace;")
+            body = self._bar_label()
             g3v.addWidget(body, 1, col)
             self.ins_lists[key] = body
-        v.addWidget(g3)
 
-        # 分布 + 共现
+        # 分布 + 共现（v1.40.9：高频榜 g3 与分布 g4 并排成一行，见下方 low 行）
         g4 = QGroupBox("分布")
         g4v = QGridLayout(g4)
         g4v.setHorizontalSpacing(18)
@@ -2370,14 +3787,18 @@ class SettingsDialog(QDialog):
             lb = QLabel(key)
             lb.setStyleSheet("color:#d4af37;font-size:12px;font-weight:bold;")
             g4v.addWidget(lb, 0, col)
-            body = QLabel("—")
-            body.setWordWrap(True)
-            body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-            body.setStyleSheet("color:#b9ad97;font-size:11px;"
-                               "font-family:Consolas,'Courier New',monospace;")
+            body = self._bar_label()
             g4v.addWidget(body, 1, col)
             self.ins_dist[key] = body
-        v.addWidget(g4)
+
+        # v1.40.9（反馈「画像概览不用下滚轴」）：高频榜 + 分布 并排成一行，
+        # 原来单列各 ~310 高、上下堆叠占 ~632，并排后只占一行 ~310，
+        # 直接省掉一整块竖向高度，配合雷达收窄让全页能塞进一屏、不出现下滚轴。
+        low = QHBoxLayout()
+        low.setSpacing(12)
+        low.addWidget(g3)
+        low.addWidget(g4)
+        v.addLayout(low)
 
         g5 = QGroupBox("标签共现（老是一起出现的两个标签）")
         g5v = QVBoxLayout(g5)
@@ -2464,9 +3885,11 @@ class SettingsDialog(QDialog):
             f"累计时长：<b>{insight_mod.human_hours(ov['total_hours'])}</b><br>"
             f"文件总体积：<b>{insight_mod.human_size(ov['total_size'])}</b>")
         for key, body in self.ins_lists.items():
-            body.setText(self._bar_lines(data.get(key) or [], show_bar=True))
+            body.setText(self._bar_lines(data.get(key) or [], body,
+                                          show_bar=True, accent=self.s.accent()))
         for key, body in self.ins_dist.items():
-            body.setText(self._bar_lines((data.get("dist") or {}).get(key) or []))
+            body.setText(self._bar_lines((data.get("dist") or {}).get(key) or [],
+                                          body, accent=self.s.accent()))
         # cooc 是 [( (tagA, tagB), 次数 )]，键为元组，不是三元组
         cooc = data.get("cooc") or []
         parts = []
@@ -2475,21 +3898,123 @@ class SettingsDialog(QDialog):
             if isinstance(pair, (tuple, list)) and len(pair) >= 2:
                 parts.append(f"「{pair[0]}」+「{pair[1]}」 {int(cnt):,} 部")
         self.ins_cooc.setText("　".join(parts) or "—")
+        # v1.40.8：分析完成后「高频榜 / 分布 / 共现」由「—」涨成真内容，整页高
+        # 大幅增加（792 → 1200+）。画布最小高必须跟着重算，否则底部「标签共现」
+        # 被裁掉（用户截图 2）。延一轮事件循环再量，等布局吃进新文本。
+        self._refresh_frozen_height_soon(self._pg_insight)
         applog.log(f"[画像概览] {ov['scope']}：{ov['media']} 部作品分析完成")
 
+    def _refresh_frozen_height_soon(self, scroll_or_page):
+        """延一轮事件循环后重算画布最小高（v1.40.8）。
+
+        v1.40.8 起就是 `_show_refresh_frozen()` 的别名 —— 两者语义完全一致
+        （传滚动区或页面都认、都延一轮、都走 `_refresh_frozen_height`）。
+        保留这个名字是因为「分析完成后重算」这个调用点的语义更具体。
+        """
+        self._show_refresh_frozen(scroll_or_page)
+
     @staticmethod
-    def _bar_lines(items, show_bar=True, limit=16):
-        """把 [(名称, 计数)] 画成「文本 + █ 条」的简易条形图（不引图表库）。"""
-        items = list(items)[:limit]
+    def _bar_label():
+        """画像概览里「高频榜 / 分布」的等宽条形文本标签。
+
+        v1.39.1（反馈 4）：**必须 `setWordWrap(False)` + 横向 `Ignored` 尺寸策略**。
+        旧版是 `wordWrap=True`，而条形图那一行是「标签 + 右对齐计数 + █ 条」拼出来
+        的**长文本**，列宽（约 150px ≈ 22 个等宽格）根本放不下 → Qt 把它折行，
+        结果计数与条形被甩到下一行、和下一条目的文字糊成一片（用户截图里
+        「系列 / 片商 / 导演」列最明显）。改成不换行后：一行就是一行，超宽部分
+        由 `_bar_lines()` 按像素预算先裁掉（名字截断加 …），永远不会折行。
+        横向 `Ignored` 是配套的 —— 不换行的 QLabel 其 `minimumSizeHint()` 就是
+        整段文本宽度，直接用会把网格列顶宽、把整页横向撑爆（Qt 老坑）。
+
+        v1.40.10（反馈 3 · 美化）：改用 **RichText**（`setTextFormat(RichText)`），
+        让名字 / 计数 / 条形三段各上不同颜色 —— 条形用当前**高亮色**（accent），
+        名字用 tan、计数用浅金，整列从「一片灰字」变成「带强调色的条形图」，
+        与全站风格统一。`setWordWrap(False)` 保留：长行不折行、超宽由
+        `_bar_lines()` 裁掉，多行之间靠 `<br>` 换行（RichText 下 `<br>` 仍生效）。
+        """
+        lb = QLabel("—")
+        lb.setWordWrap(False)
+        lb.setTextFormat(Qt.RichText)
+        lb.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        lb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        lb.setStyleSheet("color:#b9ad97;font-size:12px;"
+                         "font-family:Consolas,'Courier New',monospace;")
+        return lb
+
+    def _bar_lines(self, items, body, show_bar=True, limit=16, accent="#C63975"):
+        """把 [(名称, 计数)] 画成「文本 + █ 条」的简易条形图（不引图表库）。
+
+        v1.39.1（反馈 4）：**按目标标签的实际像素宽度裁剪**，不再按字符数。
+        根因：旧写法 `str(name)[:18].ljust(18)` 是按**字符数**对齐，可这字体是
+        等宽 + CJK 回退 —— 一个汉字占 **2 个**等宽格，18 个汉字实际要 36 格，
+        远超 18 格预算；再加上 `{:>7,}` 计数与 14 格条形，整行轻易超出列宽一倍
+        以上，QLabel 一换行，计数和条形就与下一条目重叠（用户截图实锤）。
+        现在按 `QFontMetrics.horizontalAdvance` 量**真实像素**，逐字裁到预算内，
+        并用空格把计数列对齐；每个条目严格一行。
+
+        v1.40.10（反馈 3 · 美化）：输出改为 **HTML**（`name` / `count` / `bar` 三段
+        各包一层 `<span>`，条形段用传入的 `accent` 高亮色）。等宽对齐靠把 ASCII
+        空格替换成 `&nbsp;`（Consolas 下 `&nbsp;` 与空格同宽，像素对齐不破）；
+        名字里的 `& < >` 先转义避免打乱 HTML。调用方传 `accent=self.s.accent()`
+        让条形跟随用户当前选的高亮色，切色后立即同步。
+        """
+        items = [(str(n), int(c)) for n, c in list(items)[:limit] if c is not None]
         if not items:
             return "—"
         top = max(c for _n, c in items) or 1
+        fm = body.fontMetrics()
+        adv = fm.horizontalAdvance
+
+        # ---- 各段预算（像素）----
+        col_w = body.width()
+        if col_w < 60:                       # 还没布局（首帧）→ 按组框宽度估
+            col_w = max(120, (body.parentWidget().width() or 700) // 5)
+        cnt_txt = [f"{c:,}" for _n, c in items]
+        cnt_px = max(adv(t) for t in cnt_txt) + 10      # 计数右对齐 + 左右留白
+        blk = max(1, adv("█"))
+        free = max(48, col_w - cnt_px - 8)               # 标签 + 条形 共用
+        bar_cells = 0
+        bar_px = 0
+        if show_bar:
+            bar_cells = max(4, min(10, int(free * 0.45) // blk))
+            bar_px = adv("  ") + blk * bar_cells
+        name_px = max(24, free - bar_px)
+
+        def clip(s, budget):
+            if adv(s) <= budget:
+                return s
+            ell = adv("…")
+            out = ""
+            for ch in s:
+                if adv(out + ch) > budget - ell:
+                    break
+                out += ch
+            return (out + "…") if out else "…"
+
+        def htm(s):
+            """转义 HTML 特殊字符，并把空格换成 &nbsp; 保等宽对齐。"""
+            return (s.replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;").replace(" ", "&nbsp;"))
+
+        sp = max(1, adv(" "))
         lines = []
-        for name, c in items:
-            label = str(name)[:18].ljust(18)
-            bar = ("  " + "█" * max(1, int(round(c / top * 12)))) if show_bar else ""
-            lines.append(f"{label}{c:>7,}{bar}")
-        return "\n".join(lines)
+        for (name, c), ctext in zip(items, cnt_txt):
+            lab = clip(name, name_px)
+            lab += " " * int(max(0, name_px - adv(lab)) // sp)   # 像素级补空格
+            # 计数列右对齐：**同样按像素补空格**。不能靠 `{:>N}` 的字符宽度 ——
+            # CJK 回退下一个汉字占 2 格，按字符数补空格必然对不齐（探针实测）。
+            gap = int(max(0, cnt_px - 10 - adv(ctext)) // sp)
+            bar = ("  " + "█" * max(1, int(round(c / top * bar_cells)))) if bar_cells else ""
+            # 三段上色：名字 tan / 计数浅金 / 条形 accent（&nbsp; 保对齐）
+            line = ('<span style="color:#b9ad97">%s</span>'
+                    '<span style="color:#cdbd9f">%s%s</span>'
+                    '<span style="color:%s">%s</span>') % (
+                        htm(lab), "&nbsp;" * gap, htm(ctext), accent, htm(bar))
+            lines.append(line)
+        # 悬停给完整名字（正文是裁过的，tooltip 里看全名）
+        full = "\n".join(f"{n}  {c:,}" for n, c in items)
+        body.setToolTip(full)
+        return "<br>".join(lines)
 
     # ---------- 智能推荐（v1.24.0 反馈 8） ----------
     def _build_smart(self):
@@ -3532,9 +5057,7 @@ class SettingsDialog(QDialog):
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
         self._log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self._log_view.setStyleSheet(
-            "font-family: Consolas, 'Courier New', Menlo, monospace; "
-            "font-size:11px; background:rgba(0,0,0,0.25); color:#d9cfbf;")
+        self._log_view.setStyleSheet(LOG_BOX_STYLE)
         g3v.addWidget(self._log_view, 1)
         self._log_path_lbl2 = QLabel("日志文件：" + applog.log_path())
         self._log_path_lbl2.setWordWrap(True)

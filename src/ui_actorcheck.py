@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QModelIndex
 from PySide6.QtGui import QColor, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QComboBox, QRadioButton, QGroupBox, QTreeWidget,
@@ -150,6 +150,9 @@ class ActorCheckPage(QWidget):
         v.setContentsMargins(14, 12, 14, 12)
         v.setSpacing(0)
         split = QSplitter(Qt.Vertical)
+        # v1.40.10（反馈 6）：给可拖动的「高度条」一个固定 objectName，
+        # 让 style.qss 能**只**给它上强调色 + 上下 2px 空隙，不影响主页等其他 splitter。
+        split.setObjectName("ActorSplitV")
         split.setHandleWidth(8)
         split.addWidget(self._build_detect())
         split.addWidget(self._build_editor())
@@ -266,17 +269,35 @@ class ActorCheckPage(QWidget):
         v.addWidget(g)
 
         split = QSplitter(Qt.Horizontal)
+        split.setObjectName("ActorSplitH")
         split.setHandleWidth(6)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["候选", "人数", "匹配度", "判定依据"])
+        # v1.38.0（需求 2）：最左加一列「选择」复选框，支持勾选多簇批量确认关联
+        self.tree.setHeaderLabels(["选择", "候选", "人数", "匹配度", "判定依据"])
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(False)     # 同「重复检测」：QSS 未定义交替底色
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.tree.setColumnWidth(0, 196)
-        self.tree.setColumnWidth(1, 44)
-        self.tree.setColumnWidth(2, 52)
+        # v1.39.0（需求 2）：ExtendedSelection —— Shift 区间多选 / Ctrl 逐点多选，
+        # 选中与勾选并集参与批量合并（用户反馈「不能按住 shift 或 ctrl 进行多选」）
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # v1.39.0（需求 2）：列 0 必须装得下 17px 复选框。子行缩进后文本区从视口
+        # x=40 起，复选框绝对定位于 x=43..60；列宽 46 时右 14px 被列边界裁掉，
+        # 只剩 3px 竖条（用户看到「选择列空空如也」）。实测列宽 62 → 完整可见。
+        #
+        # v1.39.5（反馈 3）：62 → 76（不再 82）。
+        # 62 只保证「画得出来」，indicator 右缘 60 紧贴文字起点 61 → 真机糊在一起；
+        # 但一次加太多（82）会把总宽顶出去、把「人数」「匹配度」列挤窄（截图里
+        # 「2 人」被裁成「2 …」）。76 是「右缘 60 + 16px 呼吸」的最小够用值。
+        self.tree.setColumnWidth(0, 76)
+        self.tree.setColumnWidth(1, 186)
+        # v1.39.5：44/52 在真机上装不下「2 人」与「94 铁证」（内容 + QSS padding 溢出，
+        # 表现为「2 …」「94 铁」）。按 sizeHintForColumn 实测重设。
+        self.tree.setColumnWidth(2, 62)
+        self.tree.setColumnWidth(3, 78)
         self.tree.itemSelectionChanged.connect(self._on_select)
+        # v1.38.0：勾选状态变化 → 刷新批量按钮计数（只关心复选框那一列）
+        self.tree.itemChanged.connect(self._on_check_changed)
         split.addWidget(self.tree)
 
         self.detail_scroll = QScrollArea()
@@ -296,6 +317,36 @@ class ActorCheckPage(QWidget):
         split.setStretchFactor(1, 3)
         split.setSizes([420, 500])
         v.addWidget(split, 1)
+
+        # v1.38.0（需求 2）：批量确认关联工具栏 —— 勾选多簇后一键合并
+        batch = QWidget()
+        bhl = QHBoxLayout(batch)
+        bhl.setContentsMargins(0, 6, 0, 0)
+        bhl.setSpacing(8)
+        self.sel_all_btn = QPushButton("全选建议合并")
+        self.sel_all_btn.setObjectName("Ghost")
+        self.sel_all_btn.setCursor(Qt.PointingHandCursor)
+        self.sel_all_btn.setToolTip("勾选左侧「建议合并」下的全部候选（存疑对不勾选）")
+        self.sel_all_btn.clicked.connect(self._check_all_clusters)
+        bhl.addWidget(self.sel_all_btn)
+        self.sel_none_btn = QPushButton("全不选")
+        self.sel_none_btn.setObjectName("Ghost")
+        self.sel_none_btn.setCursor(Qt.PointingHandCursor)
+        self.sel_none_btn.clicked.connect(self._uncheck_all)
+        bhl.addWidget(self.sel_none_btn)
+        self.batch_merge_btn = QPushButton("批量确认关联（合并 0 簇）")
+        self.batch_merge_btn.setObjectName("Primary")
+        self.batch_merge_btn.setCursor(Qt.PointingHandCursor)
+        self.batch_merge_btn.setEnabled(False)
+        self.batch_merge_btn.setToolTip(
+            "把左侧勾选或选中（Shift / Ctrl 多选）的所有「建议合并」簇一次性合并（每簇用其默认保留艺名）")
+        self.batch_merge_btn.clicked.connect(self._merge_checked)
+        bhl.addWidget(self.batch_merge_btn)
+        bhl.addStretch(1)
+        self.batch_hint = QLabel("勾选或选中（Shift / Ctrl 多选）左侧的「建议合并」簇，可批量确认关联")
+        self.batch_hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        bhl.addWidget(self.batch_hint)
+        v.addWidget(batch)
         self._show_detail_placeholder("点「开始检测」，左侧会列出「建议合并」的簇和「存疑」的对。")
         return wrap
 
@@ -673,45 +724,57 @@ class ActorCheckPage(QWidget):
             root_m = QTreeWidgetItem(["建议合并（%d 簇，共可减少 %d 条演员记录）"
                                       % (len(self._clusters),
                                          self._res.get("merge_people", 0) if self._res else 0),
-                                      "", "", ""])
+                                      "", "", "", ""])
             root_s = QTreeWidgetItem(["存疑（%d 对，仅提示，请人工核对）"
-                                      % len(self._suspects), "", "", ""])
+                                      % len(self._suspects), "", "", "", ""])
             for r in (root_m, root_s):
                 f = r.font(0)
                 f.setBold(True)
                 r.setFont(0, f)
                 r.setForeground(0, QColor("#d4af37"))
                 self.tree.addTopLevelItem(r)
+                # v1.39.5（反馈 3）：两个根节点的标题很长（「建议合并（5 簇，共可减少
+                # 5 条演员记录）」约 200px），而它们只写在**列 0**（76px）→ 真机上被裁成
+                # 「建议...」「存疑...」（用户截图里的那两行）。让根节点**横跨所有列**，
+                # 标题就能完整展开，不再受列 0 的宽度限制。
+                # ⚠ 正确 API 是 QTreeView.setFirstColumnSpanned(row, parent, span)
+                #   —— PySide6 里直接用 QTreeWidget 会解析到 QTreeView 的三参签名，
+                #   传 (item, 0, True) 会 TypeError；row 必须是 int、parent 是 QModelIndex。
+                self.tree.setFirstColumnSpanned(
+                    self.tree.indexOfTopLevelItem(r), QModelIndex(), True)
 
             for i, c in enumerate(self._clusters[:self.MAX_ROWS]):
                 names = [m["name"] for m in c.get("members") or []]
                 label = " / ".join(names[:4]) + ("…" if len(names) > 4 else "")
-                it = QTreeWidgetItem([label, "%d 人" % len(c.get("ids") or []),
+                it = QTreeWidgetItem(["", label, "%d 人" % len(c.get("ids") or []),
                                       "%d %s" % (c["score"], c["tier"]),
                                       (c.get("reasons") or [""])[0]])
                 it.setData(0, self.ROLE_KIND, "cluster")
                 it.setData(0, self.ROLE_INDEX, i)
-                it.setToolTip(0, " / ".join(names))
-                it.setToolTip(3, "\n".join(c.get("reasons") or []))
-                it.setForeground(2, QColor(self._TIER_COLOR.get(c["tier"], "#c9bda7")))
+                # v1.38.0（需求 2）：勾选列（最左）支持批量确认关联
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(0, Qt.Unchecked)
+                it.setToolTip(1, " / ".join(names))
+                it.setToolTip(4, "\n".join(c.get("reasons") or []))
+                it.setForeground(3, QColor(self._TIER_COLOR.get(c["tier"], "#c9bda7")))
                 if not c.get("profile_consistent", True):
-                    it.setForeground(0, QColor("#e8b76a"))
-                    it.setToolTip(0, " / ".join(names) + "\n⚠ 簇内刮削资料有互相矛盾的地方")
+                    it.setForeground(1, QColor("#e8b76a"))
+                    it.setToolTip(1, " / ".join(names) + "\n⚠ 簇内刮削资料有互相矛盾的地方")
                 root_m.addChild(it)
 
             for i, s in enumerate(self._suspects[:self.MAX_ROWS]):
-                it = QTreeWidgetItem(["%s ↔ %s" % (s["a"]["name"], s["b"]["name"]),
+                it = QTreeWidgetItem(["", "%s ↔ %s" % (s["a"]["name"], s["b"]["name"]),
                                       "2 人", "%d %s" % (s["score"], s["tier"]),
                                       (s.get("reasons") or [""])[0]])
                 it.setData(0, self.ROLE_KIND, "suspect")
                 it.setData(0, self.ROLE_INDEX, i)
-                it.setToolTip(3, "\n".join(s.get("reasons") or []))
-                it.setForeground(2, QColor(self._TIER_COLOR.get("存疑", "#e8b76a")))
+                it.setToolTip(4, "\n".join(s.get("reasons") or []))
+                it.setForeground(3, QColor(self._TIER_COLOR.get("存疑", "#e8b76a")))
                 root_s.addChild(it)
             if not self._clusters:
-                root_m.addChild(QTreeWidgetItem(["（没有达到自动关联标准的候选）", "", "", ""]))
+                root_m.addChild(QTreeWidgetItem(["", "（没有达到自动关联标准的候选）", "", "", ""]))
             if not self._suspects:
-                root_s.addChild(QTreeWidgetItem(["（没有需要人工核对的存疑对）", "", "", ""]))
+                root_s.addChild(QTreeWidgetItem(["", "（没有需要人工核对的存疑对）", "", "", ""]))
             # ⚠ 展开必须在**子节点加完之后**再设：`QTreeWidgetItem.setExpanded(True)` 在
             # 项目还没进视图 / 还没有子节点时调用是空操作，等第一个子节点插进来 Qt 会把它
             # 重置回收起。写在前面的话，真机上跑完检测看到的是两个收起的根，
@@ -749,6 +812,8 @@ class ActorCheckPage(QWidget):
 
     def _on_select(self):
         kind, obj, idx = self._current()
+        # v1.39.0（需求 2）：选中集会随 Shift/Ctrl 多选变化，同步刷批量按钮计数
+        self._refresh_batch_btn()
         if obj is None:
             self._show_detail_placeholder("点「开始检测」，左侧会列出「建议合并」的簇和"
                                           "「存疑」的对。")
@@ -1015,11 +1080,12 @@ class ActorCheckPage(QWidget):
                 it = top.child(j)
                 if it.data(0, self.ROLE_KIND) == "cluster" and \
                         it.data(0, self.ROLE_INDEX) == idx:
-                    it.setText(2, state)
-                    it.setText(3, detail)
+                    # v1.38.0：加了选择列后列号整体右移一位（状态→3，详情→4）
+                    it.setText(3, state)
+                    it.setText(4, detail)
                     f = it.font(0)
                     f.setStrikeOut(True)
-                    for cc in range(4):
+                    for cc in range(5):
                         it.setFont(cc, f)
                     return
 
@@ -1027,6 +1093,126 @@ class ActorCheckPage(QWidget):
         self._mark_cell(idx, "已忽略")
         self.tree.setCurrentItem(None)
         self._show_detail_placeholder("已忽略这一簇（本次不再提示）。")
+
+    # ------------------------------------------------------------------ 批量合并
+    def is_busy(self):
+        """v1.39.0（需求 3）：检测是否正在跑 —— 工具窗左侧导航据此显示转圈。"""
+        w = getattr(self, "_worker", None)
+        return bool(w is not None and w.isRunning())
+
+    def _on_check_changed(self, item, column):
+        """勾选列（0）状态变化 → 刷新批量按钮计数；别的列变了忽略。"""
+        if column != 0:
+            return
+        self._refresh_batch_btn()
+
+    def _count_checked_clusters(self):
+        """勾选 ∪ 选中 的「建议合并」簇数（已合并/已忽略的不计）。"""
+        n = 0
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                it = top.child(j)
+                if it.data(0, self.ROLE_KIND) == "cluster" \
+                        and (it.checkState(0) == Qt.Checked or it.isSelected()) \
+                        and it.text(3) not in ("已合并", "已忽略"):
+                    n += 1
+        return n
+
+    def _refresh_batch_btn(self):
+        n = self._count_checked_clusters()
+        self.batch_merge_btn.setText("批量确认关联（合并 %d 簇）" % n)
+        self.batch_merge_btn.setEnabled(n > 0)
+
+    def _check_all_clusters(self):
+        """勾选全部「建议合并」簇（存疑对不可合并，不勾选）。"""
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                it = top.child(j)
+                if it.data(0, self.ROLE_KIND) == "cluster":
+                    it.setCheckState(0, Qt.Checked)
+        self._refresh_batch_btn()
+
+    def _uncheck_all(self):
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                it = top.child(j)
+                if it.flags() & Qt.ItemIsUserCheckable:
+                    it.setCheckState(0, Qt.Unchecked)
+                it.setSelected(False)   # v1.39.0：选中态也一并清掉
+        self._refresh_batch_btn()
+
+    def _merge_checked(self):
+        """把「勾选 ∪ 选中」的所有「建议合并」簇一次性合并（每簇用其默认保留艺名）。"""
+        picked = []
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                it = top.child(j)
+                if it.data(0, self.ROLE_KIND) == "cluster" \
+                        and (it.checkState(0) == Qt.Checked or it.isSelected()) \
+                        and it.text(3) not in ("已合并", "已忽略"):
+                    idx = int(it.data(0, self.ROLE_INDEX))
+                    if 0 <= idx < len(self._clusters):
+                        picked.append((idx, it))
+        if not picked:
+            QMessageBox.information(self, "提示",
+                                    "请先勾选或选中（Shift / Ctrl 多选）左侧要合并的「建议合并」簇。")
+            return
+
+        q = QMessageBox(self)
+        q.setWindowTitle("批量确认关联")
+        q.setIcon(QMessageBox.Question)
+        q.setText("要把勾选的 %d 个「建议合并」簇一次性合并吗？" % len(picked))
+        q.setInformativeText(
+            "· 每个簇都用其默认保留艺名（作品最多 / 有头像的那条）作为合并目标；\n"
+            "· 其余艺名的作品关联会搬到保留者名下（同一部片不重复计入）；\n"
+            "· 缺失的生日 / 罗马音 / 头像 / 简介会补齐（已有值不覆盖）；\n"
+            "· 被合并的名字会写进保留者的别名；\n"
+            "· 视频与 nfo 文件**不受影响**。\n\n此操作不可撤销。")
+        # 破坏性操作：默认按钮设成 No，避免手快回车
+        q.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        q.setDefaultButton(QMessageBox.No)
+        if q.exec() != QMessageBox.Yes:
+            return
+
+        total_moved = 0
+        errs = []
+        for idx, it in picked:
+            c = self._clusters[idx]
+            keep_id = int(c["keep_id"])
+            drops = [i for i in c["ids"] if i != keep_id]
+            if not drops:
+                continue
+            keep_name = next((m["name"] for m in c["members"] if m["id"] == keep_id), "")
+            names = [m["name"] for m in c["members"] if m["id"] in drops]
+            for pid in drops:
+                try:
+                    r = db.merge_people(keep_id, pid)
+                except Exception as e:
+                    applog.log(f"演员批量合并异常：{e}", "error")
+                    errs.append(str(e))
+                    continue
+                if r.get("ok"):
+                    total_moved += int(r.get("moved") or 0)
+                else:
+                    errs.append(r.get("err") or "未知错误")
+            self._people_cache = None          # 库里变了 → 手动编辑列表要重取
+            if errs:
+                applog.log("[演员检测] 批量合并失败：%s" % "；".join(errs), "error")
+            self._mark_cell(idx, "已合并", "→ " + keep_name)
+            it.setCheckState(0, Qt.Unchecked)  # 合并完取消勾选，免得重复点
+            it.setSelected(False)             # v1.39.0：选中态也清掉
+            applog.log("[演员检测] 批量合并到「%s」：%s（搬移作品关联 %d 条）"
+                       % (keep_name, "、".join(names), total_moved))
+        self._refresh_batch_btn()
+        self.tree.setCurrentItem(None)
+        self._show_detail_placeholder(
+            "已批量合并 %d 个簇（搬移作品关联 %d 条）。"
+            % (len(picked), total_moved)
+            + ("\n部分失败：%s" % "；".join(errs) if errs else ""))
 
     # ------------------------------------------------------------------ 手动编辑
     def _search_people(self):
