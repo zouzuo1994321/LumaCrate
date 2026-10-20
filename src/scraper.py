@@ -40,6 +40,15 @@ try:                                    # 可选依赖：装了才能走 Chrome 
 except Exception:                       # 未安装 / 打包未含 → 纯标准库模式
     _cffi_requests = None
 
+# v1.41.0（方案B）：可选依赖「浏览器常驻抓取会话」。缺失时浏览器兜底整段不可用，
+# 无头路径行为与历史版本完全一致（不影响打包与运行）。
+try:
+    from browser_session import SESSION as _BROWSER_SESSION
+except Exception:                       # pragma: no cover
+    _BROWSER_SESSION = None
+
+import applog                            # 本仓统一日志（src/applog.py）
+
 _CF_403_COUNT = {}      # host -> 连续 403 次数
 _CF_403_LIMIT = 3       # 连续这么多次 403 就降级到 curl_cffi
 _JAR = http.cookiejar.CookieJar()       # 全局 cookie 罐（Cloudflare 认 cookie 不认头）
@@ -248,10 +257,12 @@ def _unwrap_reason(e: BaseException) -> BaseException:
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
-SOURCE_NAMES = {"minnano": "www.minnano-av.com", "imdb": "IMDB"}
+SOURCE_NAMES = {"minnano": "www.minnano-av.com", "imdb": "IMDB",
+                "avbase": "avbase.net"}
 
 MINNANO_BASE = "https://www.minnano-av.com/"
 IMDB_BASE = "https://www.imdb.com/"
+AVBASE_BASE = "https://avbase.net/"
 
 
 class ScrapeError(Exception):
@@ -438,7 +449,31 @@ def _warmup(base: str, timeout: int, proxy: str):
 
 def http_get(url: str, timeout: int = 15, proxy: str = "", referer: str = "",
              verify_ssl: bool = True, _escalated: bool = False) -> str:
-    """取回页面文本。自动处理 gzip/deflate 与日文编码。
+    """公开入口：先走无头路径 `_http_get_core`；若被 TLS/WAF 拦下，且「浏览器常驻抓取会话」
+    （方案B，v1.41.0）已对该 host 就绪，则回退到 WebView2 会话取 HTML —— 复用浏览器的 TLS
+    指纹与 cookie 罐，跨过本机 Python/curl 进程在握手层被掐的拦截。
+
+    默认 `config.scraper["browser_scrape"]` 关闭时 `_BROWSER_SESSION` 不参与，行为完全等同
+    于历史版本（无头路径失败即失败，不会尝试浏览器抓取）。
+    """
+    try:
+        return _http_get_core(url, timeout, proxy, referer, verify_ssl, _escalated)
+    except ScrapeError as e:
+        if _BROWSER_SESSION is not None and _BROWSER_SESSION.is_enabled():
+            host = urllib.parse.urlparse(url).netloc
+            if _BROWSER_SESSION.alive(host):
+                try:
+                    applog.log(f"[刮削] {host} 无头请求失败，回退浏览器会话抓取：{e}")
+                    return _BROWSER_SESSION.get_html(url, referer, timeout)
+                except Exception as be:
+                    applog.log(f"[刮削] 浏览器会话抓取也失败：{be}")
+                    raise ScrapeError(f"{e}；浏览器会话抓取亦失败：{be}")
+        raise
+
+
+def _http_get_core(url: str, timeout: int = 15, proxy: str = "", referer: str = "",
+                  verify_ssl: bool = True, _escalated: bool = False) -> str:
+    """取回页面文本（无头路径：urllib / curl_cffi）。详见公开包装 `http_get`。
 
     v1.21.1（反馈 1）：未显式给代理时自动套用系统代理；请求头补全浏览器字段，
     绕开把「缺头请求」判为爬虫的 WAF（原症状：浏览器能开、应用测连 HTTP 500）。
@@ -502,19 +537,19 @@ def http_get(url: str, timeout: int = 15, proxy: str = "", referer: str = "",
             if "UNEXPECTED_EOF_WHILE_READING" in str(rsn) or "EOF occurred" in str(rsn):
                 _CF_403_COUNT[host] = _CF_403_COUNT.get(host, 0) + 1
                 if not _escalated and _cffi_requests is not None:
-                    return http_get(url, timeout, proxy, referer,
+                    return _http_get_core(url, timeout, proxy, referer,
                                     verify_ssl, _escalated=True)
                 raise ScrapeError(
                     "TLS 被对端断开（%s）：站点在按 TLS 指纹拦截，"
                     "需改用浏览器指纹访问" % type(rsn).__name__)
             if verify_ssl:
                 # 其余 SSL 异常（证书/协议问题）→ 降级为不校验证书重试一次
-                return http_get(url, timeout, proxy, referer, verify_ssl=False)
+                return _http_get_core(url, timeout, proxy, referer, verify_ssl=False)
             raise ScrapeError(f"SSL 错误：{rsn}")
         raise ScrapeError(f"{type(rsn).__name__}: {rsn}")
     except ssl.SSLError as e:
         if verify_ssl:
-            return http_get(url, timeout, proxy, referer, verify_ssl=False)
+            return _http_get_core(url, timeout, proxy, referer, verify_ssl=False)
         raise ScrapeError(f"SSL 错误：{e}")
     except Exception as e:
         raise ScrapeError(f"{type(e).__name__}: {e}")
@@ -541,7 +576,7 @@ def http_get(url: str, timeout: int = 15, proxy: str = "", referer: str = "",
     if is_waf_challenge(text):
         _CF_403_COUNT[host] = _CF_403_COUNT.get(host, 0) + 1
         if not _escalated and _cffi_requests is not None:
-            return http_get(url, timeout, proxy, referer, verify_ssl,
+            return _http_get_core(url, timeout, proxy, referer, verify_ssl,
                             _escalated=True)
         raise ScrapeError("命中反爬挑战页（WAF），需改用浏览器指纹访问")
     return text
@@ -916,9 +951,101 @@ def imdb_fetch(url: str, timeout=15, proxy="") -> dict:
     return data
 
 
+# ---------------------------------------------------------------- avbase.net（v1.42.0）
+def avbase_search(name: str, timeout=15, proxy="") -> list:
+    """按姓名直达女优资料页 `/talents/<姓名>`，命中即返回 [{name, url}]。
+
+    avbase 的女优路由即以姓名为键（`/talents/糸井瑠花`），没有独立的模糊检索 API
+    （`/api/public/talents` 只接受 actor_id 做详情）。本地库存的正是规范日文名，
+    精确直达即可命中；姓名不存在时站点回 404（http_get 抛错，上层按未命中处理）。
+    """
+    q = urllib.parse.quote(name, encoding="utf-8")
+    url = f"{AVBASE_BASE}talents/{q}"
+    text = http_get(url, timeout, proxy, referer=AVBASE_BASE)
+    # 有效资料页判据：正文含「基本情報」面板（404 页 / 无关页都没有）
+    if "基本情報" not in text and "生年月日" not in text:
+        return []
+    disp = name
+    mt = re.search(r"<title[^>]*>(.*?)\s*\|", text, re.S | re.I)
+    if mt:
+        d = clean_name(mt.group(1))
+        if d:
+            disp = d
+    return [{"name": disp, "url": url}]
+
+
+def avbase_fetch(url: str, timeout=15, proxy="") -> dict:
+    """取女优详情：解析「基本情報」面板 —— 生日 / 出身地 / 身高 / 三围罩杯 / 趣味，
+    外加罗马音（姓名后的假名注音）与 DMM 头图。字段最全的一个源。"""
+    text = http_get(url, timeout, proxy, referer=AVBASE_BASE)
+    data = {"source": "avbase", "source_url": url, "name": "", "photo_url": "",
+            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {}, "status": ""}
+
+    mh = re.search(r"</head\s*>", text, re.I)
+    body = text[mh.end():] if mh else text
+    flat = squeeze(strip_tags(body))
+
+    mt = re.search(r"<title[^>]*>(.*?)\s*\|", text, re.S | re.I)
+    if mt:
+        nm = clean_name(mt.group(1))
+        if nm:
+            data["name"] = nm
+    # 罗马音：姓名后紧随的假名注音（ruby），如「糸井瑠花 いといるか」
+    if data["name"]:
+        mr = re.search(re.escape(data["name"]) + r"\s+([ぁ-んァ-ヶー]{2,24})", flat)
+        if mr:
+            data["romaji"] = mr.group(1)
+
+    mb = re.search(r"生年月日\s*(\d{4}-\d{2}-\d{2})", flat)
+    if mb:
+        data["birthday"] = mb.group(1)
+    mp = re.search(r"出身地\s*(\S+?)\s*(?:身長|サイズ|趣味|最終更新|$)", flat)
+    if mp:
+        data["meta"]["出身地"] = mp.group(1).strip()[:40]
+    mh2 = re.search(r"身長\s*(\d{2,3})\s*cm", flat)
+    if mh2:
+        data["meta"]["身高"] = mh2.group(1) + "cm"
+    ms = re.search(r"サイズ\s*B(\d{2,3})(?:\(([A-Z])\))?\s*W(\d{2,3})\s*H(\d{2,3})", flat)
+    if ms:
+        cup = f"({ms.group(2)})" if ms.group(2) else ""
+        data["meta"]["尺寸"] = f"B{ms.group(1)}{cup} W{ms.group(3)} H{ms.group(4)}"
+        if ms.group(2):
+            data["meta"]["罩杯"] = ms.group(2)
+    mhob = re.search(r"趣味\s*([^\s]+)\s*(?:最終更新|プロフィール|出演作品|$)", flat)
+    if mhob:
+        data["meta"]["趣味"] = mhob.group(1).strip()[:40]
+
+    # 头图：DMM 女优头像直链（actjpgs）优先，其次 og:image
+    photo = ""
+    mimg = re.search(r'(https?://pics\.dmm\.co\.jp/mono/actjpgs/[^"\'\s\\]+\.(?:jpg|jpeg|png|webp))',
+                     text)
+    if mimg:
+        photo = mimg.group(1)
+    if not photo:
+        photo = _meta(text, "og:image")
+    data["photo_url"] = _absolute(photo, AVBASE_BASE)
+
+    bits = []
+    if data["birthday"]:
+        bits.append("生日 " + data["birthday"])
+    if data["meta"].get("身高"):
+        bits.append("身高 " + data["meta"]["身高"])
+    if data["meta"].get("尺寸"):
+        bits.append(data["meta"]["尺寸"])
+    if data["meta"].get("出身地"):
+        bits.append("出身地 " + data["meta"]["出身地"])
+    if data["meta"].get("趣味"):
+        bits.append("趣味 " + data["meta"]["趣味"])
+    data["bio"] = " ｜ ".join(bits)[:300]
+    data["meta"].setdefault("简介来源", "avbase")
+    return data
+
+
 # ---------------------------------------------------------------- 统一入口
-SEARCHERS = {"minnano": minnano_search, "imdb": imdb_search}
-FETCHERS = {"minnano": minnano_fetch, "imdb": imdb_fetch}
+SEARCHERS = {"minnano": minnano_search, "imdb": imdb_search,
+             "avbase": avbase_search}
+FETCHERS = {"minnano": minnano_fetch, "imdb": imdb_fetch,
+            "avbase": avbase_fetch}
 
 
 def _network_hint(proxy: str) -> str:
@@ -1220,12 +1347,15 @@ def test_source(source: str, proxy="", timeout=12) -> dict:
         return r
 
     base = ("https://www.minnano-av.com/" if source == "minnano"
-            else "https://www.imdb.com/")
+            else "https://www.imdb.com/" if source == "imdb"
+            else "https://avbase.net/" if source == "avbase" else "")
     try:
         if source == "minnano":
             hits = minnano_search("新村あかり", timeout=timeout, proxy=proxy)
         elif source == "imdb":
             hits = imdb_search("Emma Stone", timeout=timeout, proxy=proxy)
+        elif source == "avbase":
+            hits = avbase_search("糸井瑠花", timeout=timeout, proxy=proxy)
         else:
             return done(False, f"未知数据源 {source}")
         if hits:

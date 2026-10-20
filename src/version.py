@@ -12,10 +12,10 @@
     第三位 = 小版本迭代(bug 修复 / 小改进)
 """
 
-# 外部版本号 v1.40.11
+# 外部版本号 v1.42.0
 PRODUCT_GENERATION = 1   # 产品代
-MAJOR_ITER = 40          # 大版本迭代 -> 第二位（v1.40.0：刮削页统计独立成模块 + 日志区加大 + 代理显式开关 + Cloudflare 验证助手）
-MINOR_ITER = 11          # 小版本迭代 -> 第三位（v1.40.11：执行日志框样式复刻「运行日志（实时）」—— 等宽字体 + 半透明深色底 + 浅色字 + 不自动换行；README 按 CertVault 模板全面升级；清理工程目录缓存与临时文件）
+MAJOR_ITER = 42          # 大版本迭代 -> 第二位（v1.42.0：新增女优刮削数据源 avbase.net——按日文名直达 /talents/<姓名>，取生日/身高/三围罩杯/出身地/罗马音/DMM 头图，字段最全，弥补 minnano 被 TLS 拦截时无源可用）
+MINOR_ITER = 2           # 小版本迭代 -> 第三位（v1.42.2：UI 反馈两则——演员检测页横向拖动条也换 5 点 grip + 刮削页数据源列表幻影空槽兜底/控件泄漏收尸）
 
 VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 
@@ -794,8 +794,45 @@ VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 #         + margin 2px 上下/左右留白，从隐形灰线变成悬空一段强调色，不影响主页等其他 splitter。
 #       注：打包当天取 261013；末四位按「每次打包自增」连续计数。
 # 0074：v1.40.11（执行日志框样式复刻运行日志 + README 模板化升级 + 工程目录清理）
-BUILD_DATE = "261013"
-BUILD_SEQ = "0074"
+# 0075：v1.40.12（详情页演员/导演头像交互：左键单击与双击均进入详情；右键弹「搜索并编辑信息」
+#       菜单，直达工具→演员检测页按 id 载入该人编辑表单；演员与导演均可编辑）
+# 0076：v1.40.13（详情页演员/导演头像右键交互改为「输入框 + 演员库/导演库实时联想」——
+#       输入即联想，单击选中或回车确认，直达工具→演员检测页按 id 载入该人编辑表单；演员与导演均可编辑）
+# 0077：v1.40.14（右键搜索点选结果改为「替换本片该位演员/导演」——新增 db.replace_media_person
+#       就地改写该作品的 media_people 关联并即时刷新演职人员信息；不再跳工具界面）
+# 0078：v1.40.15（右键搜索弹层（PersonSearchDialog）界面回修：去掉 Qt.Popup 仍带的系统标题栏
+#       （显式叠 FramelessWindowHint），标题「替换「XX」」融入面板正文首行，右侧新增明确的
+#       「放弃修改」按钮（= 取消/不改动本片，等同 Esc / 点面板外）；弹层与正文合为一块面板）
+# 0079：v1.41.0（方案B：内置浏览器常驻抓取会话——验证窗口过校验后不销毁，改当抓取后端，刮削请求
+#       在 TLS/WAF 失败时回退到 WebView2 会话用 fetch 取 HTML，绕开 minnano 的 TLS 被掐与 IMDB 的 AWS
+#       WAF 挑战页；新增 browser_session 模块 + cf_browser persist 模式 + scraper 兜底接线 +
+#       设置「用内置浏览器抓取」开关（默认关，opt-in）；离屏冒烟 10/10 通过）
+# 0080：v1.41.1（修复 v1.41.0 的 CloudflareDialog 无 self.s：_helper_cmd / _on_helper_done 两处
+#       误用 self.s 读「用内置浏览器抓取」开关，改走 cfg.get_settings()；站点验证内置浏览器恢复正常启动）
+# 0081：v1.41.2（修复方案B 重启后不生效：main.py 启动时把持久开关 browser_scrape 同步到
+#       SESSION.set_enabled —— 原先只在设置页/切开关时设，重启后 is_enabled 停默认 False，
+#       回退门常闭，「会话已托管」却从不被 consult；同步后实际刮削/复测都会走浏览器会话）
+# 0082：v1.41.3（修复方案B 回退门永不打开的**真因**：browser_session 新增 _norm_host 统一 host
+#       归一。urlparse 对无 scheme 的裸 netloc（www.minnano-av.com）返回 netloc=''，而 http_get
+#       把裸 netloc 传给 alive() 又被二次 urlparse 成空串 → _procs[''] 查不到 → alive() 常 False，
+#       浏览器 fetch 从未被调用。修后 alive(裸host)/alive(完整URL) 均为 True，回退门真正打开）
+# 0083：v1.42.0（新增女优刮削数据源 avbase.net：按日文名直达 /talents/<姓名>，解析「基本情報」
+#       面板取 生日/出身地/身高/三围罩杯/趣味 + 姓名后假名注音(romaji) + DMM 头图(actjpgs)，
+#       字段最全；config.load() 会自动把新源追加进老配置并默认启用。R18.dev/JavDB 经多轮探明
+#       无法作可靠女优源：R18 仅影片元数据无女优姓名检索/资料页；JavDB 姓名搜索只返回影片、
+#       无直达 profile 链接，两跳匹配在簡繁/多人主演下易派错资料，故均未纳入）
+# 0084：v1.42.1（UI 反馈两则：① 工具→演员刮削页数据源三行太高、组间与下方留白——SRC_ROW_H
+#       56→44、行内边距 4→2、组距 7→5，描述单行完整不裁；② 演员检测页结果树↔编辑区的竖向
+#       拖动条换成主流「5 点 grabber」——_GripSplitter/_GripHandle 自绘横向 5 圆点，
+#       颜色跟高亮色、悬停变亮，QSS 对应 handle 背景改透明、margin 归零）
+# 0085：v1.42.2（UI 反馈两则：① 演员检测页**树↔右侧详情之间的横向拖动条**（ActorSplitH）
+#       也要同款 5 点 grabber——_GripHandle 增加方向感知（横向把手时 5 点竖排一列）、
+#       handleWidth 6→14、QSS 背景透明 + margin 归零；② 演员刮削页数据源列表「IMDB 行
+#       下方凭空多一条 44px 空槽」——真机截图实证是列表里多出一个没有挂 widget 的幻影项
+#       （根因未复现），rebuild 后兜底清掉幻影项；另修 Qt 已知行为：clear() 不删
+#       setItemWidget 的旧行 widget（每次重建泄漏约 27 个孤儿控件），先收尸再重建）
+BUILD_DATE = "261018"
+BUILD_SEQ = "0085"
 BUILD = f"{BUILD_DATE}{BUILD_SEQ}"
 
 # 完整标识

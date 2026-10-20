@@ -763,6 +763,45 @@ def get_cast(media_id: int):
             conn.close()
 
 
+def replace_media_person(media_id: int, old_person_id: int, new_person_id: int) -> dict:
+    """把某媒体里 old 的关联**就地改指**到 new（详情页右键「改变影片内演员/导演信息」，v1.40.14）。
+
+    只改**这一部作品**的关联，不动 people 表、也不动该人的其它作品：
+      - old == new：无操作；
+      - new 已在该媒体里：删掉 old 那条（避免重复），保留 new 原有那条；
+      - new 不在：把 old 那条改指到 new（保留 char_role / person_order）。
+    返回 {"ok": bool, "action": "noop"/"merged"/"replaced"/"missing"}。
+    """
+    media_id = int(media_id)
+    old_person_id = int(old_person_id)
+    new_person_id = int(new_person_id)
+    if old_person_id == new_person_id:
+        return {"ok": True, "action": "noop"}
+    with _LOCK:
+        conn = get_conn()
+        try:
+            row = conn.execute(
+                "SELECT char_role, person_order FROM media_people WHERE media_id=? AND person_id=?",
+                (media_id, old_person_id)).fetchone()
+            if row is None:
+                return {"ok": False, "action": "missing", "msg": "原关联不存在（可能已被修改）"}
+            exists = conn.execute(
+                "SELECT 1 FROM media_people WHERE media_id=? AND person_id=?",
+                (media_id, new_person_id)).fetchone()
+            if exists:
+                conn.execute("DELETE FROM media_people WHERE media_id=? AND person_id=?",
+                             (media_id, old_person_id))
+                action = "merged"
+            else:
+                conn.execute("UPDATE media_people SET person_id=? WHERE media_id=? AND person_id=?",
+                             (new_person_id, media_id, old_person_id))
+                action = "replaced"
+            conn.commit()
+            return {"ok": True, "action": action}
+        finally:
+            conn.close()
+
+
 def get_person(pid: int):
     """取单个演员。附带 works / last_year —— 详情页的「状态」推断也需要它们
     （v1.11.0：原先只有 all_people_ordered 带这两个字段，详情页永远判成「未知」）。"""
@@ -1603,6 +1642,42 @@ def people_for_match(role_type: str = "Actor"):
             ).fetchall()]
         finally:
             conn.close()
+
+
+def search_people(keyword: str = "", role_types=("Actor", "Director"), limit: int = 50):
+    """右键搜索框：跨「演员库 + 导演库」按 name/alias/romaji 子串实时联想（v1.40.13）。
+
+    返回与 query_people 同口径的字典列表（含 id/name/role_type/alias/romaji/works 等），
+    按作品数降序。空关键字返回两库各前若干条作默认推荐（便于「点选」而非盲输）。
+    """
+    kw = (keyword or "").strip()
+    rts = list(role_types or ("Actor", "Director"))
+    rows = []
+    with _LOCK:
+        conn = get_conn()
+        try:
+            like = "%" + kw + "%"
+            for rt in rts:
+                if kw:
+                    sql = ("SELECT p.*, COUNT(mp.media_id) AS works, MAX(m.year) AS last_year "
+                           "FROM people p "
+                           "LEFT JOIN media_people mp ON mp.person_id=p.id "
+                           "LEFT JOIN media m ON m.id=mp.media_id "
+                           "WHERE p.role_type=? AND (p.name LIKE ? OR p.alias LIKE ? OR p.romaji LIKE ?) "
+                           "GROUP BY p.id ORDER BY works DESC, p.name LIMIT ?")
+                    params = (rt, like, like, like, int(limit))
+                else:
+                    sql = ("SELECT p.*, COUNT(mp.media_id) AS works, MAX(m.year) AS last_year "
+                           "FROM people p "
+                           "LEFT JOIN media_people mp ON mp.person_id=p.id "
+                           "LEFT JOIN media m ON m.id=mp.media_id "
+                           "WHERE p.role_type=? "
+                           "GROUP BY p.id ORDER BY works DESC, p.name LIMIT ?")
+                    params = (rt, max(1, int(limit) // max(1, len(rts))))
+                rows.extend(dict(r) for r in conn.execute(sql, params).fetchall())
+        finally:
+            conn.close()
+    return rows
 
 
 def merge_people(keep_id: int, drop_id: int) -> dict:

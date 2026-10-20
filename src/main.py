@@ -145,6 +145,17 @@ def main():
     except Exception as e:
         applog.log("读取界面语言失败，按基准语言启动：%s" % e)
 
+    # v1.41.2（方案B 修复）：把「用内置浏览器抓取」开关的**持久值**同步到浏览器会话单例。
+    # 以前 set_enabled 只在「设置页打开 / 切换开关」时调用，重启后 SESSION._enabled 停在
+    # 默认 False → scraper.http_get 的回退门 is_enabled()=False → 方案B 从不触发
+    # （症状：站点验证显示「会话已托管」，但实际刮削 / 复测仍走无头、照旧失败）。
+    try:
+        import browser_session as _bs
+        import config as _cfgs
+        _bs.SESSION.set_enabled(bool(_cfgs.get_settings().scraper.get("browser_scrape", False)))
+    except Exception as e:
+        applog.log("同步「用内置浏览器抓取」开关失败：%s" % e)
+
     db.init_db()
     if sp is not None:
         sp.setProgress(34, _i18n_tip("正在打开媒体索引…"))

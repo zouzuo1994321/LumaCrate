@@ -445,20 +445,19 @@ QMenu::item { padding: 7px 22px 7px 14px; border-radius: 7px; }
 QMenu::item:selected { background: rgba(__ACCENT_DARK__, 0.9); color: #ffffff; }
 QMenu::separator { height: 1px; background: rgba(255, 255, 255, 0.10); margin: 5px 8px; }
 QSplitter::handle { background: rgba(255, 255, 255, 0.06); width: 1px; }
-/* v1.40.10（反馈 6）：演员检测的**可拖动高度条**（竖向 splitter，handleWidth=8）
-   与树/详情分隔条（横向 splitter，handleWidth=6）上强调色 + 留白。
-   原规则把 handle 画成 1px 近乎隐形的灰线，与全站风格脱节、也不易抓。
-   这里用 objectName 限定只作用于演员检测，避免影响主页等其他 splitter：
-   - 竖向高度条：强调色填充 + margin-top/bottom 2px（上下各留 2px 空隙，不贴组框边）；
-   - 横向分隔条：强调色（更淡）+ margin-left/right 2px（左右各留 2px 空隙）。
-   `margin` 在 splitter handle 上会被 Qt 当作 grip 内缩，正好做出「悬空一段强调色」的观感。 */
+/* v1.42.1（反馈）：演员检测的**可拖动高度条**（竖向 splitter）换成主流
+   「5 点 grabber」——把手改由 ui_actorcheck._GripHandle 自绘（横向 5 圆点，
+   颜色跟高亮色、悬停变亮）。这里只把 handle 背景清空并去掉 margin
+   （margin 会按 QSS 盒模型把 sizeHint 撑大 4px），圆点即把手本体。
+   v1.42.2（反馈）：树↔详情之间的横向分隔条（ActorSplitH）也要同款 ——
+   圆点竖排一列、把手 14px，同样透明 + 去 margin。 */
 QSplitter#ActorSplitV::handle:vertical {
-    background: rgba(__ACCENT__, 0.30);
-    margin-top: 2px; margin-bottom: 2px;
+    background: transparent;
+    margin: 0px;
 }
 QSplitter#ActorSplitH::handle:horizontal {
-    background: rgba(__ACCENT__, 0.22);
-    margin-left: 2px; margin-right: 2px;
+    background: transparent;
+    margin: 0px;
 }
 
 /* ---------- 悬停缩略图预览卡 ---------- */

@@ -35,6 +35,7 @@ import duplicates as dup_mod
 import insight as insight_mod
 import recommend as rec_mod
 import scraper as scraper_mod
+import browser_session                  # v1.41.0（方案B）：常驻浏览器抓取会话
 import applog
 import backup as backup_mod
 import tagopt as tagopt_mod
@@ -73,7 +74,7 @@ def cf_browser_snapshot_path():
 # ↑/↓/测试 等窄按钮原来贴边（行高 = 按钮高 + 上下边距刚好相等），字体降级/DPI 缩放时
 # 底部会被裁掉一截。这里把每行高度提到「按钮高 + 16px 呼吸」。
 NAV_ROW_H = 52          # 导航菜单每行高度（含 ↑/↓ + 开关）
-SRC_ROW_H = 56          # 数据源每行高度（描述允许换到第 2 行 + ↑/↓/测试）
+SRC_ROW_H = 44          # 数据源每行高度（描述允许换到第 2 行 + ↑/↓/测试）
 # v1.14.0 反馈 6：媒体库列表每行也要留足高度 —— 原来用 row.sizeHint()，
 # 行内的「编辑/扫描/删除」按钮被压得底部缺一截（截图为证）。
 LIB_ROW_H = 54          # 媒体库每行高度（按此定 sizeHint，按钮完整可见）
@@ -809,6 +810,7 @@ class CloudflareDialog(GlassDialog):
         self.host_url = host_url
         self.on_done = on_done
         self._proc = None
+        self._session_owned = False     # v1.41.0（方案B）：存活子进程已托管给浏览器会话
         self._resfile = None
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -949,12 +951,15 @@ class CloudflareDialog(GlassDialog):
                                    "lmc_cf_result_%d.json" % int(time.time()))
         host = urllib.parse.urlparse(self.host_url).netloc
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cf_browser.py")
+        # v1.41.0（方案B）：若「用内置浏览器抓取」开关打开，给子进程传 persist=1，
+        # 让它在取完 cookie 后**不销毁窗口**、转常驻抓取会话（验证窗口 = 抓取后端）。
+        persist = "1" if cfg.get_settings().scraper.get("browser_scrape") else "0"
         if getattr(sys, "frozen", False):
             # 打包后 cf_browser.py 已进 exe；主程序 main.py 里识别 `--cf-browser`
             # 这个开关并把控制权交给 cf_browser.main()。
-            cmd = [sys.executable, "--cf-browser", self.host_url, resfile, host]
+            cmd = [sys.executable, "--cf-browser", self.host_url, resfile, host, persist]
         else:
-            cmd = [sys.executable, script, self.host_url, resfile, host]
+            cmd = [sys.executable, script, self.host_url, resfile, host, persist]
         return cmd, resfile
 
     def _webview_ready(self):
@@ -1170,9 +1175,8 @@ class CloudflareDialog(GlassDialog):
             data = {"ok": False, "error": f"结果文件解析失败：{e}"}
         self._on_helper_done(data)
 
-    def _on_helper_done(self, data):
-        # v1.40.3：内置浏览器已结束 → 「打开内置浏览器」按钮恢复可点态
-        self._restore_open_btn()
+    def _stop_builtin(self):
+        """终止内置浏览器子进程（若有）并清空引用。"""
         if self._proc is not None:
             try:
                 if self._proc.poll() is None:
@@ -1180,6 +1184,10 @@ class CloudflareDialog(GlassDialog):
             except Exception:
                 pass
             self._proc = None
+
+    def _on_helper_done(self, data):
+        # v1.40.3：内置浏览器已结束 → 「打开内置浏览器」按钮恢复可点态
+        self._restore_open_btn()
         try:
             if self._logf:
                 self._logf.close()
@@ -1187,11 +1195,13 @@ class CloudflareDialog(GlassDialog):
             pass
         if not data or not data.get("ok"):
             err = (data or {}).get("error") or "内置浏览器未取到 cookie"
+            self._stop_builtin()
             self.state.setText(f"❌ {err}　可再试一次，或点「高级 ▾」手动粘贴。")
             self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
             return
         pairs = scraper_mod.parse_cookie_header(data.get("cookie", ""))
         if not pairs:
+            self._stop_builtin()
             self.state.setText("❌ 取回的 cookie 解析为空，请重试。")
             self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
             return
@@ -1202,6 +1212,19 @@ class CloudflareDialog(GlassDialog):
         self._refresh_state()
         if self.on_done:
             self.on_done(n)
+        # v1.41.0（方案B）：浏览器抓取开关打开 → 把存活子进程**托管**给浏览器会话单例，
+        # 不终止（窗口保留为常驻抓取后端，cookie 罐与会话复用）；关闭开关或取 cookie 失败
+        # 时保持原行为：终止子进程。
+        if cfg.get_settings().scraper.get("browser_scrape") and self._proc is not None \
+                and self._proc.poll() is None:
+            browser_session.SESSION.attach(self._proc, self.host_url)
+            self._session_owned = True
+            self.state.setText(self.state.text()
+                               + "　✅ 浏览器会话已就绪（抓取中，请保持验证窗口开启）")
+            self.state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            applog.log(f"[站点验证] 浏览器会话已托管 {self.host_url}（pid={self._proc.pid}）")
+        else:
+            self._stop_builtin()
         self._verify_now()
 
     def _copy_snippet(self):
@@ -1293,6 +1316,11 @@ class CloudflareDialog(GlassDialog):
             self._timer.stop()
         except Exception:
             pass
+        # v1.41.0（方案B）：若子进程已托管给浏览器会话（常驻抓取后端），关对话框不要杀它；
+        # 会话由 browser_session 单例持有，用户关掉验证窗口时才会自然结束。
+        if self._session_owned:
+            self._proc = None
+            return
         try:
             if self._proc is not None and self._proc.poll() is None:
                 self._proc.terminate()
@@ -2536,6 +2564,37 @@ class SettingsDialog(QDialog):
         if key == "画像概览" and not self._insight_data:
             self._run_insight()
 
+    def open_person_editor(self, person):
+        """右键演员/导演头像跳转而来：切到「演员检测」页并直接按 id 载入该人编辑表单（v1.40.12）。
+
+        演员与导演都能编辑 —— `db.get_person` 按 id 取整行，不区分 role_type。
+        直接按 id 载入，避免「演员检测」手动编辑列表只收 Actor 导致导演搜不到。
+        """
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._show("演员检测")
+        pg = self._pg_actorcheck
+        if pg is None:
+            return
+        name = (person.get("name") or "").strip()
+        pid = person.get("id")
+        if name:
+            try:
+                pg.kw.setText(name)
+            except Exception:
+                pass
+        if pid:
+            try:
+                pg._load_person(int(pid))
+            except Exception as e:
+                applog.log(f"演员检测：右键跳转载入失败：{e}", "error")
+        # 列表刷新（演员可命中；导演不在 actor 列表里，列表为空但表单已按 id 载入，功能不受影响）
+        try:
+            pg._search_people()
+        except Exception:
+            pass
+
     # ---------- 通用行 ----------
     def _row(self, label_text, switch):
         w = QWidget()
@@ -2856,8 +2915,9 @@ class SettingsDialog(QDialog):
         v = QVBoxLayout(page)
         # v1.40.2（反馈 1/3）：整体收紧留白 —— 用户反馈「行与行间隔太大 / 底部留白太多」。
         # 上下 12→8、组间 10→7，四个组框更紧凑，也把高度省给日志区。
+        # v1.42.0（反馈：数据源行太高 + 下方留白）：组间 7→5，进一步收紧模块间空档。
         v.setContentsMargins(16, 8, 16, 8)
-        v.setSpacing(7)
+        v.setSpacing(5)
         sc = self.s.scraper
 
         # v1.40.0（反馈 1）：把「总开关」与「资料统计」从数据源组框里**整体抽出来**，
@@ -2986,6 +3046,20 @@ class SettingsDialog(QDialog):
         # 的子项，空间不足时永远是第一个被牺牲的）。钉法是「按当前宽算真实需求」，
         # 所以宽窗口下它钉出的就是 15（不会平白占地方），窄窗口下自动变 30。
         g0v.addWidget(srcbtns)
+        # v1.41.0（方案B）：用内置浏览器会话抓取（绕开 TLS 指纹 / 进程级拦截）
+        self.sc_browser_on = ToggleSwitch(checked=bool(sc.get("browser_scrape", False)))
+        self.sc_browser_on.toggled.connect(self._on_browser_scrape_toggled)
+        broww = QWidget()
+        browh = QHBoxLayout(broww)
+        browh.setContentsMargins(0, 0, 0, 0)
+        browh.setSpacing(8)
+        browh.addWidget(QLabel("用内置浏览器抓取"))
+        browh.addWidget(self.sc_browser_on)
+        browh.addWidget(QLabel("被拦的源改走 WebView2 常驻会话（需先对该源点一次「Cloudflare 验证」）"))
+        browh.addStretch(1)
+        g0v.addWidget(broww)
+        # 把开关状态同步给浏览器会话单例（后台刮削也算）
+        browser_session.SESSION.set_enabled(bool(sc.get("browser_scrape", False)))
         # v1.40.0（反馈 1）：**钉住组框最小高**，让「数据源列表」不再被压。
         #
         # 探针实测（E 盘 v1.40.0 / 真机 1085px 宽 / 离屏）：
@@ -3192,6 +3266,24 @@ class SettingsDialog(QDialog):
 
     def _rebuild_source_list(self):
         self.src_list.clear()
+        # v1.42.2：`_src_rows` 存的是**上一批**结果标签的引用；下面就要把旧行
+        # 控件收尸销毁，留着即悬空引用（若某数据源的测试 worker 迟到回报，
+        # `_on_test_done` 拿到已删的 C++ 标签会 RuntimeError）。每批重建都会
+        # 重新注册所有在列数据源，先清空。
+        self._src_rows.clear()
+        # v1.42.2（反馈 2）：Qt 已知行为 —— `clear()` **不会**删除
+        # `setItemWidget` 挂上去的旧行 widget，它们会以孤儿身份继续留在
+        # viewport 上（实测每次重建往 viewport 堆 3 个孤儿行控件、连带各自
+        # 6 个子控件；用户反复「上移/下移」数据源后会无限堆积，且重排后旧行
+        # widget 停在新行的旧位置上，有透出重影的风险）。这里先显式收尸再重建。
+        for _w in self.src_list.viewport().children():
+            if isinstance(_w, QWidget):
+                # 三连：hide + 脱父 + deleteLater。单用 deleteLater 要等事件
+                # 轮次冲 DeferredDelete 才生效（无事件循环时永远挂在 viewport
+                # 上）；直接脱父不 hide 会让**可见**行控件变成顶层小窗闪一下。
+                _w.hide()
+                _w.setParent(None)
+                _w.deleteLater()
         sc = self.s.scraper
         info = {x["key"]: x for x in cfg.SCRAPER_SOURCES}
         for key in sc.get("sources", []):
@@ -3200,7 +3292,8 @@ class SettingsDialog(QDialog):
             li.setData(Qt.UserRole, key)          # 便于按行反查数据源 key
             row = QWidget()
             h = QHBoxLayout(row)
-            h.setContentsMargins(6, 4, 6, 4)
+            # v1.42.0（反馈：数据源行太高）：上下留白 4→2，配合 SRC_ROW_H 44 收紧行高。
+            h.setContentsMargins(6, 2, 6, 2)
             lab = QLabel(f"{it['name']}　{it.get('desc', '')}")
             # v1.13.0（反馈 2）：描述原来是单行且被限宽裁掉尾巴（「…专属头」）。
             # 改为允许换行到第 2 行 + Ignored 水平策略（长描述只占剩余宽度，不挤右侧按钮）。
@@ -3229,6 +3322,22 @@ class SettingsDialog(QDialog):
             self.src_list.addItem(li)
             self.src_list.setItemWidget(li, row)
             self._src_rows[key] = res
+        # v1.42.2（反馈 2）：真机曾出现「IMDB 行下方凭空多一条 44px 空槽」——
+        # 截图实证：空档色=列表底（20,18,14）而非组框底（27,25,23）、列表
+        # 底边框紧贴其下、空档内零内容像素 → 列表里多了一个**没有挂 widget
+        # 的项**，把 count 算成 4、`setFixedHeight` 按 44×4+8=184 钉高。
+        # 根因未复现（离屏 / Windows 平台 + 同版本 Qt 6.11.2 + 3 源配置均稳定
+        # count=3，4 源场景也每行都带 widget），按「宁缺勿滥」原则做兜底：
+        # 正常循环里每一项都会 setItemWidget，清掉漏网的幻影项即可。
+        for _i in range(self.src_list.count() - 1, -1, -1):
+            _it = self.src_list.item(_i)
+            if self.src_list.itemWidget(_it) is None:
+                try:
+                    applog.log("演员刮削：清掉无 widget 的幻影数据源行"
+                               f"（idx={_i} key={_it.data(Qt.UserRole)!r}）", "warn")
+                except Exception:
+                    pass
+                self.src_list.takeItem(_i)
         n = self.src_list.count()
         self.src_list.setFixedHeight(max(64, SRC_ROW_H * n + 8))
 
@@ -3275,6 +3384,23 @@ class SettingsDialog(QDialog):
             ("使用 " + self.sc_proxy.text().strip())
             if checked and self.sc_proxy.text().strip()
             else ("使用系统代理" if checked else "忽略代理与系统代理设置")))
+
+    def _on_browser_scrape_toggled(self, checked):
+        """v1.41.0（方案B）：开关「用内置浏览器抓取」。
+
+        打开 → 把浏览器会话单例置为可用；关闭 → 回收所有已托管的浏览器会话
+        （避免遗留常驻 WebView2 窗口）。无论开关键，都要先对被拦的源点一次
+        「Cloudflare 验证」建立会话，抓取才会真正走浏览器。
+        """
+        on = bool(checked)
+        self.s.set_scraper(browser_scrape=on)
+        browser_session.SESSION.set_enabled(on)
+        if not on:
+            browser_session.SESSION.detach()      # 关开关即回收所有常驻会话
+        self._log("[浏览器抓取] 已%s —— %s" % (
+            "启用" if on else "关闭",
+            "被拦的源将改走 WebView2 常驻会话（需先对该源点一次「Cloudflare 验证」）"
+            if on else "恢复无头抓取，常驻浏览器会话已回收"))
 
     def _refresh_scraper_stats(self):
         try:

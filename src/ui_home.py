@@ -171,12 +171,13 @@ class HoverPreview(QFrame):
 
 class HomeListView(QWidget):
     def __init__(self, on_open_actor=None, on_open_media=None, on_hover_media=None,
-                 on_changed=None):
+                 on_changed=None, on_person_replaced=None):
         super().__init__()
         self.on_open_actor = on_open_actor
         self.on_open_media = on_open_media
         self.on_hover_media = on_hover_media     # 悬停/选中 → 通知主窗口换磨砂底衬
         self.on_changed = on_changed             # 详情页编辑（收藏/评分）→ 通知主窗口（刷统计/侧栏）
+        self.on_person_replaced = on_person_replaced   # v1.40.14：右键搜索点选 → 替换本片演员/导演
         self._detail_mid = None                  # 当前详情面板展示的作品 id（v1.21.1 反馈 4）
         self._media = []
         self._view = []
@@ -731,7 +732,8 @@ class HomeListView(QWidget):
         # v1.21.1 反馈 4：详情页改收藏/用户评分后，左侧表格对应行要**就地**刷新，
         # 不用整页重建（那样会丢选中/滚动位置），也不用手动点顶栏「刷新」。
         hv = HeroView(m, on_open_actor=self.on_open_actor, on_back=None,
-                      on_changed=self._detail_changed)
+                      on_changed=self._detail_changed,
+                      on_person_replaced=self.on_person_replaced)
         layout.addWidget(hv)
 
     def _detail_changed(self):

@@ -314,16 +314,19 @@ def appearance_alphas(appearance: dict):
 
 
 # ---------- 演员刮削 ----------
-# 数据源定义：minnano-av 为日本 AV 女优资料站；IMDB 覆盖普通影视演员
+# 数据源定义。minnano-av 为日本 AV 女优资料站；IMDB 覆盖普通影视演员；
+# v1.42.0 新增 avbase.net（AV 检索数据库，按日文名直达，字段最全：生日/身高/
+# 三围罩杯/出身地/罗马音/头图）—— 弥补 minnano 被 TLS 拦截时无源可用的窘境。
 SCRAPER_SOURCES = [
     {"key": "minnano", "name": "www.minnano-av.com", "desc": "日本 AV 女优资料站（日文名检索，含别名/生日/身高/专属头图）"},
     {"key": "imdb",    "name": "IMDB",               "desc": "国际影人库（英文名检索，含生日/出生地/简介/头图）"},
+    {"key": "avbase",  "name": "avbase.net",         "desc": "AV 检索数据库（日文名直达，含生日/身高/三围罩杯/出身地/罗马音/头图，字段最全）"},
 ]
 
 DEFAULT_SCRAPER = {
     "enabled": False,            # 总开关（设置页保存后生效）
-    "sources": ["minnano", "imdb"],          # 数据源优先级（自上而下依次尝试）
-    "sources_enabled": {"minnano": True, "imdb": True},
+    "sources": ["avbase", "minnano", "imdb"],   # 数据源优先级（自上而下依次尝试）
+    "sources_enabled": {"minnano": True, "imdb": True, "avbase": True},
     "fill_alias": True,          # 补齐别名/爱称
     "fill_birthday": True,       # 补齐生日
     "fill_bio": True,            # 补齐简介/尺寸/出身地等说明
@@ -341,6 +344,10 @@ DEFAULT_SCRAPER = {
     #       proxy_enabled=True        → 用 proxy（为空时回落系统代理）。
     "proxy_enabled": False,      # 是否启用代理（关闭 = 直连，忽略下面的 proxy）
     "proxy": "",                 # 代理，例 http://127.0.0.1:7890（minnano-av 常需代理）
+    # v1.41.0（方案B）：用内置浏览器会话抓取（绕开 TLS 指纹 / 进程级拦截）。
+    # 默认关闭 —— 关闭时刮削走原无头路径，与历史版本一致；打开后，对「站点验证」过的源，
+    # 实际抓取改走那个 WebView2 常驻会话（复用浏览器 TLS 栈与 cookie 罐）。
+    "browser_scrape": False,     # 用内置浏览器抓取（需先对被拦的源点一次「站点验证」）
     "photo_dir": "",             # 头像缓存目录，空 = exe 同级 cache/people
 }
 

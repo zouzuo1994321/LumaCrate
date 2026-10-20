@@ -3411,7 +3411,8 @@ class MainWindow(QMainWindow):
         self.set_backdrop(None)
         return HomeListView(on_open_actor=self._open_actor, on_open_media=self._open_media,
                             on_hover_media=self._backdrop_from_media,
-                            on_changed=self._refresh_stats)
+                            on_changed=self._refresh_stats,
+                            on_person_replaced=lambda old, new: self._after_person_replaced(old, new))
 
     def _backdrop_from_media(self, m):
         """鼠标选到哪部作品，磨砂底衬就用它的剧照。"""
@@ -4329,7 +4330,8 @@ class MainWindow(QMainWindow):
         m = media or {}
         self.set_backdrop(m.get("fanart") or m.get("poster"))
         self.go(lambda: HeroView(media, on_open_actor=self._open_actor,
-                                 on_back=self._back, on_changed=self._refresh_stats))
+                                 on_back=self._back, on_changed=self._refresh_stats,
+                                 on_person_replaced=lambda old, new: self._after_person_replaced(old, new)))
 
     def _play_media(self, media):
         """卡片右下角播放按钮：**不进详情页**，直接调本地播放器播放（v1.17.0，反馈 3）。"""
@@ -4358,6 +4360,19 @@ class MainWindow(QMainWindow):
         pid = person.get("id")
         if pid:
             self.go(lambda: self._view_actor_detail(pid))
+
+    def _after_person_replaced(self, old_person, new_person):
+        """详情页右键搜索点选 → 已把本片该位演员/导演替换为所选人（v1.40.14）。
+
+        真正的写库（db.replace_media_person）与「演职人员信息」就地刷新在
+        HeroView._apply_person_replace 里完成；这里只做状态栏提示。
+        """
+        old_name = (old_person or {}).get("name") or "原演员/导演"
+        new_name = (new_person or {}).get("name") or "所选人"
+        try:
+            self.statusBar().showMessage(f"已把本片「{old_name}」替换为「{new_name}」")
+        except Exception:
+            pass
 
     def _set_actor_status(self, pid, val):
         db.update_person(pid, only_missing=False, status=val)

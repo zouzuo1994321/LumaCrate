@@ -25,14 +25,15 @@ import os
 import re
 import shutil
 
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QModelIndex
-from PySide6.QtGui import QColor, QPixmap, QDesktopServices
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QModelIndex, QRectF
+from PySide6.QtGui import QColor, QPainter, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QComboBox, QRadioButton, QGroupBox, QTreeWidget,
                                QTreeWidgetItem, QProgressBar, QFileDialog, QMessageBox,
                                QSplitter, QAbstractItemView, QFormLayout, QLineEdit,
-                               QTextEdit, QSpinBox, QListWidget, QListWidgetItem,
-                               QScrollArea, QFrame, QApplication, QCheckBox)
+                              QTextEdit, QSpinBox, QListWidget, QListWidgetItem,
+                              QScrollArea, QFrame, QApplication, QCheckBox,
+                              QSplitterHandle)
 
 import actorcheck as ack
 import applog
@@ -113,6 +114,61 @@ class ActorCheckWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# 5 点 grip 把手（v1.42.1 反馈：演员检测页竖向拖动条换成主流 grabber 观感）
+# ---------------------------------------------------------------------------
+class _GripHandle(QSplitterHandle):
+    """自绘把手：5 个圆点一排（横向把手时竖排一列），悬停变亮、光标随方向。
+
+    颜色跟站点走（cf.accent_rgb(get_settings().accent())），用户换高亮色即时生效；
+    QSS 侧只需把对应 handle 背景设透明，圆点由这里画。"""
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self._hover = False
+        self.setCursor(Qt.SizeVerCursor if orientation == Qt.Vertical
+                       else Qt.SizeHorCursor)
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r, g, b = cf.accent_rgb(cf.get_settings().accent())
+        p.setBrush(QColor(r, g, b, 238 if self._hover else 140))
+        p.setPen(Qt.NoPen)
+        d, gap, n = 5, 4, 5
+        total = n * d + (n - 1) * gap
+        if self.orientation() == Qt.Vertical:
+            # 竖向把手（拖上下）：5 点横排，纵向居中
+            x0 = (self.width() - total) / 2.0
+            y0 = (self.height() - d) / 2.0
+            for i in range(n):
+                p.drawEllipse(QRectF(x0 + i * (d + gap), y0, d, d))
+        else:
+            # 横向把手（拖左右）：5 点竖排，横向居中
+            x0 = (self.width() - d) / 2.0
+            y0 = (self.height() - total) / 2.0
+            for i in range(n):
+                p.drawEllipse(QRectF(x0, y0 + i * (d + gap), d, d))
+        p.end()
+
+
+class _GripSplitter(QSplitter):
+    """把手换成 5 点 grip 的 splitter（演员检测页的竖向高度条 + 横向树/详情条）。"""
+
+    def createHandle(self):
+        return _GripHandle(self.orientation(), self)
+
+
+# ---------------------------------------------------------------------------
 # 页面
 # ---------------------------------------------------------------------------
 class ActorCheckPage(QWidget):
@@ -149,11 +205,12 @@ class ActorCheckPage(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(14, 12, 14, 12)
         v.setSpacing(0)
-        split = QSplitter(Qt.Vertical)
-        # v1.40.10（反馈 6）：给可拖动的「高度条」一个固定 objectName，
-        # 让 style.qss 能**只**给它上强调色 + 上下 2px 空隙，不影响主页等其他 splitter。
+        split = _GripSplitter(Qt.Vertical)
+        # v1.40.10（反馈 6）：固定 objectName 让 QSS 只作用于这条高度条；
+        # v1.42.1（反馈）：换成自绘 5 点 grabber 把手（见 _GripHandle），
+        # QSS 侧对应背景已改透明，圆点即把手本体。
         split.setObjectName("ActorSplitV")
-        split.setHandleWidth(8)
+        split.setHandleWidth(14)
         split.addWidget(self._build_detect())
         split.addWidget(self._build_editor())
         split.setStretchFactor(0, 3)
@@ -268,9 +325,10 @@ class ActorCheckPage(QWidget):
         gv.addWidget(self.bar)
         v.addWidget(g)
 
-        split = QSplitter(Qt.Horizontal)
+        split = _GripSplitter(Qt.Horizontal)
         split.setObjectName("ActorSplitH")
-        split.setHandleWidth(6)
+        # v1.42.2：同竖向条换 5 点 grip，把手加宽到 14（圆点竖排总高 41 需 ≥14 宽）
+        split.setHandleWidth(14)
         self.tree = QTreeWidget()
         # v1.38.0（需求 2）：最左加一列「选择」复选框，支持勾选多簇批量确认关联
         self.tree.setHeaderLabels(["选择", "候选", "人数", "匹配度", "判定依据"])

@@ -55,6 +55,19 @@ import traceback
 SNAPSHOT_NAME = "lmc_cf_snapshot.json"
 REQUEST_NAME = "lmc_cf_request.json"
 
+# 方案B（v1.41.0）：常驻抓取会话的文件协议
+BF_REQUEST = "lmc_bf_request.json"        # 抓取请求（父进程 browser_session → 子进程）
+BF_RESULT_PREFIX = "lmc_bf_result_"       # 抓取结果（子进程 → 父进程），后缀 <id>.json
+BF_TIMEOUT = 30
+
+# 抓取请求用的浏览器 UA（与 scraper.UA 保持一致即可，不必 import）
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
+# 方案B：常驻抓取会话开关与窗口引用（main() 从 argv 读 persist 标记）
+_PERSIST = False
+_STATE = {"win": None, "winref": None}
+
 
 def snapshot_path():
     """持久 cookie 快照的固定路径（父进程 `ui_settings.cf_browser_snapshot_path` 同源）。"""
@@ -153,6 +166,96 @@ def _to_header(pairs):
     return "; ".join(f"{k}={v}" for k, v in pairs.items())
 
 
+# ---------- 方案B：常驻抓取会话（persist 模式） ----------
+def _build_fetch_js(url: str, referer: str) -> str:
+    """构造在页面内执行 `fetch()` 的 JS。用 JSON 字面量安全嵌入 URL（避免 % 格式化坑）。
+
+    取回后 `JSON.stringify` 成字符串返回，父进程的 `browser_session` 再解析。
+    同源约束：当前页面必须是目标 host（验证时已导航到该 host），否则浏览器会因 CORS 拒掉。
+    """
+    ref = json.dumps(referer or "")
+    # 不拼格式化符，直接字符串拼接，URL 里的 % 不会被 Python % 操作符误读
+    return (
+        "(function(){return (async function(){"
+        "try{"
+        "var hd={'User-Agent':'" + UA + "'};"
+        "if(" + ref + "){hd['Referer']=" + ref + ";}"
+        "var r=await fetch(" + json.dumps(url) + ","
+        "{credentials:'include',redirect:'follow',headers:hd});"
+        "var t=await r.text();"
+        "return JSON.stringify({ok:true,status:r.status,html:t});"
+        "}catch(e){return JSON.stringify({ok:false,error:String(e)});}"
+        "})();})()"
+    )
+
+
+def _watch_fetch():
+    """后台线程：监听父进程写的抓取请求文件，用当前页面 fetch 后回写结果。
+
+    与既有 `_watch_request`（cookie dump）同构 —— 都用文件协议，零 IPC 依赖。
+    """
+    import time as _t
+    while True:
+        _t.sleep(0.3)
+        try:
+            if not os.path.exists(BF_REQUEST):
+                continue
+            try:
+                with open(BF_REQUEST, "r", encoding="utf-8") as f:
+                    req = json.load(f)
+                os.remove(BF_REQUEST)
+            except Exception:
+                continue
+            url = req.get("url") or ""
+            referer = req.get("referer") or ""
+            rid = req.get("id") or "x"
+            if not url:
+                continue
+            payload = {"ok": False, "error": "空 URL"}
+            try:
+                ret = _STATE["winref"].evaluate_js(_build_fetch_js(url, referer))
+                if isinstance(ret, str):
+                    try:
+                        payload = json.loads(ret)
+                    except Exception:
+                        payload = {"ok": False, "error": f"fetch 返回无法解析：{ret[:200]}"}
+                elif isinstance(ret, dict):
+                    payload = ret
+                else:
+                    payload = {"ok": False, "error": f"fetch 返回类型异常：{type(ret)}"}
+            except Exception as e:
+                payload = {"ok": False, "error": f"fetch 执行失败：{e}"}
+            # 原子写结果文件（父进程按 id 轮询）
+            res_path = os.path.join(tempfile.gettempdir(), BF_RESULT_PREFIX + rid + ".json")
+            try:
+                d = os.path.dirname(os.path.abspath(res_path)) or "."
+                fd, tmp = tempfile.mkstemp(prefix=".bfres_", dir=d)
+                os.close(fd)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                os.replace(tmp, res_path)
+            except Exception:
+                pass
+        except Exception:
+            continue
+
+
+def _enter_fetch_server():
+    """把当前 WebView2 窗口转为常驻抓取后端。
+
+    窗口不销毁（否则 webview.start() 会返回、子进程退出）；尽量把它挪到屏幕外、
+    失去焦点，免得挡用户，但保持渲染与会话（cookie 罐保留，父进程随后用同会话 fetch）。
+    """
+    try:
+        _STATE["winref"].evaluate_js(
+            "try{window.moveTo(-32000,-32000);window.blur();}catch(e){}")
+    except Exception:
+        pass
+    # 后台线程监听抓取请求（daemon，子进程退出即随亡）
+    threading.Thread(target=_watch_fetch, daemon=True).start()
+
+
+
 # ---------- 注入到页面的「读 Cookie」按钮 ----------
 _JS = r"""
 (function () {
@@ -208,19 +311,33 @@ def main():
     except Exception:
         pass
 
-    state = {"win": None, "winref": None}
+    global _PERSIST
+    _PERSIST = (len(sys.argv) > 4 and sys.argv[4] in ("1", "true", "persist"))
+    # _STATE 已在模块级初始化（方案B 常驻抓取会话复用同一个窗口引用）
 
     class Api:
         def done(self):
-            """页面按钮回调：读 cookie、写结果、关窗。"""
+            """页面按钮回调：读 cookie、写结果。
+    
+            v1.41.0（方案B）：若以 persist 模式启动（argv 第 5 位 = 1），取完 cookie **不销毁
+            窗口**，而是把当前 WebView2 会话转为常驻抓取后端（`_enter_fetch_server`），让父进程
+            的 `browser_session` 之后能用同一个浏览器会话去抓被 TLS/WAF 拦的页面。否则保持原行为
+            （销毁窗口、会话结束）。
+            """
             try:
                 self._capture()
             finally:
-                try:
-                    state["winref"].destroy()
-                except Exception:
-                    pass
-
+                if _PERSIST:
+                    try:
+                        _enter_fetch_server()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        _STATE["winref"].destroy()
+                    except Exception:
+                        pass
+    
         def _capture(self, close_if_empty=True):
             """读一次 cookie。
 
@@ -229,7 +346,7 @@ def main():
             """
             pairs = {}
             try:
-                pairs = _extract_pairs(state["winref"].get_cookies(), host_filter)
+                pairs = _extract_pairs(_STATE["winref"].get_cookies(), host_filter)
             except Exception:
                 pairs = {}
             if not pairs:
@@ -258,7 +375,7 @@ def main():
     def on_loaded():
         # 每次导航后都补一次按钮（挑战页会自动刷新）
         try:
-            state["winref"].evaluate_js(_JS)
+            _STATE["winref"].evaluate_js(_JS)
         except Exception:
             pass
 
@@ -298,8 +415,8 @@ def main():
             # focus=True（默认）：创建后立刻抢焦点、弹到最前 —— 保证用户第一眼就看得到。
             focus=True,
         )
-        state["win"] = win
-        state["winref"] = win
+        _STATE["win"] = win
+        _STATE["winref"] = win
         win.events.loaded += on_loaded
         # 清掉可能残留的旧请求文件，免得一启动就误触发
         try:

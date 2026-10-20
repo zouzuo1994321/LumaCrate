@@ -2,13 +2,14 @@
 """Emby 风格详情页：全宽 fanart 横幅 + 元数据 + 操作按钮 + 圆形演员行 + 文件信息。"""
 import os
 
-from PySide6.QtCore import Qt, QRectF, QRect, QPoint, QSize
+from PySide6.QtCore import Qt, QRectF, QRect, QPoint, QSize, QTimer
 from PySide6.QtGui import (QPixmap, QPainter, QColor, QLinearGradient, QFont,
                            QPainterPath, QAction)
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea,
     QFrame, QMenu, QMessageBox, QApplication, QDialog, QDoubleSpinBox,
-    QGridLayout, QLayout, QSizePolicy,
+    QGridLayout, QLayout, QSizePolicy, QLineEdit, QListWidget,
+    QListWidgetItem,
 )
 
 import database as db
@@ -262,10 +263,11 @@ class HeroBanner(QWidget):
 
 # ---------- 演员头像 ----------
 class CastAvatar(QFrame):
-    def __init__(self, person, on_click, size=96):
+    def __init__(self, person, on_click, on_context=None, size=96):
         super().__init__()
         self.person = person
         self.on_click = on_click
+        self.on_context = on_context
         self.setFixedWidth(size + 16)
         self.setCursor(Qt.PointingHandCursor)
         v = QVBoxLayout(self)
@@ -295,20 +297,185 @@ class CastAvatar(QFrame):
         role.setAlignment(Qt.AlignHCenter)
         role.setStyleSheet("font-size:11px;color:#9b8e7a;")
         v.addWidget(role)
+        # v1.40.12：让子控件（圆形头像/姓名/角色）上的右键也归到本框的 contextMenuEvent
+        # （否则 QLabel 默认 DefaultContextMenu 会把事件吃在自己身上，父框收不到）。
+        for _c in self.findChildren(QWidget):
+            _c.setContextMenuPolicy(Qt.NoContextMenu)
+        self.setContextMenuPolicy(Qt.DefaultContextMenu)
 
     def mousePressEvent(self, e):
-        if self.on_click:
+        # 左键单击 → 进入详情（与双击同一动作）
+        if e.button() == Qt.LeftButton and self.on_click:
             self.on_click(self.person)
+
+    def mouseDoubleClickEvent(self, e):
+        # 双击也进入详情（用户需求：左键单击与双击都进入演员/导演）
+        if e.button() == Qt.LeftButton and self.on_click:
+            self.on_click(self.person)
+
+    def contextMenuEvent(self, e):
+        # 右键 → 弹「输入框 + 演员/导演库实时联想」搜索框；点选/回车即把**本片该位**替换为该人
+        # （v1.40.14：不再跳工具界面，而是改变影片内演员/导演信息）。
+        if not self.on_context:
+            e.ignore()
+            return
+        _name = (self.person or {}).get("name")
+        dlg = PersonSearchDialog(initial=_name, old_name=_name,
+                                  on_pick=lambda p: self.on_context(self.person, p))
+        dlg.move_to(e.globalPos())
+        dlg.exec()
+        e.accept()
+
+
+# ---------- 右键搜索框（输入框 + 演员/导演库联想，v1.40.13/14） ----------
+class PersonSearchDialog(QDialog):
+    """右键演员/导演头像弹出：输入框 + 跨「演员库 / 导演库」实时联想。
+
+    外观（v1.40.15）：面板无边框、无系统标题栏；标题「替换「XX」」位于正文首行，
+    右侧是明确的「放弃修改」按钮（= 取消，不改动本片，等同 Esc / 点击面板外）。
+
+    交互：
+    - 顶部输入框每键入即在两库按 name / alias / romaji 子串联想，列表实时刷新；
+    - 空输入 → 默认推荐两库作品数最高的若干位；
+    - 单击列表项，或在输入框按回车（自动选中当前顶部项）→ 选中该人并回调 on_pick(person_dict)；
+    - 列表为空时回车无动作（必须点选联想结果）。
+
+    v1.40.14：点选结果即把**当前影片该位**演员/导演替换为所选人（`on_context(old, new)` →
+    HeroView._apply_person_replace → db.replace_media_person + 就地刷新演职人员信息），
+    不再跳到「工具」界面。
+    """
+
+    def __init__(self, initial=None, old_name=None, on_pick=None, parent=None):
+        super().__init__(parent)
+        self._on_pick = on_pick
+        self._old_name = old_name or ""
+        # v1.40.15：无边框统一面板 —— 干掉原生标题栏（那条「替换「XX」 … ×」），
+        # 标题融入面板正文首行，并把「关闭」做成正文里明确的「放弃修改」按钮。
+        # （仅 Qt.Popup 在本机仍会带一条系统标题栏，故显式再叠 FramelessWindowHint。）
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
+        self.setWindowTitle(f"替换「{self._old_name}」" if self._old_name else "搜索演员 / 导演")
+        self.setMinimumWidth(380)
+        self.setMaximumHeight(470)
+        # 弹层自身不透明底色（避免离屏/真机透明），不走全局 QWidget 背景规则
+        self.setStyleSheet(
+            "PersonSearchDialog{background:#1e1a16;border:1px solid #3a332b;"
+            "border-radius:10px;}"
+        )
+        self.setAutoFillBackground(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setSpacing(8)
+
+        # —— 原顶部关闭栏「融入下方」：标题贴着正文放，右侧是明确的「放弃修改」按钮 ——
+        head = QHBoxLayout()
+        head.setContentsMargins(1, 0, 1, 0)
+        head.setSpacing(8)
+        self._title = QLabel(
+            f"替换「{self._old_name}」" if self._old_name else "搜索演员 / 导演")
+        self._title.setStyleSheet(
+            "font-size:13px;font-weight:bold;color:#e8e0d4;background:transparent;")
+        head.addWidget(self._title)
+        head.addStretch(1)
+        self._cancel_btn = QPushButton("放弃修改")
+        self._cancel_btn.setObjectName("Ghost")      # 复用全局次级按钮样式
+        self._cancel_btn.setProperty("compact", "1")  # 窄按钮去 padding（见 style.qss）
+        self._cancel_btn.setFixedHeight(26)
+        self._cancel_btn.setCursor(Qt.PointingHandCursor)
+        self._cancel_btn.setToolTip("不改动本片，直接关闭（Esc）")
+        self._cancel_btn.clicked.connect(self.reject)
+        head.addWidget(self._cancel_btn)
+        lay.addLayout(head)
+
+        self._edit = QLineEdit()
+        self._edit.setPlaceholderText("输入姓名 / 别名 / 罗马音，自动联想…")
+        self._edit.setClearButtonEnabled(True)
+        lay.addWidget(self._edit)
+        self._hint = QLabel("点选即替换本片该位 · 演员库 + 导演库 联想")
+        self._hint.setStyleSheet("font-size:11px;color:#9b8e7a;background:transparent;")
+        lay.addWidget(self._hint)
+        self._list = QListWidget()
+        self._list.setUniformItemSizes(True)
+        lay.addWidget(self._list, 1)
+        self._edit.textChanged.connect(self._on_text)
+        self._edit.returnPressed.connect(self._on_return)
+        self._list.itemClicked.connect(self._on_item_clicked)
+        if initial:
+            self._edit.setText(initial)
+        else:
+            self._refresh("")
+        # 弹层显示后立即抢焦点，方便直接键入
+        QTimer.singleShot(0, self._edit.setFocus)
+
+    @staticmethod
+    def _role_label(p):
+        return "导演" if (p.get("role_type") or "") == "Director" else "演员"
+
+    def _format(self, p):
+        return f"{p.get('name', '')}　（{self._role_label(p)}）· {p.get('works') or 0} 部作品"
+
+    def _refresh(self, kw):
+        rows = db.search_people(kw, limit=60)
+        self._list.blockSignals(True)
+        self._list.clear()
+        for p in rows:
+            it = QListWidgetItem(self._format(p))
+            it.setData(Qt.UserRole, p)
+            self._list.addItem(it)
+        self._list.blockSignals(False)
+        if self._list.count():
+            self._list.setCurrentRow(0)
+        self._hint.setText(f"联想结果：{self._list.count()} 位（演员库 + 导演库）")
+
+    def _on_text(self, text):
+        self._refresh(text)
+
+    def _on_return(self):
+        it = self._list.currentItem() or (self._list.item(0) if self._list.count() else None)
+        if it is not None:
+            self._pick(it.data(Qt.UserRole))
+
+    def _on_item_clicked(self, item):
+        self._pick(item.data(Qt.UserRole))
+
+    def _pick(self, person):
+        cb = self._on_pick
+        self.accept()
+        if cb and person:
+            cb(person)
+
+    def move_to(self, global_pos):
+        """按光标位置放置弹层，并夹紧到屏幕可视区内。"""
+        self.adjustSize()
+        r = self.rect()
+        r.moveTopLeft(global_pos)
+        screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QRect()
+        if avail.isNull():
+            self.move(r.topLeft())
+            return
+        if r.right() > avail.right():
+            r.moveRight(avail.right())
+        if r.bottom() > avail.bottom():
+            r.moveTop(max(avail.top(), global_pos.y() - r.height()))
+        if r.left() < avail.left():
+            r.moveLeft(avail.left())
+        if r.top() < avail.top():
+            r.moveTop(avail.top())
+        self.setGeometry(r)
 
 
 # ---------- 详情页 ----------
 class HeroView(QScrollArea):
-    def __init__(self, media, on_open_actor=None, on_back=None, on_changed=None):
+    def __init__(self, media, on_open_actor=None, on_back=None, on_changed=None,
+                 on_person_replaced=None):
         super().__init__()
         self.media = media
         self.on_open_actor = on_open_actor
         self.on_back = on_back
         self.on_changed = on_changed
+        self.on_person_replaced = on_person_replaced   # (old_person, new_person) → 通知主窗
+        self._cast_box = None
+        self._body_layout = None
         self.setWidgetResizable(True)
         self._build()
 
@@ -381,8 +548,10 @@ class HeroView(QScrollArea):
         bv = QVBoxLayout(body)
         bv.setContentsMargins(28, 18, 28, 24)
         bv.setSpacing(14)
+        self._body_layout = bv
         bv.addWidget(self._intro_section(m))
-        bv.addWidget(self._cast_section(m))
+        self._cast_box = self._cast_section(m)   # v1.40.14：右键替换后就地重建这一块
+        bv.addWidget(self._cast_box)
         bv.addWidget(self._file_section(m))
         parts_box = self._parts_section(m)
         if parts_box is not None:
@@ -610,7 +779,7 @@ class HeroView(QScrollArea):
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(8)
         for p in cast:
-            rl.addWidget(CastAvatar(p, self.on_open_actor))
+            rl.addWidget(CastAvatar(p, self.on_open_actor, on_context=self._apply_person_replace))
         rl.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -621,6 +790,56 @@ class HeroView(QScrollArea):
         scroll.setStyleSheet("background:transparent;")
         v.addWidget(scroll)
         return box
+
+    def _apply_person_replace(self, old_person, new_person):
+        """右键搜索框点选某人 → 把**本片**该位演员/导演替换为该人（v1.40.14）。
+
+        只改这一部作品的关联（media_people），不动 people 表、也不动该人的其它作品；
+        改完整块「演职人员信息」就地重建，随后通知主窗（状态栏提示 + 刷统计）。
+        """
+        mid = (self.media or {}).get("id")
+        old_id = (old_person or {}).get("id")
+        new_id = (new_person or {}).get("id")
+        if not mid or old_id is None or new_id is None or old_id == new_id:
+            return
+        res = db.replace_media_person(mid, old_id, new_id)
+        if not res.get("ok"):
+            return
+        # 延迟一拍再重建 UI：本函数由右键搜索框（嵌套事件循环）内的点选触发，此刻若同步销毁
+        # 含该头像的旧块，会在「控件自身的事件处理尚未返回」时析构它 → 用 singleShot(0) 等
+        # 对话框 exec 返回、控制权回到主事件循环后再刷新，避免在自身事件里删除自身。
+        QTimer.singleShot(0, self._refresh_cast)
+        if self.on_person_replaced:
+            try:
+                self.on_person_replaced(old_person, new_person)
+            except Exception:
+                pass
+        if self.on_changed:
+            try:
+                self.on_changed()          # 刷统计/侧栏计数（与收藏/评分同一口径）
+            except Exception:
+                pass
+
+    def _refresh_cast(self):
+        """就地重建「演职人员信息」区（右键替换后即时刷新，不整页重建）。"""
+        try:
+            lay = self._body_layout
+            old = self._cast_box
+            if lay is None or old is None:
+                return
+            idx = lay.indexOf(old)
+            new_box = self._cast_section(self.media)
+            if idx < 0:
+                lay.addWidget(new_box)
+            else:
+                lay.insertWidget(idx, new_box)
+            lay.removeWidget(old)
+            old.setParent(None)
+            old.deleteLater()
+            self._cast_box = new_box
+        except RuntimeError:
+            # 页面已被切走/销毁（延迟刷新时 C++ 侧可能已析构）——忽略即可
+            pass
 
     def _file_section(self, m):
         box = QWidget()
