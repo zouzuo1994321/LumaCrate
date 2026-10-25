@@ -25,6 +25,22 @@ import config as cfg
 from ui_hero import HeroView, cover_pixmap, placeholder_pixmap
 
 
+def _busy(progress=None, text=""):
+    """v1.46.8（反馈）：把首页列表的载入进度上报给状态栏进度条。
+
+    为什么必须补：首页一次性读 **4.8 万条**（`search_media(limit=100000)`）再分 244 批
+    填表，全程只更新自己的 `self.status` 文字，**从来没调用过 `set_busy`** →
+    用户看到「正在载入列表… 16200 / 48708」在跑，右边那个进度条却一直是空槽，
+    就会认为「载入 / 缓存中切朱红的高亮没了」。
+    延迟 import 是为了避开与 `main_window` 的循环依赖（ui_home 被 main_window 导入）。
+    """
+    try:
+        import main_window as _mw
+        _mw.set_busy(progress, text)
+    except Exception:
+        pass
+
+
 # 列 -> 排序键
 _SORT_KEYS = {
     "title":       lambda m: (m.get("title") or ""),
@@ -171,13 +187,16 @@ class HoverPreview(QFrame):
 
 class HomeListView(QWidget):
     def __init__(self, on_open_actor=None, on_open_media=None, on_hover_media=None,
-                 on_changed=None, on_person_replaced=None):
+                 on_changed=None, on_person_replaced=None, on_open_actors=None):
         super().__init__()
         self.on_open_actor = on_open_actor
         self.on_open_media = on_open_media
         self.on_hover_media = on_hover_media     # 悬停/选中 → 通知主窗口换磨砂底衬
         self.on_changed = on_changed             # 详情页编辑（收藏/评分）→ 通知主窗口（刷统计/侧栏）
         self.on_person_replaced = on_person_replaced   # v1.40.14：右键搜索点选 → 替换本片演员/导演
+        # v1.43.1（反馈 4）：「更多 → 查看演员库」。**首页右侧详情也是 HeroView**，
+        # v1.43.0 只给详情页那处传了回调，首页这处漏了 → 用户点菜单仍然没反应。
+        self.on_open_actors = on_open_actors
         self._detail_mid = None                  # 当前详情面板展示的作品 id（v1.21.1 反馈 4）
         self._media = []
         self._view = []
@@ -439,6 +458,9 @@ class HomeListView(QWidget):
         · 演员列改**懒加载** —— 只为真正填进表格的那一段查关联（`actors_map(ids=…)`），
           不再每次把整张 media_people 拉进内存。
         """
+        # v1.46.8：这条查询是**同步**取全库（4.8 万条约数秒），先点亮状态栏
+        # （不确定态），配合 `_on_busy` 里的同步 repaint，朱红在阻塞开始前就画上去。
+        _busy(-1, "载入列表")
         self._media = db.search_media(limit=100000, light=True, top_only=True)
         self._view = list(self._media)
         self._set_active_chip(None)      # v1.25.0（反馈 6）：回到全量列表 → 取消选中态
@@ -451,6 +473,8 @@ class HomeListView(QWidget):
         self._fill_gen = getattr(self, "_fill_gen", 0) + 1
         self._filled = 0
         self._backdrop_id = None          # 列表内容变了 → 允许下一行重新刷磨砂底衬
+        # v1.46.8：分批填表也要报进度（0% 起步，`_fill_chunk` 每批推进）
+        _busy(0, "载入列表")
         # v1.21.0：改行数也会逐行触发布局/重绘，先关掉刷新一次性做完
         self.table.setUpdatesEnabled(False)
         try:
@@ -467,6 +491,7 @@ class HomeListView(QWidget):
         gen = getattr(self, "_fill_gen", 0)
         n = len(self._view)
         if getattr(self, "_filled", 0) >= n:
+            _busy(None)                   # v1.46.8：空列表也要回落，别让进度条悬着
             return
         end = min(self._filled + self._FILL_CHUNK, n)
         chunk = self._view[self._filled:end]
@@ -489,11 +514,15 @@ class HomeListView(QWidget):
             tv.setUpdatesEnabled(True)
         self._filled = end
         if gen != getattr(self, "_fill_gen", 0):
+            _busy(None)                   # v1.46.8：视图已变，本轮作废 → 进度条回落
             return                      # 期间视图已变，丢弃本轮
         if self._filled < n:
             self.status.setText(f"正在载入列表… {self._filled} / {n}")
+            # v1.46.8：把 0~100 的确定进度喂给状态栏（每批一次，频率 = 200 行）
+            _busy(int(self._filled * 100 / max(1, n)), "载入列表")
             self._schedule_fill(1)
         else:
+            _busy(None)                   # v1.46.8：填完回落空槽
             self._on_select()
 
     def _col_value(self, m, key):
@@ -733,6 +762,7 @@ class HomeListView(QWidget):
         # 不用整页重建（那样会丢选中/滚动位置），也不用手动点顶栏「刷新」。
         hv = HeroView(m, on_open_actor=self.on_open_actor, on_back=None,
                       on_changed=self._detail_changed,
+                      on_open_actors=self.on_open_actors,
                       on_person_replaced=self.on_person_replaced)
         layout.addWidget(hv)
 

@@ -26,7 +26,7 @@ import re
 import shutil
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QModelIndex, QRectF
-from PySide6.QtGui import QColor, QPainter, QPixmap, QDesktopServices
+from PySide6.QtGui import QColor, QPainter, QPixmap, QDesktopServices, QPen
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QComboBox, QRadioButton, QGroupBox, QTreeWidget,
                                QTreeWidgetItem, QProgressBar, QFileDialog, QMessageBox,
@@ -117,48 +117,169 @@ class ActorCheckWorker(QThread):
 # 5 点 grip 把手（v1.42.1 反馈：演员检测页竖向拖动条换成主流 grabber 观感）
 # ---------------------------------------------------------------------------
 class _GripHandle(QSplitterHandle):
-    """自绘把手：5 个圆点一排（横向把手时竖排一列），悬停变亮、光标随方向。
+    """自绘把手：**一条虚线 + 五个圆点**，点簇可当滑块按住拖（v1.43.3）。
 
-    颜色跟站点走（cf.accent_rgb(get_settings().accent())），用户换高亮色即时生效；
-    QSS 侧只需把对应 handle 背景设透明，圆点由这里画。"""
+    样式参考同作者的 m3u8_Next（`_DotsHandle`）：
+      · 沿拖动方向画一条 1px 虚线（`CustomDashLine [3,4]`，暗白；悬停提亮）；
+      · 五个圆点压在虚线中段，把线「断开」；颜色跟站点高亮色走；
+      · **两种拖法**：在点簇以外按住 = 原生调分栏尺寸；在点簇上（±18px）按住 =
+        只把点簇沿虚线滑到新位置（不改变分栏）—— 悬停点簇时换成四向光标并浮出
+        一层淡色胶囊，告诉用户「这几个点能抓」。
+
+    颜色跟站点走（cf.accent_rgb），用户换高亮色即时生效；QSS 侧只需把对应
+    handle 背景设透明，虚线与圆点全由这里画。"""
+
+    _PAD = 10.0          # 虚线两端留白
+    _GAP = 4.0           # 五点间距
+    _GRIP_HALF = 18.0    # 点簇拖动命中半长（略大于 2.5*GAP，更好按）
 
     def __init__(self, orientation, parent):
         super().__init__(orientation, parent)
-        self._hover = False
-        self.setCursor(Qt.SizeVerCursor if orientation == Qt.Vertical
+        self.setMouseTracking(True)      # 不按键也要收 move（换光标 / 浮胶囊）
+        self._hot = False                # 鼠标在把手上
+        self._on_grip = False            # 鼠标停在点簇上
+        self._grip_drag = False          # 正在拖点簇
+        self._pos = 0.5                  # 点簇在虚线可用长度上的相对位置
+        self._set_idle_cursor()
+
+    # ---------- 几何 ----------
+    def _set_idle_cursor(self):
+        self.setCursor(Qt.SizeVerCursor if self.orientation() == Qt.Vertical
                        else Qt.SizeHorCursor)
 
+    def _axis_len(self) -> int:
+        return self.width() if self.orientation() == Qt.Vertical else self.height()
+
+    def _usable(self) -> float:
+        return max(1.0, float(self._axis_len() - self._PAD * 2))
+
+    def _grip_center(self) -> float:
+        return self._PAD + self._usable() * self._pos
+
+    def _hit_grip(self, pos) -> bool:
+        v = pos.x() if self.orientation() == Qt.Vertical else pos.y()
+        return abs(v - self._grip_center()) <= self._GRIP_HALF
+
+    def grip_pos(self) -> float:
+        return self._pos
+
+    def set_grip_pos(self, pos):
+        try:
+            self._pos = min(1.0, max(0.0, float(pos)))
+        except (TypeError, ValueError):
+            return
+        self.update()
+
+    # ---------- 交互 ----------
     def enterEvent(self, e):
-        self._hover = True
+        self._hot = True
         self.update()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self._hover = False
+        self._hot = False
+        self._on_grip = False
+        if not self._grip_drag:
+            self._set_idle_cursor()
         self.update()
         super().leaveEvent(e)
 
+    def mousePressEvent(self, e):
+        # 抓在点簇上 → 只挪高亮，不动分栏（所以**不**调 super，splitter 不会接手）
+        if e.button() == Qt.LeftButton and self._hit_grip(e.position()):
+            self._grip_drag = True
+            self.setCursor(Qt.ClosedHandCursor)
+            self.update()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._grip_drag:
+            v = e.position().x() if self.orientation() == Qt.Vertical else e.position().y()
+            self.set_grip_pos((v - self._PAD) / self._usable())
+            e.accept()
+            return
+        over = self._hit_grip(e.position())
+        if over != self._on_grip:
+            self._on_grip = over
+            if over:
+                self.setCursor(Qt.SizeAllCursor)
+            else:
+                self._set_idle_cursor()
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._grip_drag:
+            self._grip_drag = False
+            self._on_grip = self._hit_grip(e.position())
+            if self._on_grip:
+                self.setCursor(Qt.SizeAllCursor)
+            else:
+                self._set_idle_cursor()
+            self.update()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    # ---------- 绘制 ----------
     def paintEvent(self, e):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        r, g, b = cf.accent_rgb(cf.get_settings().accent())
-        p.setBrush(QColor(r, g, b, 238 if self._hover else 140))
-        p.setPen(Qt.NoPen)
-        d, gap, n = 5, 4, 5
-        total = n * d + (n - 1) * gap
-        if self.orientation() == Qt.Vertical:
-            # 竖向把手（拖上下）：5 点横排，纵向居中
-            x0 = (self.width() - total) / 2.0
-            y0 = (self.height() - d) / 2.0
-            for i in range(n):
-                p.drawEllipse(QRectF(x0 + i * (d + gap), y0, d, d))
-        else:
-            # 横向把手（拖左右）：5 点竖排，横向居中
-            x0 = (self.width() - d) / 2.0
-            y0 = (self.height() - total) / 2.0
-            for i in range(n):
-                p.drawEllipse(QRectF(x0, y0 + i * (d + gap), d, d))
-        p.end()
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            w, h = self.width(), self.height()
+            vert = self.orientation() == Qt.Vertical
+            cx, cy = w / 2.0, h / 2.0
+            r, g, b = cf.accent_rgb(cf.get_settings().accent())
+            live = self._hot or self._grip_drag
+
+            # ① 虚线：沿拖动方向铺（竖向把手 → 横向虚线；横向把手 → 纵向虚线）
+            dash = QColor(255, 255, 255, 140 if self._grip_drag else (95 if live else 52))
+            pen = QPen(dash)
+            pen.setWidth(1)
+            pen.setStyle(Qt.CustomDashLine)
+            pen.setDashPattern([3, 4])
+            p.setPen(pen)
+            pad = self._PAD
+            if vert:
+                p.drawLine(int(pad), int(cy), max(int(pad), int(w - pad)), int(cy))
+            else:
+                p.drawLine(int(cx), int(pad), int(cx), max(int(pad), int(h - pad)))
+
+            # ② 悬停点簇时浮一层淡色胶囊，提示「能抓」
+            center = self._grip_center()
+            if self._on_grip and not self._grip_drag:
+                cap = QColor(r, g, b, 46)
+                p.setPen(Qt.NoPen)
+                p.setBrush(cap)
+                half = 2.5 * self._GAP + 5
+                if vert:
+                    p.drawRoundedRect(QRectF(center - half, cy - 7, half * 2, 14), 7, 7)
+                else:
+                    p.drawRoundedRect(QRectF(cx - 7, center - half, 14, half * 2), 7, 7)
+
+            # ③ 五圆点（压在虚线上把线「断开」）
+            #   每个点带一圈**极淡深色描边**：站点高亮色可能是粉/红，万一落在
+            #   红底剧照占位图上会「糊」成一片，加了描边在明暗底上都清楚。
+            d = 5.0
+            gap = self._GAP
+            total = 5 * d + 4 * gap
+            alpha = 255 if self._grip_drag else (242 if live else 200)
+            p.setPen(QPen(QColor(0, 0, 0, 80), 1))
+            p.setBrush(QColor(r, g, b, alpha))
+            if vert:
+                x0 = center - total / 2.0
+                y0 = cy - d / 2.0
+                for i in range(5):
+                    p.drawEllipse(QRectF(x0 + i * (d + gap), y0, d, d))
+            else:
+                x0 = cx - d / 2.0
+                y0 = center - total / 2.0
+                for i in range(5):
+                    p.drawEllipse(QRectF(x0, y0 + i * (d + gap), d, d))
+        finally:
+            p.end()
 
 
 class _GripSplitter(QSplitter):
@@ -533,6 +654,16 @@ class ActorCheckPage(QWidget):
         self.status_box.setCurrentIndex(max(0, idx))
         self._fields["status"] = self.status_box
         form.addRow("状态", self.status_box)
+
+        # v1.46.0（反馈 2）：手动编辑性别
+        self.gender_box = QComboBox()
+        self.gender_box.addItem("未知", "")
+        self.gender_box.addItem("女 ♀", "female")
+        self.gender_box.addItem("男 ♂", "male")
+        _gi = self.gender_box.findData(str(person.get("gender") or ""))
+        self.gender_box.setCurrentIndex(max(0, _gi))
+        self._fields["gender"] = self.gender_box
+        form.addRow("性别", self.gender_box)
 
         self.bio_edit = QTextEdit()
         self.bio_edit.setFixedHeight(64)

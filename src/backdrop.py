@@ -159,6 +159,34 @@ def remove_glass(widget) -> dict:
     return {"ok": hr == 0 or True, "method": "none", "detail": f"hr={hr}"}
 
 
+def apply_plain_dark(widget) -> dict:
+    """v1.43.2（反馈 2）：**只保留深色标题栏 + 圆角，不要任何系统背景材质**。
+
+    为什么主窗口要用它（根因，真机截图坐实）：
+      · Win11 的 `DWMWA_SYSTEMBACKDROP_TYPE`（Mica / Acrylic）是 **DWM 在窗口
+        背后合成的一层材质**，它同时作用于窗口的**边框 / 扩展框区域** —— 那块
+        区域 Qt 不绘制，平时看不出来（中央区被 veil 完全盖住）；
+      · 一旦窗口失活（点「在资源管理器中显示」把资源管理器提到前台），Win11 把
+        Acrylic 切成**失活配色（近黑）**，窗口底部就出现一条纯黑带；
+      · 而 `veil.py` 顶部的实测结论早就写明：系统级 Mica / Acrylic 在 Qt 窗口上
+        **透不出桌面、只会把窗口顶成不透明** —— 对观感零收益，只留下这块风险。
+
+    ⇒ 主窗改为「应用内磨砂（veil 自绘）+ 普通不透明窗口」，系统材质一律清掉；
+      深色标题栏与圆角仍通过 DWM 属性保留（否则标题栏会回白）。
+    """
+    if not is_windows():
+        return {"ok": False, "method": "none", "detail": "非 Windows 平台"}
+    hwnd = _hwnd(widget)
+    if not hwnd:
+        return {"ok": False, "method": "none", "detail": "窗口句柄不可用"}
+    _dwm_set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1)      # 深色标题栏
+    _dwm_set(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+    _set_accent(hwnd, ACCENT_DISABLED)                   # 清掉 Win10 亚克力
+    hr = _dwm_set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE)   # 清掉 Win11 材质
+    return {"ok": True, "method": "plain-dark",
+            "detail": f"系统背景材质已关闭（hr={hr}），磨砂改由应用内 veil 提供"}
+
+
 def apply_backdrop(widget, mode: str = "磨砂玻璃", level: str = "中",
                    dark: bool = True) -> dict:
     """按外观设置应用背景效果；返回结果字典（供界面提示）。"""

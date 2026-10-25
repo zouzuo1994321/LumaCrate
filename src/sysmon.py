@@ -188,6 +188,48 @@ class SysMetrics:
             pass
         return None
 
+    def proc_mem(self):
+        """本进程的常驻内存（MB，RSS）。
+
+        v1.46.4（反馈 2）：先走 psutil，没有就退回 Windows 的
+        ``GetProcessMemoryInfo``（psapi），两者都失败返回 None。
+        """
+        try:
+            if _PSUTIL:
+                import psutil
+                return psutil.Process().memory_info().rss / 1048576.0
+        except Exception:
+            pass
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD),
+                            ("PageFaultCount", wintypes.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(pmc)
+            # ⚠ 必须显式声明 restype，否则 64 位下 HANDLE 被截成 int → 调用直接失败
+            ctypes.windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(_PMC), wintypes.DWORD]
+            ctypes.windll.psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            h = ctypes.windll.kernel32.GetCurrentProcess()
+            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+                return pmc.WorkingSetSize / 1048576.0
+        except Exception:
+            pass
+        return None
+
     def gpu(self):
         """返回 ``{"gpu":%, "gpu_name":str, "gpu_mem":(used,total)MiB}`` 或 ``None``。"""
         if not self._nvsmi:
@@ -247,6 +289,8 @@ class SysMetrics:
     # ---------- 一次完整采样 ----------
     def sample(self):
         out = {"cpu": None, "mem": None, "gpu": None, "gpu_name": "", "gpu_mem": None,
+               "proc_mb": None,
+               "proc_mb": None,
                "net_on": None, "net_up": None, "net_down": None,
                "src": self.source_note()}
         try:
@@ -255,6 +299,14 @@ class SysMetrics:
             pass
         try:
             out["mem"] = self.mem()
+            try:
+                out["proc_mb"] = self.proc_mem()
+            except Exception:
+                out["proc_mb"] = None
+            try:
+                out["proc_mb"] = self.proc_mem()
+            except Exception:
+                out["proc_mb"] = None
         except Exception:
             pass
         try:
@@ -463,6 +515,9 @@ class SysMonitorPanel(QWidget):
 
         for key, text in self.KEYS:
             v.addWidget(self._bar_row(key, text))
+        # v1.46.4（反馈 2）：GPU 下面显示**本程序**当前内存占用（RSS）
+        self.proc_row = self._kv_row("本程序内存")
+        v.addWidget(self.proc_row)
         self.net_row = self._kv_row("网络 · Ollama")
         self.model_row = self._kv_row("当前模型")
         v.addWidget(self.net_row)
@@ -536,6 +591,25 @@ class SysMonitorPanel(QWidget):
                 tips.append("显存 %.1f / %.1f GB" % (gm[0] / 1024.0, gm[1] / 1024.0))
         self._rows["gpu"][0].setToolTip(" · ".join(tips))
         self._rows["gpu"][1].setToolTip(" · ".join(tips))
+
+        # 本程序内存（v1.46.4）
+        try:
+            mb = d.get("proc_mb")
+            _v = "—" if mb is None else "%.0f MB" % mb
+            self.proc_row.setText(
+                "本程序内存 <span style='color:#d4af37;font-weight:600'>%s</span>" % _v)
+            self.proc_row.setToolTip("本程序（含索引与封面缓存）当前的常驻内存 RSS：%s" % _v)
+        except Exception:
+            pass
+
+        # 本程序内存（v1.46.4）
+        try:
+            mb = d.get("proc_mb")
+            self.proc_row[1].setText("—" if mb is None else "%.0f MB" % mb)
+            self.proc_row[0].setToolTip("本程序（含索引与封面缓存）当前的常驻内存")
+            self.proc_row[1].setToolTip("本程序（含索引与封面缓存）当前的常驻内存")
+        except Exception:
+            pass
 
         # 网络 · Ollama：一个状态点同时编码两件事
         net_on, ol = d.get("net_on"), d.get("ollama_on")

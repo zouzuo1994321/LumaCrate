@@ -10,15 +10,17 @@ import json
 import os
 import math
 import re
+import shutil
 import subprocess
 import sys
 import time
 import urllib.parse
 import zipfile
+from datetime import datetime
 
 from PySide6.QtCore import (Qt, QThread, Signal, QPropertyAnimation, Property, QTime,
                             QEasingCurve, QSize, QTimer, QRectF, QPointF)
-from PySide6.QtGui import QPainter, QColor, QPen, QPolygonF, QFont, QBrush
+from PySide6.QtGui import QPainter, QColor, QPen, QPolygonF, QFont, QBrush, QPainterPath
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QListWidget,
     QListWidgetItem, QStackedWidget, QFrame, QLineEdit, QComboBox, QTimeEdit,
@@ -38,6 +40,8 @@ import scraper as scraper_mod
 import browser_session                  # v1.41.0（方案B）：常驻浏览器抓取会话
 import applog
 import backup as backup_mod
+import prefs as prefs_mod          # v1.43.0：偏好管理（番号级收藏 / 评分 / 人物收藏置顶）
+from ui_cleanup import PeopleCleanDialog   # v1.43.0：演员库清理
 import tagopt as tagopt_mod
 import ui_imagedetect              # v1.30.0 反馈 2：图像检测
 import ui_manualedit               # v1.30.0 反馈 3：手动修改
@@ -107,6 +111,58 @@ def _human_bytes(n):
         if n < 1024 or unit == "TB":
             return f"{n} {unit}" if unit == "B" else f"{n / 1024:.1f} {unit}"
         n /= 1024
+
+
+# ---------- 自绘色卡（v1.43.4）----------
+class _AccentSwatch(QPushButton):
+    """高亮色色卡：**自绘圆角扁平方形** + 选中白边 + 手绘勾。
+
+    为什么不用「QSS 圆角 + 文字 ✓」（真机截图实锤的两个问题）：
+      ① 原来是 26×26 + `border-radius:13px`（正圆）：圆角把中间的 ✓ 裁掉一圈，
+         用户看到「圆心显示不全」；
+      ② 更要命的是 **✓ 这个字形在按钮字体下根本渲染不出来**，白边里是个 tofu 方框。
+    ⇒ 自绘：矩形/圆角/勾全部用 QPainter 画，尺寸与字形都不再依赖字体与 QSS。
+    """
+
+    W, H, R = 30, 24, 6      # 圆角扁平方形
+
+    def __init__(self, hexv, parent=None):
+        super().__init__(parent)
+        self._hex = hexv
+        self._on = False
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("QPushButton{background:transparent;border:none;padding:0;}")
+
+    def set_on(self, on: bool):
+        if bool(on) != self._on:
+            self._on = bool(on)
+            self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            w, h = self.width(), self.height()
+            rect = QRectF(1, 1, w - 2, h - 2)
+            p.setBrush(QColor(self._hex))
+            border = QColor(255, 255, 255) if self._on else QColor(255, 255, 255, 56)
+            p.setPen(QPen(border, 2))
+            p.drawRoundedRect(rect, self.R, self.R)
+            if self._on:
+                # 手绘勾：等比线宽 2、圆头，落在 30×24 的中心，怎么缩都不会被裁
+                pen = QPen(QColor(255, 255, 255), 2)
+                pen.setCapStyle(Qt.RoundCap)
+                pen.setJoinStyle(Qt.RoundJoin)
+                p.setPen(pen)
+                cx, cy = w / 2.0, h / 2.0
+                path = QPainterPath()
+                path.moveTo(cx - 5.0, cy + 0.5)
+                path.lineTo(cx - 1.5, cy + 4.0)
+                path.lineTo(cx + 5.0, cy - 4.0)
+                p.drawPath(path)
+        finally:
+            p.end()
 
 
 # ---------- 自绘开关 ----------
@@ -251,15 +307,52 @@ class ScrapeWorker(QThread):
 
 
 class TestSourceWorker(QThread):
-    """数据源连接自检（不阻塞界面）。"""
+    """数据源连接自检（不阻塞界面）。
+
+    v1.46.6（反馈 4）：新增 `as_url=True` —— 「其他数据源」填的自定义站点不在
+    `SOURCE_BASES` 里，走 `test_source_url()` 直接测那个网址。
+    """
     done = Signal(str, dict)
 
-    def __init__(self, source, proxy, timeout):
+    def __init__(self, source, proxy, timeout, as_url=False):
         super().__init__()
         self.source, self.proxy, self.timeout = source, proxy, timeout
+        self.as_url = bool(as_url)
 
     def run(self):
-        r = scraper_mod.test_source(self.source, self.proxy, self.timeout)
+        try:
+            if self.as_url:
+                r = scraper_mod.test_source_url(self.source, self.proxy, self.timeout)
+            else:
+                r = scraper_mod.test_source(self.source, self.proxy, self.timeout)
+        except Exception as e:
+            r = {"ok": False, "msg": f"{type(e).__name__}: {e}", "ms": 0}
+        self.done.emit(self.source, r)
+
+
+class TestCookieWorker(QThread):
+    """v1.44.1（需求 3）：用已获取的 Cookie 做一次存活检测（不阻塞界面）。
+
+    v1.46.5（反馈 2）：新增 `as_url=True` 分支 —— 「其他数据源」填的是**自建 / 第三
+    方站点网址**，不在 `SOURCE_BASES` 里，走 `test_cookie_url()`；`done` 里 `source`
+    原样回传该网址，由专用槽函数认领（不会串到内置源的行标签上）。
+    """
+    done = Signal(str, dict)
+
+    def __init__(self, source, proxy, timeout, as_url=False):
+        super().__init__()
+        self.source, self.proxy, self.timeout = source, proxy, timeout
+        self.as_url = bool(as_url)
+
+    def run(self):
+        try:
+            if self.as_url:
+                r = scraper_mod.test_cookie_url(self.source, self.proxy, self.timeout)
+            else:
+                r = scraper_mod.test_cookie(self.source, self.proxy, self.timeout)
+        except Exception as e:
+            r = {"ok": False, "msg": f"{type(e).__name__}: {e}", "ms": 0,
+                 "has_cookie": False}
         self.done.emit(self.source, r)
 
 
@@ -815,7 +908,7 @@ class CloudflareDialog(GlassDialog):
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self._poll_result)
-        self.setWindowTitle(title or "站点验证")
+        self.setWindowTitle(title or "Cookie 获取")
         self.setMinimumWidth(660)
 
         v = QVBoxLayout(self)
@@ -824,19 +917,23 @@ class CloudflareDialog(GlassDialog):
         v.setContentsMargins(14, 10, 14, 10)
         v.setSpacing(7)
 
+        # v1.44.1（需求 3）：顶部网址**可点击** —— 点一下就用内置浏览器进入该站点
         head = QLabel(
-            f"<b>{html_esc(host_url)}</b> 命中了站点的人机校验"
-            "（Cloudflare / AWS WAF）。本软件的无头请求过不去，"
-            "现在用<b>内置浏览器</b>过一次校验，cookie 会自动取回来复用。")
+            f"<b>数据源网址：</b><a href='{html_esc(host_url)}' "
+            f"style='color:#e7c86a;'>{html_esc(host_url)}</a><br>"
+            "点上面这个网址（或下方「打开内置浏览器」）进入站点，"
+            "<b>登录 / 过完人机校验</b>后点「获取 Cookie」，自动抓取并复用。")
         head.setWordWrap(True)
         head.setTextFormat(Qt.RichText)
         head.setStyleSheet("color:#e8d9b6;font-size:12px;")
+        head.setOpenExternalLinks(False)
+        head.linkActivated.connect(lambda _u="": self._open_builtin())
         v.addWidget(head)
 
         steps = QLabel(
-            "<b>两步走：</b>① 点「打开内置浏览器」，在弹出的窗口里等它自动通过"
-            "（若弹验证码，勾一下「我不是机器人」）；"
-            "② 点「<b>读取 Cookie</b>」把通行 cookie 取回来并复测（直接关窗也可以）。")
+            "<b>两步走：</b>① 点上方网址进入站点，必要时先<b>登录账号</b>；"
+            "② 回到这里点「<b>获取 Cookie</b>」——通行 cookie 会自动取回并复测。")
+        steps.setTextFormat(Qt.RichText)
         steps.setWordWrap(True)
         steps.setTextFormat(Qt.RichText)
         steps.setStyleSheet("color:#a2967f;font-size:11px;")
@@ -854,7 +951,7 @@ class CloudflareDialog(GlassDialog):
         # 那个按钮，窗口一关就没了；现在主对话框里直接可读：
         #   · 内置浏览器还开着 → 直接去问它要（走结果文件 / 请求它 dump）；
         #   · 已经关掉了 → 读内置浏览器上次留下的用户数据目录里的 cookie。
-        self.btn_read = QPushButton("读取 Cookie")
+        self.btn_read = QPushButton("获取 Cookie")
         self.btn_read.setObjectName("Primary")
         self.btn_read.setToolTip(
             "从内置浏览器读取该站点的 cookie（含 cf_clearance）并注入刮削器。\n"
@@ -875,7 +972,7 @@ class CloudflareDialog(GlassDialog):
         v.addWidget(self.state)
 
         # ---------- 高级 ▾：手动粘贴 cookie（内置浏览器不可用时的兜底） ----------
-        self.btn_adv = QPushButton("高级 ▾（手动粘贴 cookie）")
+        self.btn_adv = QPushButton("高级选项（手动粘贴 cookie）")
         self.btn_adv.setObjectName("Ghost")
         self.btn_adv.setCheckable(True)
         self.btn_adv.toggled.connect(self._toggle_adv)
@@ -1253,9 +1350,25 @@ class CloudflareDialog(GlassDialog):
         self._verify_now()
 
     def _verify_now(self):
-        src = "minnano" if "minnano" in self.host_url else "imdb"
-        self.state.setText(self.state.text() + "　正在用新 cookie 复测…")
-        self._verify = TestSourceWorker(src, "", 12)
+        """用刚注入的 cookie 复测**当前这个站点**。
+
+        ★ v1.46.6（反馈 4）：原来这一行是「host 里含 minnano 就测 minnano，**否则一律
+          当成 imdb**」。于是任何非 minnano 的站点都会被当成 IMDB 去复测 —— 用户对
+          avbase.net / javdb / wikipedia / 自定义站点取完 cookie，红字永远是
+          「IMDB 用的是 AWS WAF…」，日志里的诊断也一直写着
+          「① TCP 连接 **www.imdb.com**:443 成功」，跟他正在操作的站点毫无关系。
+          这正是「怎么无论怎么样都显示这个报错」的根因。
+        现在：先按 `SOURCE_BASES` 反查 host → 命中就用该源的检索自检；
+        没命中（自定义站点）→ 走 `test_source_url()`，直接测用户填的那个网址。
+        """
+        src = scraper_mod.source_of_url(self.host_url)
+        name = (scraper_mod.SOURCE_NAMES.get(src, src) if src
+                else urllib.parse.urlparse(self.host_url).netloc)
+        self.state.setText(self.state.text() + f"　正在用新 cookie 复测 {name}…")
+        if src:
+            self._verify = TestSourceWorker(src, "", 12)
+        else:
+            self._verify = TestSourceWorker(self.host_url, "", 12, as_url=True)
         self._verify.done.connect(self._on_verified)
         self._verify.start()
 
@@ -1288,14 +1401,18 @@ class CloudflareDialog(GlassDialog):
         elif diag.get("stage") == "waf":
             tail = ("　—— ★ 判因（分层探针）：**TCP + TLS 都通**，但站点回的正文是"
                     "反爬挑战页（HTTP 200/202 也会是挑战页）。这类挑战要浏览器**执行 JS**"
-                    "换放行凭据，手工粘 cookie 一般无效 —— 本机实测该站的挑战凭据"
-                    "拿不到，请改用另一数据源，或换网络 / 换代理。")
+                    "换放行凭据，手工粘 cookie 一般无效。\n"
+                    "　　这里的复测走的是**无头请求**；若已在刮削页打开「用内置浏览器抓取」，"
+                    "实际刮削会走 WebView2 会话，本行失败**不代表刮不到**。")
         elif diag.get("stage") == "http":
             tail = ("　—— 链路通、但 HTTP 层被硬拒（应用层拦截），"
                     "可试换代理 / 换出口 IP 后复测。")
         else:
             tail = "　—— 若持续失败，请查运行日志（工具 → 数据 → 日志）确认具体原因。"
-        self.state.setText(f"❌ 复测未通过：{msg}（{res.get('ms')} ms）{tail}")
+        # v1.46.6（反馈 4）：把**复测的站点**写进红字里。原来文案只有「复测未通过」，
+        # 而实际测的却是写死的 imdb，用户根本看不出测错了对象。
+        _hn = urllib.parse.urlparse(self.host_url).netloc or self.host_url
+        self.state.setText(f"❌ 复测未通过（{_hn}）：{msg}（{res.get('ms')} ms）{tail}")
         self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
         # 把分层诊断结论写进运行日志 —— 用户明确要求「查看运行日志，查明失败原因」
         applog.log(f"[站点验证] 复测未通过 -> {self.host_url}：{msg}（{res.get('ms')} ms）")
@@ -1858,7 +1975,13 @@ class SettingsDialog(QDialog):
             lambda: self._refresh_frozen_height(self._manual_page))
         self._pg_manual = self._page_scroll(self._manual_page)
         self._pg_insight = self._page_scroll(self._build_insight())
-        self._pg_scraper = self._freeze(self._build_scraper(), lock_height=True)   # v1.40.9：子模块锁定高度
+        # v1.43.0（需求 4）：数据源从 3 个加到 6 个（wikipedia / theporndb / javdb），
+        # 再加「头像独立源 gfriends」与「ThePornDB Key」两行 —— 内容已高过 960 视口。
+        # ⚠ v1.43.1（反馈 1「行高变大」）：上一版误改成 `_page_scroll`（= lock_height=False），
+        #   画布 `setWidgetResizable(True)` 会让**组框自己吸掉多余高度**（顶部「演员刮削」
+        #   组框被撑到 ~90px）。`_freeze(..., lock_height=True)` 本身就是「画布高=内容高 +
+        #   可滚」（`setWidgetResizable(False)`），内容超视口时照样出滚动条 —— 正是想要的。
+        self._pg_scraper = self._freeze(self._build_scraper(), lock_height=True)
         self._pg_smart = self._page_scroll(self._build_smart())     # v1.24.0：智能推荐
         self._pg_tagopt = self._page_scroll(self._build_tagopt())   # v1.25.0：标签优化
         self._pg_service = self._page_scroll(self._build_service())
@@ -1870,11 +1993,14 @@ class SettingsDialog(QDialog):
         # 不再包一层滚动区），既不打架又让窗口拉宽时内容纹丝不动。
         self._pg_actorcheck = self._freeze(ui_actorcheck.ActorCheckPage(), scroll=False)
         self._pg_imagedetect = self._page_scroll(ui_imagedetect.ImageDetectPage())
-        self._pg_data = self._page_scroll(self._build_data())   # v1.13.0：数据 / 日志导出
+        # v1.44.0（需求 4）：「数据与日志」拆成「数据管理」+「日志中心」两页
+        self._pg_data = self._page_scroll(self._build_data())
+        self._pg_logs = self._page_scroll(self._build_logs())
         for pg in (self._pg_personal, self._pg_manual, self._pg_insight, self._pg_scraper,
                    self._pg_smart, self._pg_tagopt, self._pg_service, self._pg_aiengine,
                    self._pg_dedupe,
-                   self._pg_actorcheck, self._pg_imagedetect, self._pg_data):
+                   self._pg_actorcheck, self._pg_imagedetect, self._pg_data,
+                   self._pg_logs):
             self.stack.addWidget(pg)
         root.addWidget(self.stack, 1)
 
@@ -1900,7 +2026,6 @@ class SettingsDialog(QDialog):
     @staticmethod
     def _pin_min_height(box, lay):
         """把 `box` 的最小高钉成「它内容真正需要的高度」。
-
         v1.40.0（反馈 1）。取 **layout 里逐子项 sizeHint 之和**，而不是
         `lay.sizeHint().height()` —— 后者有个致命陷阱：布局一旦被压缩过，
         `sizeHint()` 返回的就**已经是缩水值**（探针实测：同一个组框，空间够时
@@ -1925,8 +2050,7 @@ class SettingsDialog(QDialog):
              `sizeHint()`（那正是「宽度未知」的保守估算，与真实宽无关）。
         """
         try:
-            total = 0
-            n = 0
+            needs = []
             for i in range(lay.count()):
                 it = lay.itemAt(i)
                 w = it.widget()
@@ -1954,10 +2078,28 @@ class SettingsDialog(QDialog):
                         need = cap
                 except Exception:
                     pass
-                total += need
-                n += 1
-            if n > 1:
-                total += (n - 1) * max(0, lay.spacing())
+                needs.append(need)
+            if not needs:
+                return
+            # ⚠ v1.43.1（反馈 1 真因）：本函数原本只服务**竖向**布局。
+            #   顶部「演员刮削」组是 **QHBoxLayout**（一行：说明 + 开关 + 统计 +
+            #   两个按钮），按「子项高度相加 + 每段 8px 间距」算出来是
+            #   17+15+33+33+4×8 = 133，而真实只需一行 67px →
+            #   组框被钉到 133、用户看到的就是「行高变大」。
+            #   ⇒ 横向布局取**最高子项**，且间距不占高度。
+            try:
+                from PySide6.QtWidgets import QBoxLayout
+                _dir = lay.direction()
+                _horizontal = _dir in (QBoxLayout.Direction.LeftToRight,
+                                       QBoxLayout.Direction.RightToLeft)
+            except Exception:
+                _horizontal = False
+            if _horizontal:
+                total = max(needs)
+            else:
+                total = sum(needs)
+                if len(needs) > 1:
+                    total += (len(needs) - 1) * max(0, lay.spacing())
             m = lay.contentsMargins()
             total += m.top() + m.bottom()
             h = max(total, lay.minimumSize().height())
@@ -2396,10 +2538,10 @@ class SettingsDialog(QDialog):
     #: （`self.sub_btns` 的 key、`ORDER` 的元素、dev 脚本遍历的依据），
     #: 翻译只发生在**显示**这一层 —— 换语言绝不能改身份，否则 `_show()` 会找不到页。
     NAV_GROUPS = [
-        ("基础工具", ["个性化设置", "服务管理", "手动修改", "AI引擎设置"]),
+        ("基础工具", ["个性化设置", "服务管理", "手动修改", "引擎设置"]),
         ("数据优化", ["演员刮削", "智能推荐", "标签优化"]),
         ("智能检测", ["重复检测", "演员检测", "图像检测"]),
-        ("数据分析", ["画像概览", "数据与日志"]),
+        ("数据分析", ["画像概览", "数据管理", "日志中心"]),
     ]
 
     def _rebuild_nav_buttons(self, build=False):
@@ -2491,10 +2633,10 @@ class SettingsDialog(QDialog):
             ("_to_ai_worker", "标签优化"),      # 标签优化页的 AI 探测
             ("_dd_worker", "重复检测"),         # DedupeWorker
             ("_insight_worker", "画像概览"),    # PortraitWorker
-            ("_ai_worker", "AI引擎设置"),
-            ("_ae_probe_worker", "AI引擎设置"),
-            ("_ae_models_worker", "AI引擎设置"),
-            ("_ae_launch_worker", "AI引擎设置"),
+            ("_ai_worker", "引擎设置"),
+            ("_ae_probe_worker", "引擎设置"),
+            ("_ae_models_worker", "引擎设置"),
+            ("_ae_launch_worker", "引擎设置"),
         ):
             w = getattr(self, attr, None)
             if w is not None and w.isRunning():
@@ -2546,11 +2688,12 @@ class SettingsDialog(QDialog):
             "智能推荐": self._pg_smart,
             "标签优化": self._pg_tagopt,
             "服务管理": self._pg_service,
-            "AI引擎设置": self._pg_aiengine,
+            "引擎设置": self._pg_aiengine,
             "重复检测": self._pg_dedupe,
             "演员检测": self._pg_actorcheck,
             "图像检测": self._pg_imagedetect,
-            "数据与日志": self._pg_data,
+            "数据管理": self._pg_data,
+            "日志中心": self._pg_logs,
         }.get(key, self._pg_personal))
         # v1.40.0（反馈 1）：切页后按需长高窗口 / 给该页套滚动。
         # 用 singleShot(0) 而不是直接调 —— 此刻 `setCurrentWidget` 刚换完，
@@ -2675,9 +2818,7 @@ class SettingsDialog(QDialog):
         ach.addWidget(QLabel("高亮色"))
         self._accent_btns = {}
         for _nm, _hex in cfg.ACCENT_COLORS:
-            b = QPushButton()
-            b.setFixedSize(26, 26)
-            b.setCursor(Qt.PointingHandCursor)
+            b = _AccentSwatch(_hex)      # v1.43.4：自绘圆角扁平方形（不再靠 QSS 圆角 + 文字勾）
             b.clicked.connect(lambda _c, h=_hex: self._apply_accent(h))
             ach.addWidget(b)
             self._accent_btns[_hex] = b
@@ -2701,6 +2842,11 @@ class SettingsDialog(QDialog):
         self.sw_side_sysmon.toggled.connect(self._apply_side_panels)
         srl.addWidget(self._row("侧栏「数据统计」", self.sw_side_stats))
         srl.addWidget(self._row("侧栏「实时状态」", self.sw_side_sysmon))
+        # v1.46.0（反馈 2）：演员卡是否显示性别符号
+        self.sw_gender = ToggleSwitch(
+            checked=bool(self.s.appearance.get("show_gender", True)))
+        self.sw_gender.toggled.connect(self._apply_card_gender)
+        srl.addWidget(self._row("演员卡性别符号（♂/♀）", self.sw_gender))
         side_hint = QLabel("控制侧栏底部这两块的显隐（侧栏各页面共用）；"
                            "关掉「实时状态」后采集线程也不会启动。")
         side_hint.setStyleSheet("color:#a2967f;font-size:11px;")
@@ -2795,6 +2941,12 @@ class SettingsDialog(QDialog):
     DARK_HINT = "经典暗色：不透明纯色，兼容性最好。"
 
     # ---------- 侧栏「数据统计」/「实时状态」显隐（v1.28.0 反馈 1） ----------
+    def _apply_card_gender(self, *_):
+        """v1.46.0（反馈 2）：演员卡性别符号开关 → 落盘并通知主窗重建当前页。"""
+        self.s.set_appearance(show_gender=self.sw_gender.isChecked())
+        if self.on_changed:
+            self.on_changed()
+
     def _apply_side_panels(self, *_):
         """两个开关落盘 → 通知主窗重建侧栏（`_apply_settings` 会走 `_build_sidebar`）。"""
         self.s.set_appearance(show_stats=self.sw_side_stats.isChecked(),
@@ -2813,21 +2965,17 @@ class SettingsDialog(QDialog):
         self._apply_appearance()
 
     def _paint_accent_btns(self):
-        """把 12 个色块画成「本色填充 + 选中白边 + 勾」；未选中用暗描边。
+        """刷新 12 个色卡的选中态（v1.43.4：改由 `_AccentSwatch.set_on()` 自绘）。
 
-        注意：这里用**控件级**样式表，它会盖掉全局 QSS 的 padding —— 26px 的小方块
-        必须显式写 padding:0，否则全局 `QPushButton{padding:7px 14px}` 会把内容区
-        压成负数，勾号与底色都会画不出来（本项目复发过多次的老坑）。
+        历史坑（已不再适用，保留记录）：原先用控件级 QSS + 文字「✓」，
+        既要显式 `padding:0` 压制全局 `QPushButton{padding:7px 14px}`，
+        又会因为正圆 radius 与缺字形，出现「圆心显示不全」。
         """
         cur = self.s.accent()
         for hexv, b in getattr(self, "_accent_btns", {}).items():
             on = str(hexv).lower() == str(cur).lower()
-            b.setStyleSheet(
-                "QPushButton{background:%s;border:2px solid %s;border-radius:13px;"
-                "padding:0;font-weight:700;color:#ffffff;}"
-                "QPushButton:hover{border-color:#ffffff;}"
-                % (hexv, "#ffffff" if on else "rgba(255,255,255,0.20)"))
-            b.setText("✓" if on else "")
+            if hasattr(b, "set_on"):
+                b.set_on(on)
             b.setToolTip(f"{cfg.accent_name(hexv)} {hexv}"
                          + ("（当前使用）" if on else "点击切换"))
         lb = getattr(self, "lb_accent", None)
@@ -2977,6 +3125,14 @@ class SettingsDialog(QDialog):
         refresh.setObjectName("Ghost")
         refresh.clicked.connect(self._refresh_scraper_stats)
         geh.addWidget(refresh, 0)
+        # v1.43.0（需求 3）：演员库清理 —— 放顶部工具行，不额外占竖向空间
+        self.sc_clean = QPushButton("演员库清理…")
+        self.sc_clean.setObjectName("Ghost")
+        self.sc_clean.setToolTip(rich(
+            "删除**没有作品关联**的冗余演员 / 导演记录（只清索引，不动头像与媒体文件；"
+            "收藏 / 置顶的人不列入）"))
+        self.sc_clean.clicked.connect(self._open_people_clean)
+        geh.addWidget(self.sc_clean, 0)
         v.addWidget(ge)
         # v1.40.9：把每个子模块的最小高钉成「内容真实需求」—— 与其他工具一致，
         # 即使窗口被拉高、画布锁定后也不让组框被布局压扁（数据源 g0 在下方单独钉）。
@@ -2989,8 +3145,13 @@ class SettingsDialog(QDialog):
         g0v.setSpacing(4)
         self.src_list = QListWidget()
         self.src_list.setSelectionMode(QAbstractItemView.NoSelection)   # 点「测试」不再整行变红
-        self.src_list.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # v1.43.2（反馈 1）：原来写死 `ScrollBarAlwaysOff` —— 当时列表按行数长高、
+        # 永远装得下；v1.43.1 起列表固定只露三行，**必须**给滚轴，否则第 4~6 个
+        # 数据源（IMDB / ThePornDB / JavDB）根本滚不到。宽度/配色由 style.qss 的
+        # `QScrollBar:vertical` 统一（10px、半透明白 handle、悬停变高亮色）。
+        self.src_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.src_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.src_list.setObjectName("SrcSourceList")   # v1.43.2：滚轴单独加粗（见 style.qss）
         self.src_list.setSpacing(2)
         g0v.addWidget(self.src_list)
         self._rebuild_source_list()
@@ -3002,10 +3163,18 @@ class SettingsDialog(QDialog):
         test_all.setObjectName("Ghost")
         test_all.clicked.connect(self._test_all_sources)
         sbh.addWidget(test_all)
+        # v1.44.1（需求 3）：Cookie 存活批量自检
+        test_ck = QPushButton("测试全部 Cookie 存活")
+        test_ck.setObjectName("Ghost")
+        test_ck.setToolTip(rich(
+            "对每个**已启用**的数据源，用已获取的 Cookie 发一次轻量请求，"
+            "判断 Cookie 是否仍有效（未获取 / 已过期 / 仍可用 三种结论）。"))
+        test_ck.clicked.connect(self._test_all_cookies)
+        sbh.addWidget(test_ck)
         # v1.40.0（反馈 4）：Cloudflare / WAF 验证助手的入口。
         # 放这里而不是塞进「刮削策略」参数网格 —— 网格是 6 项定值参数，多一个按钮
         # 会破坏 2 列对齐；而且它属于「连不上时怎么办」的处置动作，与「测试」同类。
-        self.sc_cf = QPushButton("Cloudflare 验证…")
+        self.sc_cf = QPushButton("Cookie 获取…")
         self.sc_cf.setObjectName("Ghost")
         self.sc_cf.setToolTip(
             "站点被人机校验（Cloudflare / AWS WAF）挡住时点这里：\n"
@@ -3046,6 +3215,56 @@ class SettingsDialog(QDialog):
         # 的子项，空间不足时永远是第一个被牺牲的）。钉法是「按当前宽算真实需求」，
         # 所以宽窗口下它钉出的就是 15（不会平白占地方），窄窗口下自动变 30。
         g0v.addWidget(srcbtns)
+
+        # ---------- v1.46.5（反馈 2）：其他数据源 ----------
+        # 用户原话：「增加 其他数据源 的按钮，单选后点击 内置浏览器可以跳转到该网址
+        # 进行 cookie 获取。」
+        #
+        # 为什么做成「二选一单选」而不是再加一个按钮：内置 5 个源的 cookie 目标本来
+        # 由「已启用源里的第一个」隐式决定，用户看不见也改不了；加一个 radio 把这条
+        # **隐式规则显式化**，选中「其他数据源」后「Cookie 获取…」的目标就变成用户
+        # 自己填的网址 —— 一套按钮两种目标，不新增行数也不会误点到错的那个。
+        #
+        # ⚠ 两个 radio 必须是**同一个父控件**的子控件，Qt 才会自动互斥。
+        otherw = QWidget()
+        oh = QHBoxLayout(otherw)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(8)
+        self.sc_cf_auto = QRadioButton("Cookie 目标：自动")
+        self.sc_cf_auto.setToolTip(
+            "「Cookie 获取…」默认对**已启用数据源里排在最前**的那个站点取 cookie。")
+        self.sc_cf_other = QRadioButton("其他数据源")
+        self.sc_cf_other.setToolTip(
+            "勾选后，「Cookie 获取…」先用内置浏览器打开右边这个网址，\n"
+            "过完人机校验即把 cookie 注入该站点（内置 5 个源之外也能用）。")
+        self.sc_other_url = QLineEdit()
+        self.sc_other_url.setMinimumWidth(240)
+        self.sc_other_url.setClearButtonEnabled(True)
+        self.sc_other_url.setToolTip(
+            "填站点**首页**（例如 https://javdb.com）。\n"
+            "可省略 https://，保存时会自动补全；只接受 http / https。")
+        self.sc_other_test = compact_button(
+            "测试", 52, 28, "用该站点已注入的 cookie 发一次轻量请求，判断是否仍存活")
+        self.sc_other_test.clicked.connect(self._test_other_source)
+        self.sc_other_state = QLabel("—")
+        self.sc_other_state.setStyleSheet("color:#9b8e7a;font-size:11px;")
+        self.sc_other_state.setMinimumWidth(56)
+        oh.addWidget(self.sc_cf_auto, 0)
+        oh.addWidget(self.sc_cf_other, 0)
+        oh.addWidget(self.sc_other_url, 1)
+        oh.addWidget(self.sc_other_test, 0)
+        oh.addWidget(self.sc_other_state, 0)
+        g0v.addWidget(otherw)
+        # 回填配置（老配置没有这两键 → 取 DEFAULT_SCRAPER 的 False / ""）
+        _other_on = bool(sc.get("other_source_on", False))
+        self.sc_cf_other.setChecked(_other_on)
+        self.sc_cf_auto.setChecked(not _other_on)
+        self.sc_other_url.setText(str(sc.get("other_source_url") or ""))
+        # 只关心「其他数据源是否被选中」——两个 radio 天然互斥，选中另一个即 False
+        self.sc_cf_other.toggled.connect(self._on_other_source_toggled)
+        self.sc_other_url.editingFinished.connect(self._save_other_url)
+        self._apply_other_source(_other_on)
+
         # v1.41.0（方案B）：用内置浏览器会话抓取（绕开 TLS 指纹 / 进程级拦截）
         self.sc_browser_on = ToggleSwitch(checked=bool(sc.get("browser_scrape", False)))
         self.sc_browser_on.toggled.connect(self._on_browser_scrape_toggled)
@@ -3055,10 +3274,23 @@ class SettingsDialog(QDialog):
         browh.setSpacing(8)
         browh.addWidget(QLabel("用内置浏览器抓取"))
         browh.addWidget(self.sc_browser_on)
-        browh.addWidget(QLabel("被拦的源改走 WebView2 常驻会话（需先对该源点一次「Cloudflare 验证」）"))
+        browh.addWidget(QLabel("被拦的源改走 WebView2 常驻会话（需先对该源点一次「Cookie 获取」）"))
         browh.addStretch(1)
         g0v.addWidget(broww)
-        # 把开关状态同步给浏览器会话单例（后台刮削也算）
+        # v1.43.0（需求 4）：**头像独立源 gfriends** —— 与上面的「资料源」分开：
+        # 它只出头像、不出任何资料字段，所以单独一个开关，不参与 sources 排序。
+        self.sc_gf = ToggleSwitch(checked=bool(sc.get("gfriends_photo", True)))
+        self.sc_gf.toggled.connect(lambda c: self.s.set_scraper(gfriends_photo=c))
+        gfrow = QWidget()
+        gfh = QHBoxLayout(gfrow)
+        gfh.setContentsMargins(0, 0, 0, 0)
+        gfh.setSpacing(8)
+        gfh.addWidget(QLabel("头像独立源：gfriends"))
+        gfh.addWidget(self.sc_gf)
+        gfh.addWidget(QLabel("资料源都没给头像时按姓名补一张（github.com/gfriends/gfriends，"
+                             "约 10 万张，首次使用下载 4.8MB 索引）"))
+        gfh.addStretch(1)
+        g0v.addWidget(gfrow)        # 把开关状态同步给浏览器会话单例（后台刮削也算）
         browser_session.SESSION.set_enabled(bool(sc.get("browser_scrape", False)))
         # v1.40.0（反馈 1）：**钉住组框最小高**，让「数据源列表」不再被压。
         #
@@ -3262,6 +3494,16 @@ class SettingsDialog(QDialog):
         QTimer.singleShot(0, lambda box=g3, lay=g3v: self._pin_min_height(box, lay))
 
         self._refresh_scraper_stats()
+        # v1.43.1（反馈 1 真因）：只把页面改回 lock_height 还不够 —— **组框自身**
+        # 的垂直 sizePolicy 是 Preferred，父布局手里一旦多出几十像素（画布按
+        # sizeHint 取高时会自带余量），Qt 就把它塞进第一个能长的组框：
+        # 「演员刮削」组框从 67px 被撑到 133px，看起来就是「行高变大」。
+        # ⇒ 本页所有组框统一 `(Preferred, Maximum)`：高度 = sizeHint，绝不吃余量。
+        try:
+            for _g in page.findChildren(QGroupBox):
+                _g.setSizePolicy(_SP.Preferred, _SP.Maximum)
+        except Exception:
+            pass
         return page
 
     def _rebuild_source_list(self):
@@ -3339,7 +3581,9 @@ class SettingsDialog(QDialog):
                     pass
                 self.src_list.takeItem(_i)
         n = self.src_list.count()
-        self.src_list.setFixedHeight(max(64, SRC_ROW_H * n + 8))
+        # v1.43.1（反馈 5）：列表**固定只露三行**（44×3+8=140），其余靠列表自带滚轴翻页。
+        # 六源全展开（272px）会把整页顶出视口、连带把「执行」区挤到滚动区外面。
+        self.src_list.setFixedHeight(max(64, SRC_ROW_H * min(n, 3) + 8))
 
     def _move_source(self, key, delta):
         self.s.move_scraper_source(key, delta)
@@ -3399,7 +3643,7 @@ class SettingsDialog(QDialog):
             browser_session.SESSION.detach()      # 关开关即回收所有常驻会话
         self._log("[浏览器抓取] 已%s —— %s" % (
             "启用" if on else "关闭",
-            "被拦的源将改走 WebView2 常驻会话（需先对该源点一次「Cloudflare 验证」）"
+            "被拦的源将改走 WebView2 常驻会话（需先对该源点一次「Cookie 获取」）"
             if on else "恢复无头抓取，常驻浏览器会话已回收"))
 
     def _refresh_scraper_stats(self):
@@ -3423,8 +3667,63 @@ class SettingsDialog(QDialog):
                 "点上面的按钮会**强制覆盖**重刮这批人（需联网 / 代理）。"
                 if n else "没有需要修复的历史资料。"))
 
+    def _open_people_clean(self):
+        """v1.43.0（需求 3）：演员库清理对话框（删除无作品关联的冗余条目）。"""
+        dlg = PeopleCleanDialog(self, on_done=self._after_people_clean)
+        dlg.exec()
+
+    def _after_people_clean(self):
+        self._refresh_scraper_stats()
+        if self.on_changed:
+            self.on_changed()
+
     def _log(self, text):
         self.sc_log.appendPlainText(text)
+
+    def _test_all_cookies(self):
+        """v1.44.1（需求 3）：批量检测已启用数据源的 Cookie 是否存活。"""
+        keys = self.s.scraper_sources()
+        if not keys:
+            QMessageBox.information(self, "提示", "请至少启用一个数据源。")
+            return
+        self._log(f"[Cookie 自检] 检查 {len(keys)} 个已启用数据源的 Cookie 存活…")
+        if not hasattr(self, "_cookie_workers"):
+            self._cookie_workers = []
+        for key in keys:
+            w = TestCookieWorker(key, self.s.scraper_proxy(),
+                                 int(self.sc_timeout.value()))
+            w.done.connect(self._on_cookie_done)
+            w.finished.connect(self._prune_cookie_workers)
+            self._cookie_workers.append(w)
+            w.start()
+
+    def _prune_cookie_workers(self):
+        try:
+            self._cookie_workers = [w for w in getattr(self, "_cookie_workers", [])
+                                    if w.isRunning()]
+        except Exception:
+            pass
+
+    def _on_cookie_done(self, key, res):
+        name = scraper_mod.SOURCE_NAMES.get(key, key)
+        ok = bool(res.get("ok"))
+        if ok:
+            state = "可用"
+        elif not res.get("has_cookie"):
+            state = "未获取"
+        else:
+            state = "已失效"
+        self._log(f"[Cookie] {name}：{state} — {res.get('msg')}"
+                  f"（{res.get('ms')} ms）")
+        lbl = self._src_rows.get(key)
+        if lbl is not None:
+            lbl.setText("Cookie✓" if ok else ("未获取" if not res.get("has_cookie") else "失效"))
+            lbl.setStyleSheet("color:#6fae6f;font-size:11px;" if ok
+                              else "color:#e07a6a;font-size:11px;")
+        try:
+            applog.log(f"[Cookie 自检] {name} ok={ok} msg={res.get('msg')}")
+        except Exception:
+            pass
 
     def _test_source(self, key):
         self._log(f"[测试] {scraper_mod.SOURCE_NAMES.get(key, key)} …")
@@ -3443,22 +3742,139 @@ class SettingsDialog(QDialog):
         for key in self.s.scraper.get("sources", []):
             self._test_source(key)
 
+    # ---------- v1.46.5（反馈 2）：其他数据源 ----------
+    def _apply_other_source(self, on):
+        """单选状态 → 网址输入框 / 测试按钮的可用性与提示文案。"""
+        on = bool(on)
+        self.sc_other_url.setEnabled(on)
+        self.sc_other_test.setEnabled(on)
+        self.sc_other_url.setPlaceholderText(
+            "填站点首页，例如 https://example.com" if on
+            else "未启用 —— 勾选左侧「其他数据源」后可填")
+        if not on:
+            self.sc_other_state.setText("—")
+            self.sc_other_state.setStyleSheet("color:#9b8e7a;font-size:11px;")
+
+    def _on_other_source_toggled(self, on):
+        """「其他数据源」被选中 / 取消 → 立刻落盘，并说清「Cookie 获取…」现在打哪儿。"""
+        on = bool(on)
+        self.s.set_scraper(other_source_on=on)
+        self._apply_other_source(on)
+        if on:
+            url = scraper_mod.normalize_base_url(self.sc_other_url.text())
+            self._log("[Cookie 目标] 已切到「其他数据源」：%s"
+                      % (url or "（还没填网址，点「Cookie 获取…」会被拦下）"))
+            if not url:
+                self.sc_other_url.setFocus()
+        else:
+            self._log("[Cookie 目标] 已切回「自动」—— 取已启用数据源里排在最前的那个")
+
+    def _save_other_url(self):
+        """规整并保存自定义网址（`example.com` → `https://example.com`）。"""
+        raw = (self.sc_other_url.text() or "").strip()
+        url = scraper_mod.normalize_base_url(raw)
+        if raw and not url:
+            self.sc_other_state.setText("网址无效")
+            self.sc_other_state.setStyleSheet("color:#e07a6a;font-size:11px;")
+            self._log("[Cookie 目标] 网址无效（只接受 http / https，且需带域名）：%s" % raw)
+            return
+        if url and url != raw:
+            self.sc_other_url.setText(url)
+        if (self.s.scraper.get("other_source_url") or "") != url:
+            self.s.set_scraper(other_source_url=url)
+
+    def _test_other_source(self):
+        """用自定义站点**已注入的 cookie** 发一次轻量请求，判断是否仍存活。"""
+        self._save_other_url()
+        url = scraper_mod.normalize_base_url(self.sc_other_url.text())
+        if not url:
+            QMessageBox.information(
+                self, "提示", "请先填写站点网址（例如 https://example.com）再测试。")
+            self.sc_other_url.setFocus()
+            return
+        self.sc_other_state.setText("测试中…")
+        self.sc_other_state.setStyleSheet("color:#d4af37;font-size:11px;")
+        self._log(f"[Cookie 自检] 其他数据源 {url} …")
+        w = TestCookieWorker(url, self.s.scraper_proxy(),
+                            int(self.sc_timeout.value()), as_url=True)
+        w.done.connect(self._on_other_cookie_done)
+        w.finished.connect(self._prune_cookie_workers)
+        if not hasattr(self, "_cookie_workers"):
+            self._cookie_workers = []
+        self._cookie_workers.append(w)
+        w.start()
+
+    def _on_other_cookie_done(self, url, res):
+        ok = bool(res.get("ok"))
+        if ok:
+            state = "可用"
+        elif not res.get("has_cookie"):
+            state = "未获取"
+        else:
+            state = "已失效"
+        self.sc_other_state.setText("✓ 可用" if ok else state)
+        self.sc_other_state.setStyleSheet(
+            "color:#9ecf8a;font-size:11px;" if ok else "color:#e07a6a;font-size:11px;")
+        self._log(f"[Cookie] 其他数据源（{url}）：{state} — {res.get('msg')}"
+                  f"（{res.get('ms')} ms）")
+        try:
+            applog.log(f"[Cookie 自检·其他数据源] {url} ok={ok} msg={res.get('msg')}")
+        except Exception:
+            pass
+
     # ---------- v1.40.0（反馈 4）：Cloudflare / WAF 验证助手 ----------
-    def _open_cloudflare(self):
-        """打开验证对话框；站点由用户**已启用且排在最前**的数据源决定。"""
+    def _cookie_target(self):
+        """「Cookie 获取」现在要打哪个站点 → `(host_url, 显示名, 是否自定义)`。
+
+        v1.46.5（反馈 2）：抽成独立方法，一是让 `_open_cloudflare` 只剩「开对话框」，
+        二是离屏冒烟可以直接断言目标解析结果（不必真弹对话框、更不必起浏览器子进程）。
+        自定义网址无效时返回 `(None, "其他数据源", True)` —— 调用方负责提示用户。
+        """
+        custom = bool(getattr(self, "sc_cf_other", None) is not None
+                      and self.sc_cf_other.isChecked())
+        if custom:
+            url = scraper_mod.normalize_base_url(self.sc_other_url.text())
+            return (url or None), "其他数据源", True
         key = (self.s.scraper_sources() or ["minnano"])[0]
-        host = {"minnano": scraper_mod.MINNANO_BASE,
-                "imdb": scraper_mod.IMDB_BASE}.get(key, scraper_mod.MINNANO_BASE)
-        name = scraper_mod.SOURCE_NAMES.get(key, key)
+        # v1.46.5：原来只映射了 minnano / imdb 两个 key，其余（avbase / javdb /
+        # wikipedia）**统统落到 minnano 的站点** —— 用户选了 javdb 却去 minnano
+        # 取 cookie，日志里却写着「Cookie 获取 · JavDB」。改用 SOURCE_BASES 统一取。
+        host = scraper_mod.SOURCE_BASES.get(key, scraper_mod.MINNANO_BASE)
+        return host, scraper_mod.SOURCE_NAMES.get(key, key), False
+
+    def _open_cloudflare(self):
+        """打开验证对话框。站点由「Cookie 目标」单选决定（v1.46.5）：
+
+        · **自动** → 用户已启用且排在最前的数据源（老行为）；
+        · **其他数据源** → 用户自填网址，并**直接拉起内置浏览器跳转到该网址**，
+          用户在里面过完人机校验就点「获取 Cookie」，cookie 会注入这个 host。
+        """
+        host, name, custom = self._cookie_target()
+        if custom:
+            if not host:
+                QMessageBox.information(
+                    self, "提示",
+                    "已选「其他数据源」，但网址还是空的或无效。\n\n"
+                    "请先填一个站点首页（例如 https://example.com），"
+                    "再点「Cookie 获取…」。")
+                self.sc_other_url.setFocus()
+                return
+            self._save_other_url()
+            host, name, custom = self._cookie_target()
         if getattr(self, "_cf_dlg", None) is None:
-            self._cf_dlg = CloudflareDialog(host, f"站点验证 · {name}", parent=self)
+            self._cf_dlg = CloudflareDialog(host, f"Cookie 获取 · {name}", parent=self)
         else:
             self._cf_dlg.host_url = host
-            self._cf_dlg.setWindowTitle(f"站点验证 · {name}")
+            self._cf_dlg.setWindowTitle(f"Cookie 获取 · {name}")
             self._cf_dlg._refresh_state()
         self._cf_dlg.show()
         self._cf_dlg.raise_()
         self._cf_dlg.activateWindow()
+        if custom:
+            # 用户要的就是「单选后点内置浏览器直接跳到该网址」—— 延迟一帧等对话框
+            # 先画出来，再拉起内置浏览器（`_open_builtin` 自身对重复调用有守卫）。
+            self._log(f"[Cookie 目标] 用内置浏览器打开自定义站点：{host}")
+            QTimer.singleShot(120, self._cf_dlg._open_builtin)
 
     def _on_test_done(self, key, res):
         name = scraper_mod.SOURCE_NAMES.get(key, key)
@@ -4182,11 +4598,11 @@ class SettingsDialog(QDialog):
         g1v.addWidget(self.ai_test, alignment=Qt.AlignLeft)
 
         # v1.35.0（需求 1）：调用哪个模型、怎样自动拉起 Ollama，统一挪到
-        # 「基础工具 → AI引擎设置」页 —— 这里只留「选哪个算法 + 本地引擎是否可用」，
+        # 「基础工具 → 引擎设置」页 —— 这里只留「选哪个算法 + 本地引擎是否可用」，
         # 跟「重复检测 / 演员检测 / 图像检测」的检测方式分组保持一致。
         g1_note = QLabel(rich(
             "AI 智能算法要用到的**本地模型**与**自动拉起 Ollama** 的开关，"
-            "都放在左侧「基础工具 → <b>AI引擎设置</b>」页里统一管理。"))
+            "都放在左侧「基础工具 → <b>引擎设置</b>」页里统一管理。"))
         g1_note.setWordWrap(True)
         g1_note.setStyleSheet("color:#a2967f;font-size:11px;")
         g1v.addWidget(g1_note)
@@ -4308,7 +4724,7 @@ class SettingsDialog(QDialog):
 
     # ---------- AI 引擎设置（v1.35.0 需求 1） ----------
     def _build_aiengine(self):
-        """「基础工具 → AI引擎设置」页：统一管理**调用哪个本地模型**与
+        """「基础工具 → 引擎设置」页：统一管理**调用哪个本地模型**与
         **自动拉起 Ollama**。
 
         v1.35.0（需求 1）：原来「调用模型 / 读取本机模型 / 下拉 / 怎么填」这些
@@ -4403,7 +4819,7 @@ class SettingsDialog(QDialog):
         return page
 
     def _refresh_ae_state(self):
-        """探测本机 Ollama，结果写进 AI引擎设置页的 ae_state（同 _refresh_ai_state 口径）。"""
+        """探测本机 Ollama，结果写进 引擎设置页的 ae_state（同 _refresh_ai_state 口径）。"""
         w = getattr(self, "_ae_probe_worker", None)
         if w is not None and w.isRunning():
             return
@@ -4578,7 +4994,7 @@ class SettingsDialog(QDialog):
         self.s.set_recommend(**kw)
         self._refresh_hist_label()
 
-    # ---------- v1.35.0（需求 1）：模型选择已移至「AI引擎设置」页（_build_aiengine） ----------
+    # ---------- v1.35.0（需求 1）：模型选择已移至「引擎设置」页（_build_aiengine） ----------
 
     # ---------- v1.25.0（反馈 3）：推荐历史 ----------
     def _refresh_hist_label(self):
@@ -4669,7 +5085,7 @@ class SettingsDialog(QDialog):
         arh.addStretch(1)
         algv.addWidget(arow)
         self.dd_ai_lbl = QLabel("选「AI 算法」时会自动探测本机 Ollama；"
-                                "用哪个模型跟「基础工具 → AI引擎设置」页共用同一项设置。")
+                                "用哪个模型跟「基础工具 → 引擎设置」页共用同一项设置。")
         self.dd_ai_lbl.setWordWrap(True)
         self.dd_ai_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
         algv.addWidget(self.dd_ai_lbl)
@@ -5064,7 +5480,7 @@ class SettingsDialog(QDialog):
         v.setSpacing(14)
 
         # 数据导出 / 导入
-        g1 = QGroupBox("数据导出 / 导入")
+        g1 = QGroupBox("元数据导出 / 导入")
         g1v = QVBoxLayout(g1)
         # v1.25.0（反馈 2）：这里原来是 Qt 默认行距，而下面那个勾选区用了
         # ph.setSpacing(2) —— 三列勾选框与「全选 / 全不选 / 只选轻量项」按钮行
@@ -5144,6 +5560,140 @@ class SettingsDialog(QDialog):
         g1v.addWidget(self.data_hint)
         v.addWidget(g1)
 
+        # ---------- v1.43.0（需求 2）：偏好管理 ----------
+        # 与上面的「元数据导出 / 导入」是两种东西：上面搬的是**索引与资料**（体积大、
+        # 按 id 走），这里只搬**个人偏好**（体积小、按**番号 / 姓名**走），所以放进
+        # 单独一组，文案也把「换路径 / 换电脑 / nfo 被覆盖后恢复」说清楚。
+        gp = QGroupBox("偏好管理（按番号备份 / 恢复个人偏好）")
+        gpv = QVBoxLayout(gp)
+        gpv.setSpacing(8)
+        _ph = QLabel(rich(
+            "只备份**你的偏好**，与文件路径无关：影片收藏 / 观看次数 / 用户评分"
+            "（同时回写 nfo 的 `<userrating>` —— nfo 被重新刮削覆盖也能恢复），"
+            "以及演员库、导演库里**收藏与置顶**的人。\n"
+            "换目录、换电脑、重装系统后导入即可找回；备份是单个 JSON，跨版本可读。"))
+        _ph.setWordWrap(True)
+        _ph.setStyleSheet("color:#a2967f;font-size:11px;")
+        gpv.addWidget(_ph)
+        pr = QWidget()
+        prh = QHBoxLayout(pr)
+        prh.setContentsMargins(0, 0, 0, 0)
+        prh.setSpacing(8)
+        # v1.45.5（反馈 4）：**勾选要导出的内容**（原来只有"范围"下拉，不能自由组合）
+        self.pref_inc = {}
+        _inc_row = QWidget()
+        _il = QHBoxLayout(_inc_row)
+        _il.setContentsMargins(0, 0, 0, 0)
+        _il.setSpacing(10)
+        _il.addWidget(QLabel("导出内容"))
+        for _k, _lab in prefs_mod.INCLUDE_ITEMS:
+            _cb = QCheckBox(_lab)
+            _cb.setChecked(True)
+            self.pref_inc[_k] = _cb
+            _il.addWidget(_cb)
+        _il.addStretch(1)
+        prh.addWidget(_inc_row)
+        pex = QPushButton("导出偏好…")
+        pex.setObjectName("Primary")
+        pex.setToolTip(rich("把收藏 / 观看记录 / 用户评分 / 人物收藏与置顶导出为单个 JSON"))
+        pex.clicked.connect(self._export_prefs)
+        pim = QPushButton("导入偏好…")
+        pim.setObjectName("Ghost")
+        pim.setToolTip(rich("按**番号**与**姓名**合并回当前索引；不删数据、不覆盖资料字段"))
+        pim.clicked.connect(self._import_prefs)
+        prh.addWidget(pex)
+        prh.addWidget(pim)
+        prh.addStretch(1)
+        gpv.addWidget(pr)
+        self.pref_hint = QLabel("尚未导出 / 导入过偏好。")
+        self.pref_hint.setWordWrap(True)
+        self.pref_hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        gpv.addWidget(self.pref_hint)
+        v.addWidget(gp)
+
+        # ---------- v1.44.0（需求 4）：维护与重置（危险操作） ----------
+        gd = QGroupBox("维护与重置（危险操作，执行前需二次确认）")
+        gdv = QVBoxLayout(gd)
+        gdv.setSpacing(8)
+        dhint = QLabel(rich(
+            "下面四项都会**改动本地数据**，每一项都要**连点两次确认**。"
+            "执行前建议先用上面的「导出所选分类」把收藏 / 评分备份一份。"))
+        dhint.setWordWrap(True)
+        dhint.setStyleSheet("color:#a2967f;font-size:11px;")
+        gdv.addWidget(dhint)
+        for _label, _tip, _slot in (
+                ("清理缓存",
+                 "删除演员头像缓存与 gfriends 索引缓存（不动索引库、不动设置）",
+                 self._clean_cache),
+                ("删除数据库",
+                 "删除媒体索引库（保留设置与媒体库配置；重启后是空库）",
+                 self._drop_database),
+                ("恢复默认设置",
+                 "设置恢复出厂默认（清空媒体库列表与全部偏好；不动索引库）",
+                 self._reset_settings),
+                ("初始化软件",
+                 "索引库 + 缓存 + 设置全部清空，等同于全新安装（不可撤销）",
+                 self._factory_reset)):
+            _r = QWidget()
+            _rh = QHBoxLayout(_r)
+            _rh.setContentsMargins(0, 0, 0, 0)
+            _rh.setSpacing(8)
+            _b = QPushButton(_label)
+            _b.setObjectName("Ghost")
+            _b.setToolTip(rich(_tip))
+            _b.clicked.connect(_slot)
+            _lab = QLabel(_tip)
+            _lab.setWordWrap(True)
+            _lab.setStyleSheet("color:#a2967f;font-size:11px;")
+            _rh.addWidget(_b, 0)
+            _rh.addWidget(_lab, 1)
+            gdv.addWidget(_r)
+        v.addWidget(gd)
+
+        v.addStretch(1)
+        return page
+
+    def _build_logs(self):
+        """v1.44.0（需求 4）：日志中心 —— 从「数据与日志」拆出来的独立页。"""
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(14)
+
+        # ---------- v1.45.5（反馈 3）：刮削诊断（从"诊断与可观测"提前落在这里） ----------
+        gd = QGroupBox("刮削诊断（各数据源 Cookie 与最近一次测试）")
+        gdv = QVBoxLayout(gd)
+        gdv.setSpacing(6)
+        dhi = QLabel("显示每个数据源的通行 Cookie 是否已获取，以及最近一次「测试 / Cookie 存活」的结果。"
+                     "点「刷新」重读；真正的网络请求在「演员刮削」页发起。")
+        dhi.setWordWrap(True)
+        dhi.setStyleSheet("color:#a2967f;font-size:11px;")
+        gdv.addWidget(dhi)
+        self.diag_tbl = QTableWidget(0, 5)
+        self.diag_tbl.setHorizontalHeaderLabels(["数据源", "Cookie", "最近结果", "耗时", "时间"])
+        self.diag_tbl.verticalHeader().setVisible(False)
+        self.diag_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.diag_tbl.setSelectionMode(QAbstractItemView.NoSelection)
+        self.diag_tbl.setFixedHeight(170)
+        try:
+            hh = self.diag_tbl.horizontalHeader()
+            hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(2, QHeaderView.Stretch)
+            hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            hh.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        except Exception:
+            pass
+        gdv.addWidget(self.diag_tbl)
+        drow = QHBoxLayout()
+        _dbtn = QPushButton("刷新诊断")
+        _dbtn.setObjectName("Ghost")
+        _dbtn.clicked.connect(self._refresh_diag)
+        drow.addWidget(_dbtn)
+        drow.addStretch(1)
+        gdv.addLayout(drow)
+        v.addWidget(gd)
+
         # 日志导出
         g2 = QGroupBox("运行日志")
         g2v = QVBoxLayout(g2)
@@ -5180,6 +5730,21 @@ class SettingsDialog(QDialog):
         g3hint.setWordWrap(True)
         g3hint.setStyleSheet("color:#a2967f;font-size:11px;")
         g3v.addWidget(g3hint)
+        # v1.45.5（反馈 3）：过滤与关键词搜索
+        _frow = QWidget()
+        _fl = QHBoxLayout(_frow)
+        _fl.setContentsMargins(0, 0, 0, 0)
+        _fl.setSpacing(8)
+        self.log_kw = QLineEdit()
+        self.log_kw.setPlaceholderText("搜索关键词（番号 / 演员 / 源…）")
+        self.log_kw.setFixedWidth(260)
+        self.log_kw.textChanged.connect(lambda *_: self._refresh_log())
+        _fl.addWidget(self.log_kw)
+        self.log_err_only = QCheckBox("只看 WARN / ERROR")
+        self.log_err_only.toggled.connect(lambda *_: self._refresh_log())
+        _fl.addWidget(self.log_err_only)
+        _fl.addStretch(1)
+        g3v.addWidget(_frow)
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)
         self._log_view.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -5200,6 +5765,162 @@ class SettingsDialog(QDialog):
         v.addStretch(1)
         return page
 
+    # ---------- v1.44.0（需求 4）：维护与重置（危险操作，二次确认） ----------
+    def _confirm_twice(self, title, first, second):
+        """两次确认；第二次默认按钮是「否」（回车不会误执行）。"""
+        if QMessageBox.question(self, title, rich(first)) != QMessageBox.Yes:
+            return False
+        return QMessageBox.question(
+            self, title + "（再次确认）", rich(second),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
+
+    @staticmethod
+    def _app_root():
+        return applog.base_dir()
+
+    @staticmethod
+    def _dir_size(path):
+        total = 0
+        for dp, _dn, fn in os.walk(path):
+            for f in fn:
+                try:
+                    total += os.path.getsize(os.path.join(dp, f))
+                except Exception:
+                    pass
+        return total
+
+    def _clean_cache(self):
+        if not self._confirm_twice(
+                "清理缓存",
+                "将删除 `cache/` 下的**演员头像缓存**与 gfriends 索引缓存。\n"
+                "索引库、设置、媒体库都不受影响；头像可在下次刮削时重新下载。",
+                "再确认一次：确定要清理缓存吗？"):
+            return
+        cache = os.path.join(self._app_root(), "cache")
+        n, size = 0, 0
+        try:
+            if os.path.isdir(cache):
+                for name in os.listdir(cache):
+                    p = os.path.join(cache, name)
+                    try:
+                        if os.path.isdir(p):
+                            size += self._dir_size(p)
+                            shutil.rmtree(p)
+                        else:
+                            size += os.path.getsize(p)
+                            os.remove(p)
+                        n += 1
+                    except Exception as e:
+                        applog.log(f"清理缓存：跳过 {name}（{e}）", "warn")
+        except Exception as e:
+            applog.log(f"清理缓存失败：{e}", "error")
+            QMessageBox.warning(self, "清理失败", str(e))
+            return
+        applog.log(f"清理缓存：删除 {n} 项，约 {size / 1048576:.1f} MB")
+        QMessageBox.information(self, "清理完成",
+                                f"已删除 {n} 项，约释放 {size / 1048576:.1f} MB。")
+
+    def _drop_database(self):
+        if not self._confirm_twice(
+                "删除数据库",
+                "将**删除媒体索引库**（`index_data/media_center.db`）。\n"
+                "媒体文件、设置、媒体库配置都不动；重启后索引为空，需要重新扫描。",
+                "再确认一次：删除后只能靠重新扫描恢复，确定继续？"):
+            return
+        try:
+            db.close_all()
+            p = db.db_path()
+            for f in (p, p + "-wal", p + "-shm"):
+                if os.path.exists(f):
+                    os.remove(f)
+        except Exception as e:
+            applog.log(f"删除数据库失败：{e}", "error")
+            QMessageBox.warning(self, "删除失败", str(e))
+            return
+        applog.log("删除数据库：已完成，等待重启")
+        QMessageBox.information(self, "已删除",
+                                "索引库已删除。\n请重启软件，并在「媒体库」里重新扫描。")
+
+    def _reset_settings(self):
+        if not self._confirm_twice(
+                "恢复默认设置",
+                "将把**设置恢复出厂默认**：媒体库列表、导航、外观、刮削偏好等全部重置；"
+                "索引库与媒体文件不受影响。",
+                "再确认一次：媒体库列表会被清空（索引还在，但侧栏看不到库），确定继续？"):
+            return
+        try:
+            sp = cfg.config_path()
+            if os.path.exists(sp):
+                shutil.copy(sp, sp + ".bak-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+            s = cfg.get_settings()
+            s.__init__()             # 回到全部默认值
+            s.save()
+        except Exception as e:
+            applog.log(f"恢复默认设置失败：{e}", "error")
+            QMessageBox.warning(self, "恢复失败", str(e))
+            return
+        applog.log("恢复默认设置：完成")
+        QMessageBox.information(self, "已恢复", "设置已恢复默认，请重启软件生效。")
+
+    def _factory_reset(self):
+        if not self._confirm_twice(
+                "初始化软件",
+                "**索引库 + 缓存 + 设置**全部清空，等同全新安装；媒体文件不会被动。",
+                "再确认一次：此操作不可撤销（设置会先自动备份为 .bak），确定继续？"):
+            return
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            sp = cfg.config_path()
+            if os.path.exists(sp):
+                shutil.copy(sp, sp + ".bak-" + ts)
+            db.close_all()
+            p = db.db_path()
+            for f in (p, p + "-wal", p + "-shm"):
+                if os.path.exists(f):
+                    os.remove(f)
+            cache = os.path.join(self._app_root(), "cache")
+            if os.path.isdir(cache):
+                shutil.rmtree(cache)
+            s = cfg.get_settings()
+            s.__init__()
+            s.save()
+        except Exception as e:
+            applog.log(f"初始化软件失败：{e}", "error")
+            QMessageBox.warning(self, "初始化失败", str(e))
+            return
+        applog.log("初始化软件：索引库 / 缓存 / 设置已清空")
+        QMessageBox.information(self, "已初始化",
+                                "软件已初始化（索引库、缓存、设置均已清空）。\n请重启软件。")
+
+    def _refresh_diag(self):
+        """v1.45.5：把 scraper.diag_snapshot() 画进「刮削诊断」表。"""
+        try:
+            snap = scraper_mod.diag_snapshot()
+        except Exception as e:
+            applog.log(f"读取刮削诊断失败：{e}", "error")
+            return
+        tbl = getattr(self, "diag_tbl", None)
+        if tbl is None:
+            return
+        tbl.setRowCount(0)
+        for key, info in snap.items():
+            r = tbl.rowCount()
+            tbl.insertRow(r)
+            name = scraper_mod.SOURCE_NAMES.get(key, key)
+            ck = "✓ 已获取" if info.get("cookie_ok") else "— 未获取"
+            last = info.get("last") or {}
+            res = ("可用" if last.get("ok") else "失败") if last else "未测试"
+            msg = (last.get("msg") or "")[:60]
+            cells = [name, ck, (res + ("：" + msg if msg else "")) if last else res,
+                     ("%d ms" % last["ms"]) if last else "—", last.get("at") or "—"]
+            for c, txt in enumerate(cells):
+                it = QTableWidgetItem(str(txt))
+                if c == 1:
+                    it.setForeground(QColor("#6fae6f" if info.get("cookie_ok") else "#a2967f"))
+                elif c == 2 and last:
+                    it.setForeground(QColor("#6fae6f" if last.get("ok") else "#e07a6a"))
+                tbl.setItem(r, c, it)
+
     def _refresh_log(self):
         """v1.19.0 反馈 101：实时读取 app.log 尾部，反映当前进度与正在做的事。
         只读尾部（最多 200KB）避免大日志卡顿；刷新后自动滚到最底。"""
@@ -5215,6 +5936,15 @@ class SettingsDialog(QDialog):
                     f.seek(size - tail)
                     f.readline()        # 丢弃可能不完整的半行
                 text = f.read()
+            _kw = (self.log_kw.text() or "").strip().lower() if hasattr(self, "log_kw") else ""
+            if _kw or (hasattr(self, "log_err_only") and self.log_err_only.isChecked()):
+                _lines = text.splitlines()
+                if hasattr(self, "log_err_only") and self.log_err_only.isChecked():
+                    _lines = [l for l in _lines if any(t in l for t in
+                              ("[ERROR]", "[WARN]", "Traceback", "未捕获异常"))]
+                if _kw:
+                    _lines = [l for l in _lines if _kw in l.lower()]
+                text = chr(10).join(_lines[-400:]) or "（没有匹配的日志行）"
             self._log_view.setPlainText(text)
             sb = self._log_view.verticalScrollBar()
             sb.setValue(sb.maximum())
@@ -5296,6 +6026,64 @@ class SettingsDialog(QDialog):
                 self.on_changed()
         else:
             applog.log(f"数据导入失败：{r.get('error')}", "error")
+            QMessageBox.warning(self, "导入失败", r.get("error") or "未知错误")
+
+    # ---------- v1.43.0（需求 2）：偏好管理 ----------
+    def _export_prefs(self):
+        default = os.path.join(os.path.expanduser("~"), prefs_mod.prefs_export_name())
+        path, _ = QFileDialog.getSaveFileName(self, "导出偏好", default,
+                                              "偏好备份 (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        _inc = [k for k, cb in getattr(self, "pref_inc", {}).items() if cb.isChecked()]
+        if not _inc:
+            QMessageBox.information(self, "提示", "请至少勾选一项导出内容。")
+            return
+        r = prefs_mod.export_prefs(path, "all", _inc)
+        if r.get("ok"):
+            applog.log(f"偏好导出：{path} 影片 {r['media']} 条、人物 {r['people']} 条")
+            self.pref_hint.setText(
+                f"最近导出：{path}（影片 {r['media']} 条 · 人物 {r['people']} 位）")
+            extra = (f"\n\n（{r['no_code']} 条既无番号也无标题，已跳过）"
+                     if r.get("no_code") else "")
+            QMessageBox.information(
+                self, "导出完成",
+                f"已导出到：\n{path}\n\n"
+                f"影片偏好 {r['media']} 条\n人物收藏 / 置顶 {r['people']} 位" + extra)
+        else:
+            applog.log(f"偏好导出失败：{r.get('error')}", "error")
+            QMessageBox.warning(self, "导出失败", r.get("error") or "未知错误")
+
+    def _import_prefs(self):
+        path, _ = QFileDialog.getOpenFileName(self, "导入偏好", "",
+                                              "偏好备份 (*.json)")
+        if not path:
+            return
+        if QMessageBox.question(
+                self, "导入偏好",
+                rich("会把备份里的**收藏 / 观看次数 / 用户评分**按番号合并回当前索引，"
+                     "用户评分同时写回 nfo。\n"
+                     "**不删除任何数据、不覆盖资料字段**，可反复执行。\n\n是否继续？")
+        ) != QMessageBox.Yes:
+            return
+        r = prefs_mod.import_prefs(path)
+        if r.get("ok"):
+            applog.log(f"偏好导入：{path} 影片命中 {r['media_ok']}、"
+                       f"人物命中 {r['people_ok']}、nfo 评分写入 {r['nfo_written']}")
+            self.pref_hint.setText(
+                f"最近导入：{path}（影片命中 {r['media_ok']} · 未匹配 {r['media_miss']} · "
+                f"人物 {r['people_ok']} · nfo 写回 {r['nfo_written']}）")
+            QMessageBox.information(
+                self, "导入完成",
+                f"影片偏好命中 {r['media_ok']} 条（未匹配 {r['media_miss']} 条）\n"
+                f"人物收藏 / 置顶命中 {r['people_ok']} 位（未匹配 {r['people_miss']} 位）\n"
+                f"nfo 评分写回 {r['nfo_written']} 个文件\n\n刷新界面即可看到结果。")
+            if self.on_changed:
+                self.on_changed()
+        else:
+            applog.log(f"偏好导入失败：{r.get('error')}", "error")
             QMessageBox.warning(self, "导入失败", r.get("error") or "未知错误")
 
     def _export_logs(self):

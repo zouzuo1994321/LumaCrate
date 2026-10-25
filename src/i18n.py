@@ -256,7 +256,7 @@ TOOL_KEYS = {
         "个性化设置": "个性化设置", "服务管理": "服务管理", "手动修改": "手动修改",
         "演员刮削": "演员刮削", "智能推荐": "智能推荐", "标签优化": "标签优化",
         "重复检测": "重复检测", "演员检测": "演员检测", "图像检测": "图像检测",
-        "画像概览": "画像概览", "数据与日志": "数据与日志",
+        "画像概览": "画像概览", "数据管理": "数据管理", "日志中心": "日志中心",
     },
     "en": {
         "工具": "Tools",
@@ -265,7 +265,7 @@ TOOL_KEYS = {
         "个性化设置": "Preferences", "服务管理": "Services", "手动修改": "Manual Edit",
         "演员刮削": "Actor Scraping", "智能推荐": "Smart Picks", "标签优化": "Tag Cleanup",
         "重复检测": "Duplicates", "演员检测": "Actor Check", "图像检测": "Image Check",
-        "画像概览": "Profile Overview", "数据与日志": "Data & Logs",
+        "画像概览": "Profile Overview", "数据管理": "Data Management", "日志中心": "Log Center",
     },
     "ja": {
         "工具": "ツール",
@@ -274,7 +274,7 @@ TOOL_KEYS = {
         "个性化设置": "環境設定", "服务管理": "サービス管理", "手动修改": "手動編集",
         "演员刮削": "女優スクレイピング", "智能推荐": "おすすめ", "标签优化": "タグ整理",
         "重复检测": "重複検出", "演员检测": "女優チェック", "图像检测": "画像チェック",
-        "画像概览": "プロフィール概要", "数据与日志": "データとログ",
+        "画像概览": "プロフィール概要", "数据管理": "データ管理", "日志中心": "ログセンター",
     },
     "ko": {
         "工具": "도구",
@@ -283,7 +283,7 @@ TOOL_KEYS = {
         "个性化设置": "환경 설정", "服务管理": "서비스 관리", "手动修改": "수동 편집",
         "演员刮削": "배우 스크래핑", "智能推荐": "추천", "标签优化": "태그 정리",
         "重复检测": "중복 검사", "演员检测": "배우 검사", "图像检测": "이미지 검사",
-        "画像概览": "프로필 개요", "数据与日志": "데이터 및 로그",
+        "画像概览": "프로필 개요", "数据管理": "데이터 관리", "日志中心": "로그 센터",
     },
     "es": {
         "工具": "Herramientas",
@@ -292,7 +292,7 @@ TOOL_KEYS = {
         "个性化设置": "Preferencias", "服务管理": "Servicios", "手动修改": "Edición manual",
         "演员刮削": "Scraping de actrices", "智能推荐": "Recomendados", "标签优化": "Limpieza de etiquetas",
         "重复检测": "Duplicados", "演员检测": "Revisión de actrices", "图像检测": "Revisión de imágenes",
-        "画像概览": "Resumen de perfil", "数据与日志": "Datos y registros",
+        "画像概览": "Resumen de perfil", "数据管理": "Gestión de datos", "日志中心": "Centro de registros",
     },
     "hi": {
         "工具": "उपकरण",
@@ -301,7 +301,7 @@ TOOL_KEYS = {
         "个性化设置": "प्राथमिकताएँ", "服务管理": "सेवाएँ", "手动修改": "मैनुअल संपादन",
         "演员刮削": "अभिनेत्री स्क्रैपिंग", "智能推荐": "सुझाव", "标签优化": "टैग सफ़ाई",
         "重复检测": "दोहराव जाँच", "演员检测": "अभिनेत्री जाँच", "图像检测": "छवि जाँच",
-        "画像概览": "प्रोफ़ाइल अवलोकन", "数据与日志": "डेटा और लॉग",
+        "画像概览": "प्रोफ़ाइल अवलोकन", "数据管理": "डेटा प्रबंधन", "日志中心": "लॉग केंद्र",
     },
     "ar": {
         "工具": "الأدوات",
@@ -310,7 +310,7 @@ TOOL_KEYS = {
         "个性化设置": "التفضيلات", "服务管理": "الخدمات", "手动修改": "تحرير يدوي",
         "演员刮削": "جلب بيانات الممثلات", "智能推荐": "مقترحات", "标签优化": "تنظيف الوسوم",
         "重复检测": "كشف التكرار", "演员检测": "فحص الممثلات", "图像检测": "فحص الصور",
-        "画像概览": "نظرة عامة", "数据与日志": "البيانات والسجلات",
+        "画像概览": "نظرة عامة", "数据管理": "إدارة البيانات", "日志中心": "مركز السجلات",
     },
     "pt": {
         "工具": "Ferramentas",
@@ -319,7 +319,7 @@ TOOL_KEYS = {
         "个性化设置": "Preferências", "服务管理": "Serviços", "手动修改": "Edição manual",
         "演员刮削": "Scraping de atrizes", "智能推荐": "Recomendados", "标签优化": "Limpeza de tags",
         "重复检测": "Duplicados", "演员检测": "Verificação de atrizes", "图像检测": "Verificação de imagens",
-        "画像概览": "Resumo do perfil", "数据与日志": "Dados e registos",
+        "画像概览": "Resumo do perfil", "数据管理": "Gestão de dados", "日志中心": "Centro de registos",
     },
     "ru": {
         "工具": "Инструменты",
@@ -328,7 +328,7 @@ TOOL_KEYS = {
         "个性化设置": "Настройки", "服务管理": "Службы", "手动修改": "Правка вручную",
         "演员刮削": "Скрапинг актрис", "智能推荐": "Рекомендации", "标签优化": "Чистка тегов",
         "重复检测": "Поиск дублей", "演员检测": "Проверка актрис", "图像检测": "Проверка изображений",
-        "画像概览": "Обзор профиля", "数据与日志": "Данные и логи",
+        "画像概览": "Обзор профиля", "数据管理": "Управление данными", "日志中心": "Центр журналов",
     },
     "de": {
         "工具": "Werkzeuge",
@@ -337,7 +337,7 @@ TOOL_KEYS = {
         "个性化设置": "Einstellungen", "服务管理": "Dienste", "手动修改": "Manuelle Bearbeitung",
         "演员刮削": "Darstellerinnen-Scraping", "智能推荐": "Empfehlungen", "标签优化": "Tag-Bereinigung",
         "重复检测": "Duplikate", "演员检测": "Darstellerinnen-Prüfung", "图像检测": "Bildprüfung",
-        "画像概览": "Profilübersicht", "数据与日志": "Daten & Protokolle",
+        "画像概览": "Profilübersicht", "数据管理": "Datenverwaltung", "日志中心": "Protokollzentrum",
     },
     "fr": {
         "工具": "Outils",
@@ -346,7 +346,7 @@ TOOL_KEYS = {
         "个性化设置": "Préférences", "服务管理": "Services", "手动修改": "Édition manuelle",
         "演员刮削": "Scraping des actrices", "智能推荐": "Suggestions", "标签优化": "Nettoyage des tags",
         "重复检测": "Doublons", "演员检测": "Vérification des actrices", "图像检测": "Vérification des images",
-        "画像概览": "Aperçu du profil", "数据与日志": "Données et journaux",
+        "画像概览": "Aperçu du profil", "数据管理": "Gestion des données", "日志中心": "Centre des journaux",
     },
     "it": {
         "工具": "Strumenti",
@@ -355,7 +355,7 @@ TOOL_KEYS = {
         "个性化设置": "Preferenze", "服务管理": "Servizi", "手动修改": "Modifica manuale",
         "演员刮削": "Scraping attrici", "智能推荐": "Consigliati", "标签优化": "Pulizia tag",
         "重复检测": "Duplicati", "演员检测": "Controllo attrici", "图像检测": "Controllo immagini",
-        "画像概览": "Panoramica profilo", "数据与日志": "Dati e log",
+        "画像概览": "Panoramica profilo", "数据管理": "Gestione dati", "日志中心": "Centro log",
     },
     "tr": {
         "工具": "Araçlar",
@@ -364,7 +364,7 @@ TOOL_KEYS = {
         "个性化设置": "Tercihler", "服务管理": "Hizmetler", "手动修改": "Elle Düzenleme",
         "演员刮削": "Oyuncu Kazıma", "智能推荐": "Öneriler", "标签优化": "Etiket Temizliği",
         "重复检测": "Yinelenenler", "演员检测": "Oyuncu Denetimi", "图像检测": "Görsel Denetimi",
-        "画像概览": "Profil Özeti", "数据与日志": "Veri ve Günlükler",
+        "画像概览": "Profil Özeti", "数据管理": "Veri Yönetimi", "日志中心": "Günlük Merkezi",
     },
     "nl": {
         "工具": "Hulpmiddelen",
@@ -373,7 +373,7 @@ TOOL_KEYS = {
         "个性化设置": "Voorkeuren", "服务管理": "Diensten", "手动修改": "Handmatig bewerken",
         "演员刮削": "Actrices scrapen", "智能推荐": "Aanbevolen", "标签优化": "Labels opschonen",
         "重复检测": "Duplicaten", "演员检测": "Actrices controleren", "图像检测": "Afbeeldingen controleren",
-        "画像概览": "Profieloverzicht", "数据与日志": "Data en logboeken",
+        "画像概览": "Profieloverzicht", "数据管理": "Gegevensbeheer", "日志中心": "Logcentrum",
     },
     "pl": {
         "工具": "Narzędzia",
@@ -382,7 +382,7 @@ TOOL_KEYS = {
         "个性化设置": "Preferencje", "服务管理": "Usługi", "手动修改": "Edycja ręczna",
         "演员刮削": "Scraping aktorek", "智能推荐": "Polecane", "标签优化": "Czyszczenie tagów",
         "重复检测": "Duplikaty", "演员检测": "Kontrola aktorek", "图像检测": "Kontrola obrazów",
-        "画像概览": "Przegląd profilu", "数据与日志": "Dane i dzienniki",
+        "画像概览": "Przegląd profilu", "数据管理": "Zarządzanie danymi", "日志中心": "Centrum dzienników",
     },
     "sv": {
         "工具": "Verktyg",
@@ -391,7 +391,7 @@ TOOL_KEYS = {
         "个性化设置": "Inställningar", "服务管理": "Tjänster", "手动修改": "Manuell redigering",
         "演员刮削": "Skrapa skådespelerskor", "智能推荐": "Rekommenderat", "标签优化": "Taggrensning",
         "重复检测": "Dubbletter", "演员检测": "Skådespelarkontroll", "图像检测": "Bildkontroll",
-        "画像概览": "Profilöversikt", "数据与日志": "Data och loggar",
+        "画像概览": "Profilöversikt", "数据管理": "Datahantering", "日志中心": "Loggcenter",
     },
     "th": {
         "工具": "เครื่องมือ",
@@ -400,7 +400,7 @@ TOOL_KEYS = {
         "个性化设置": "การตั้งค่า", "服务管理": "บริการ", "手动修改": "แก้ไขด้วยมือ",
         "演员刮削": "ดึงข้อมูลนักแสดง", "智能推荐": "แนะนำ", "标签优化": "ล้างแท็ก",
         "重复检测": "ตรวจหาซ้ำ", "演员检测": "ตรวจนักแสดง", "图像检测": "ตรวจรูปภาพ",
-        "画像概览": "ภาพรวมโปรไฟล์", "数据与日志": "ข้อมูลและบันทึก",
+        "画像概览": "ภาพรวมโปรไฟล์", "数据管理": "การจัดการข้อมูล", "日志中心": "ศูนย์บันทึก",
     },
     "vi": {
         "工具": "Công cụ",
@@ -409,7 +409,7 @@ TOOL_KEYS = {
         "个性化设置": "Tùy chọn", "服务管理": "Dịch vụ", "手动修改": "Sửa thủ công",
         "演员刮削": "Cào dữ liệu diễn viên", "智能推荐": "Gợi ý", "标签优化": "Dọn thẻ",
         "重复检测": "Trùng lặp", "演员检测": "Kiểm tra diễn viên", "图像检测": "Kiểm tra ảnh",
-        "画像概览": "Tổng quan hồ sơ", "数据与日志": "Dữ liệu và nhật ký",
+        "画像概览": "Tổng quan hồ sơ", "数据管理": "Quản lý dữ liệu", "日志中心": "Trung tâm nhật ký",
     },
     "id": {
         "工具": "Alat",
@@ -418,7 +418,7 @@ TOOL_KEYS = {
         "个性化设置": "Preferensi", "服务管理": "Layanan", "手动修改": "Edit Manual",
         "演员刮削": "Scraping Aktris", "智能推荐": "Rekomendasi", "标签优化": "Pembersihan Tag",
         "重复检测": "Duplikat", "演员检测": "Pemeriksaan Aktris", "图像检测": "Pemeriksaan Gambar",
-        "画像概览": "Ringkasan Profil", "数据与日志": "Data & Log",
+        "画像概览": "Ringkasan Profil", "数据管理": "Manajemen Data", "日志中心": "Pusat Log",
     },
 }
 

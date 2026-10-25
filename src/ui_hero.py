@@ -3,7 +3,7 @@
 import os
 
 from PySide6.QtCore import Qt, QRectF, QRect, QPoint, QSize, QTimer
-from PySide6.QtGui import (QPixmap, QPainter, QColor, QLinearGradient, QFont,
+from PySide6.QtGui import (QPixmap, QPainter, QColor, QLinearGradient, QFont, QTextLayout, QFontMetrics,
                            QPainterPath, QAction)
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea,
@@ -132,6 +132,106 @@ def _apply_text_shadow(widget, blur=18, dy=2, alpha=200):
     eff.setColor(QColor(0, 0, 0, alpha))
     widget.setGraphicsEffect(eff)
     return widget
+
+
+class ElidedLabel(QLabel):
+    """最多显示 N 行，超出部分用「 ...」结尾（v1.45.3）。
+
+    为什么不用按**字数**截断（原 220 字）：详情面板宽度随窗口变化，同样 220 字
+    在宽屏 2 行、在窄屏能折成 6 行。QLabel 自己也不会多行省略。
+
+    实现：**paintEvent 里按当前像素宽度折行**（`_shown(width)`），只画前 N 行、
+    末行补「 ...」；高度固定 N 行。不在 resize 时改 text —— 首次布局控件还是默认
+    宽度，算出的省略结果会偏短（真机会只显示半行）。
+    """
+
+    def __init__(self, text="", max_lines=2, parent=None, px=12):
+        super().__init__(parent)
+        self._max_lines = max(1, int(max_lines))
+        #: v1.45.5：**逻辑像素**字号。QSS 的 `px` 会按 devicePixelRatio 放大，而
+        #: `QFont.setPixelSize()` **不随 DPI 缩放** —— 上一版直接 setPixelSize(34)，
+        #: 在 125%/150% 缩放的屏幕上标题明显变小。这里存逻辑值，绘制/度量时乘 dpr。
+        self._px = max(1, int(px))
+        self._full = (text or "").replace(chr(10), " ")
+        self.setTextFormat(Qt.PlainText)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.setToolTip(self._full)          # 悬停看全文
+        self.setMinimumHeight(int(self._eff_font_metrics().lineSpacing() * self._max_lines + 6))
+
+    # ---------- 字号（随 DPI） ----------
+    def _eff_font(self):
+        f = QFont(self.font())
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        f.setPixelSize(max(1, int(round(self._px * dpr))))
+        return f
+
+    def _eff_font_metrics(self):
+        return QFontMetrics(self._eff_font())
+
+    def setText(self, text):
+        self._full = (text or "").replace(chr(10), " ")
+        self.setToolTip(self._full)
+        self.update()
+
+    def full_text(self):
+        return self._full
+
+    def _shown(self, width):
+        """按给定像素宽度返回「最多 N 行 + 省略号」的字符串（纯函数，便于断言）。
+
+        先 `ensurePolished()`：QSS 的 `font-size` 是在 polish 阶段才写进控件字体的，
+        不调用的话 `font()` 还是默认字号，折行算出来会短一半（实测 454px 只排 20 字）。
+        """
+        fm = self._eff_font_metrics()
+        width = max(60, int(width) - 2)
+        text = self._full
+        if not text:
+            return ""
+        tl = QTextLayout(text, self.font())
+        tl.beginLayout()
+        lines = []
+        while True:
+            ln = tl.createLine()
+            if not ln.isValid():
+                break
+            ln.setLineWidth(width)
+            lines.append(ln)
+        tl.endLayout()
+        if len(lines) <= self._max_lines:
+            return text
+        last = lines[self._max_lines - 1]
+        keep = text[: last.textStart() + last.textLength()]
+        suffix = " ..."
+        cand = keep.rstrip() + suffix
+        # 只在「加省略号后**行数**仍超 N」时才丢字：不能按单行宽度判，
+        # 否则两行文本会被当成一行、砍掉一半（实测 454px 只剩 37 字）。
+        while keep and self._count_lines(cand, width) > self._max_lines:
+            keep = keep[:-1]
+            cand = keep.rstrip() + suffix
+        return cand
+
+    def _count_lines(self, text, width):
+        tl = QTextLayout(text, self._eff_font())
+        tl.beginLayout()
+        n = 0
+        while True:
+            ln = tl.createLine()
+            if not ln.isValid():
+                break
+            ln.setLineWidth(width)
+            n += 1
+        tl.endLayout()
+        return n
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        try:
+            p.setFont(self._eff_font())
+            p.setPen(self.palette().color(self.foregroundRole()))
+            p.drawText(self.rect(), int(Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap),
+                       self._shown(self.width()))
+        finally:
+            p.end()
 
 
 # ---------- 流式布局（v1.19.1 反馈 1/2：详情面板随窗口宽度自适应，避免横向滚动条） ----------
@@ -467,13 +567,16 @@ class PersonSearchDialog(QDialog):
 # ---------- 详情页 ----------
 class HeroView(QScrollArea):
     def __init__(self, media, on_open_actor=None, on_back=None, on_changed=None,
-                 on_person_replaced=None):
+                 on_person_replaced=None, on_open_actors=None):
         super().__init__()
         self.media = media
         self.on_open_actor = on_open_actor
         self.on_back = on_back
         self.on_changed = on_changed
         self.on_person_replaced = on_person_replaced   # (old_person, new_person) → 通知主窗
+        # v1.43.0（反馈 6）：「更多 → 查看演员库」。此前该菜单项是空占位
+        # （`lambda: self.on_back and None`），点了没有任何反应。
+        self.on_open_actors = on_open_actors
         self._cast_box = None
         self._body_layout = None
         self.setWidgetResizable(True)
@@ -510,8 +613,12 @@ class HeroView(QScrollArea):
 
         # 操作按钮（v1.19.1 反馈 2：播放 / 收藏 / 评分 / 更多 统一移到「标题上方」）
         bl.addLayout(self._action_row(m))
-        # 标题（v1.19.1 反馈 1：改为自动换行，窄面板不再撑出横向滚动条）
-        bl.addWidget(_label(m.get("title", ""), 34, True, "#f3d9a0", wrap=True, shadow=True))
+        # 标题（v1.45.4 反馈 1）：与简介同规则 —— **最多 2 行**，放不下「 ...」，高度锁 2 行。
+        # 长番号标题在窄面板会折 3~4 行，把下面的元数据挤走，所以这里也用 ElidedLabel。
+        _t = ElidedLabel(m.get("title", ""), max_lines=2, px=34)
+        _t.setStyleSheet("color:#f3d9a0;font-weight:bold;")
+        _apply_text_shadow(_t)
+        bl.addWidget(_t)
         # 元数据行（流式：窄面板自动换行 —— v1.19.1 反馈 1）
         meta = FlowLayout(spacing=12)
         self._meta = meta          # v1.18.0 反馈 97：评分写回后即时刷新此行
@@ -531,11 +638,14 @@ class HeroView(QScrollArea):
         meta.addWidget(_label(kind_cn, 12, False, "#d9cfbf", shadow=True))
         meta.addStretch(1)
         bl.addLayout(meta)
-        # 简介
-        plot = (m.get("plot") or "（无简介）").strip().replace("\n", " ")
-        if len(plot) > 220:
-            plot = plot[:220] + " ..."
-        bl.addWidget(_label(plot, 12, False, "#c9bdaa", wrap=True, shadow=True))
+        # 简介（v1.45.3 反馈 1）：**最多 2 行**，放不下用「 ...」收尾。
+        # 之前按**字数**截断（>220 字才截），窄面板照样折成 6 行 —— 用户截图就是这种情况；
+        # 现在按像素折行取前 2 行，且高度固定 2 行，面板不再抖动。
+        plot = (m.get("plot") or "（无简介）").strip()
+        _pl = ElidedLabel(plot, max_lines=2, px=12)
+        _pl.setStyleSheet("color:#c9bdaa;")
+        _apply_text_shadow(_pl)
+        bl.addWidget(_pl)
         # 徽章
         badges = [b for b in (m.get("quality") or "").split(",") if b]
         if badges:
@@ -660,9 +770,38 @@ class HeroView(QScrollArea):
         a2 = QAction("复制文件路径", self)
         a2.triggered.connect(self._copy_path)
         a3 = QAction("查看演员库", self)
-        a3.triggered.connect(lambda: self.on_back and None)
+        # v1.43.0（反馈 6）：这里原来是 `lambda: self.on_back and None` —— **纯占位**，
+        # 点了什么都不会发生（用户截图反馈「没有反应」）。现在接到主窗的演员库页。
+        a3.triggered.connect(self._open_actor_lib)
         menu.addAction(a1); menu.addAction(a2); menu.addAction(a3)
+        # v1.43.4（真机 app.log 抓到）：**先抓住顶层窗口再 exec**。
+        # 点「查看演员库」会 `go()` 重建页面 → 本 HeroView 在 menu.exec() 收尾前就被
+        # deleteLater 销毁，之后再 `self.window()` 就是 libshiboken 的
+        # 「Internal C++ object already deleted」RuntimeError。
+        _win = self.window()
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+        # 用**类**访问（不用 self）：此时 self 可能已被 go() 销毁，走实例访问有风险
+        HeroView._repaint_after_menu(_win)
+
+    @staticmethod
+    def _repaint_after_menu(win=None):
+        """菜单关闭后强制整窗重绘（v1.43.1 反馈 3；v1.43.4 加空值/失效兜底）。"""
+        try:
+            if win is None:
+                return
+            if hasattr(win, "_repaint_shell"):
+                win._repaint_shell()
+            else:
+                win.update()
+            win.repaint()
+        except Exception:
+            # 顶层窗口若也已被销毁，忽略即可 —— 不该为了一次重绘把异常抛给主循环
+            pass
+
+    def _open_actor_lib(self):
+        """v1.43.0（反馈 6）：「查看演员库」—— 导航到主窗的演员库页。"""
+        if self.on_open_actors:
+            self.on_open_actors()
 
     def _copy_path(self):
         QApplication.clipboard().setText(self.media.get("file_path") or "")

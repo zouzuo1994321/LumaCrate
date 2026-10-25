@@ -228,6 +228,22 @@ _INDEXES = (
     #   名称升序 深翻页 223.5ms → 7.9ms；最近添加 倒序 95.3ms → 0.0ms。
     "CREATE INDEX IF NOT EXISTS idx_wall_title ON media(sort_title COLLATE NOCASE, year DESC, id ASC)",
     "CREATE INDEX IF NOT EXISTS idx_wall_time  ON media(added_time DESC, year DESC, id ASC)",
+    # v1.43.6（审计 BUG-01）：上面两条 `idx_wall_*` 其实**从来没被用上** ——
+    # 影片墙恒带 `WHERE parent_id IS NULL`，SQLite 规划器宁可走 `idx_media_parent`
+    # 再 `USE TEMP B-TREE FOR ORDER BY`，也不选这两条（索引没有 parent_id 前缀）。
+    # 实测 5 万条：名称升序 首屏 106ms / OFFSET 30000 **1574ms**；强制
+    # `INDEXED BY idx_wall_title` 只要 0.7 / 103ms；最近添加 302 / 744ms → 0.4 / 52ms。
+    # ⇒ 复合索引**以 parent_id 打头**，让「过滤 + 排序」一次满足。
+    # 只给最常用的排序键建（其余排序仍可走主键/单列索引，代价 ~50ms 可接受）；
+    # `sort_title` 给 ASC / DESC 两条：ORDER BY 的次级键是 `year DESC, id ASC`，
+    # 正反扫同一条索引满足不了混合方向。
+    "CREATE INDEX IF NOT EXISTS idx_wallp_title  ON media(parent_id, sort_title COLLATE NOCASE, year DESC, id ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallp_title_d ON media(parent_id, sort_title COLLATE NOCASE DESC, year DESC, id ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallp_time   ON media(parent_id, added_time DESC, year DESC, id ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallp_rating ON media(parent_id, rating DESC, year DESC, id ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallp_urating ON media(parent_id, user_rating DESC, year DESC, id ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallp_play   ON media(parent_id, play_count DESC, year DESC, id ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_wallp_size   ON media(parent_id, file_size DESC, year DESC, id ASC)",
     "CREATE INDEX IF NOT EXISTS idx_media_path       ON media(file_path)",
     "CREATE INDEX IF NOT EXISTS idx_media_collection ON media(collection)",
     "CREATE INDEX IF NOT EXISTS idx_media_lib_kind   ON media(library, kind)",
@@ -236,13 +252,65 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_mp_media         ON media_people(media_id)",
     "CREATE INDEX IF NOT EXISTS idx_mp_person        ON media_people(person_id)",
     "CREATE INDEX IF NOT EXISTS idx_people_role      ON people(role_type)",
+    "CREATE INDEX IF NOT EXISTS idx_people_role_pin  ON people(role_type, pinned DESC, works DESC, name COLLATE NOCASE)",
 )
 
 
+#: v1.45.3（审计 BUG-02）：people.works / last_year 由触发器维护 ——
+#: 影视关联增删、合并人物都会自动更新，不需要在每个写路径里手动改（漏一处就脏）。
+_PEOPLE_TRIGGERS = [
+    """CREATE TRIGGER IF NOT EXISTS trg_mp_ins AFTER INSERT ON media_people
+       BEGIN
+         UPDATE people SET works = COALESCE(works, 0) + 1 WHERE id = NEW.person_id;
+         UPDATE people SET last_year = MAX(COALESCE(last_year, 0),
+                  COALESCE((SELECT year FROM media WHERE id = NEW.media_id), 0))
+          WHERE id = NEW.person_id;
+       END""",
+    """CREATE TRIGGER IF NOT EXISTS trg_mp_del AFTER DELETE ON media_people
+       BEGIN
+         UPDATE people SET works = MAX(COALESCE(works, 1) - 1, 0) WHERE id = OLD.person_id;
+         UPDATE people SET last_year = (SELECT MAX(m.year) FROM media m
+                  JOIN media_people mp ON mp.media_id = m.id
+                  WHERE mp.person_id = OLD.person_id)
+          WHERE id = OLD.person_id;
+       END""",
+]
+
+
 def _ensure_indexes(conn) -> None:
+    """幂等建索引；**有新索引落地时补一次 ANALYZE**（v1.43.6）。
+
+    为什么必须 ANALYZE：SQLite 的规划器按 `sqlite_stat1` 的估计值选索引。
+    老库的统计是「没有 parent_id 前缀索引」时留下的，新索引建好后估计值仍失真，
+    实测会出现「索引已存在但规划器还是走 TEMP B-TREE」。建完立刻重算，规划器
+    才会换到新索引上。ANALYZE 只在**首次升级**那一次跑（之后索引都在，created 为空）。
+    """
+    try:
+        have = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+    except sqlite3.Error:
+        have = set()
+    created = []
     for sql in _INDEXES:
+        name = ""
+        try:
+            name = sql.split("CREATE INDEX IF NOT EXISTS ", 1)[1].split(" ", 1)[0]
+        except Exception:
+            name = ""
         try:
             conn.execute(sql)
+        except sqlite3.Error:
+            continue
+        if name and name not in have:
+            created.append(name)
+    for sql in _PEOPLE_TRIGGERS:
+        try:
+            conn.execute(sql)
+        except sqlite3.Error:
+            pass
+    if created:
+        try:
+            conn.execute("ANALYZE")
         except sqlite3.Error:
             pass
 
@@ -263,6 +331,11 @@ _PEOPLE_NEW_COLS = {
     "source": "TEXT", "source_url": "TEXT", "scraped_at": "TEXT", "meta": "TEXT",
     # v1.10.0：演员库卡片化所需的「状态 / 收藏 / 置顶」
     "status": "TEXT", "favorite": "INTEGER DEFAULT 0", "pinned": "INTEGER DEFAULT 0",
+    # v1.45.3（审计 BUG-02）：作品数 / 最近年份**冗余成列**，由触发器维护 ——
+    # 原来它们由 JOIN+GROUP BY 现算，导致演员库首屏 420~470ms（排序必须全量算）。
+    "works": "INTEGER DEFAULT 0", "last_year": "INTEGER",
+    # v1.45.4（需求 2）：性别（female / male / 空 = 未知）；由刮削写入，也可手动改
+    "gender": "TEXT",
 }
 
 
@@ -272,9 +345,32 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if col not in existing:
             conn.execute(f"ALTER TABLE media ADD COLUMN {col} {decl}")
     ppl = {r["name"] for r in conn.execute("PRAGMA table_info(people)").fetchall()}
+    _added = []
     for col, decl in _PEOPLE_NEW_COLS.items():
         if col not in ppl:
             conn.execute(f"ALTER TABLE people ADD COLUMN {col} {decl}")
+            _added.append(col)
+    # v1.45.4（需求 2）：**一次性**回填性别 —— avbase / minnano / gfriends 三个源
+    # 本身就是「女优 / 女演员」库，来自它们的 Actor 记录可以安全认定为 female；
+    # 其余（维基、手工建的、导演）保持空 = 未知，等刮削或手动设置。
+    # 用 `PRAGMA user_version` 做标记，保证只跑一次（用户手动改成"未知"不会被反复覆盖）。
+    try:
+        _uv = conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.Error:
+        _uv = 0
+    if _uv < 1454:
+        try:
+            conn.execute("UPDATE people SET gender='female' WHERE IFNULL(gender,'')='' "
+                         "AND role_type='Actor' AND source IN ('avbase','minnano','gfriends')")
+            conn.execute("PRAGMA user_version=1454")
+        except sqlite3.Error:
+            pass
+    if "works" in _added:
+        conn.execute("UPDATE people SET works=(SELECT COUNT(*) FROM media_people mp "
+                     "WHERE mp.person_id=people.id)")
+    if "last_year" in _added:
+        conn.execute("UPDATE people SET last_year=(SELECT MAX(m.year) FROM media_people mp "
+                     "JOIN media m ON m.id=mp.media_id WHERE mp.person_id=people.id)")
 
 
 def upsert_person(name: str, role_type: str = "Actor", thumb: Optional[str] = None) -> int:
@@ -909,9 +1005,39 @@ def all_people(role_type: str = "Actor"):
         conn = get_conn()
         try:
             return [dict(r) for r in conn.execute(
-                "SELECT p.*, (SELECT COUNT(*) FROM media_people mp WHERE mp.person_id=p.id) AS works "
-                "FROM people p WHERE p.role_type=? ORDER BY works DESC, p.name", (role_type,)
+                "SELECT p.*, COALESCE(p.works,0) AS works FROM people p "
+                "WHERE p.role_type=? ORDER BY works DESC, p.name", (role_type,)
             ).fetchall()]
+        finally:
+            conn.close()
+
+
+#: v1.45.5（反馈 3）：演员库治理的清理口径
+CLEANUP_KINDS = (("orphan", "无作品（默认）"),
+                 ("nophoto", "无头像"),
+                 ("empty", "无任何资料（无作品 + 无别名 + 无生日）"),
+                 ("nogender", "无性别"))
+
+
+def people_for_cleanup(kind: str = "orphan", role_type: str = "Actor",
+                       include_fav: bool = False):
+    """演员库治理：按口径列出待清理的人（默认排除收藏/置顶）。"""
+    cond = {
+        "orphan": "COALESCE(p.works,0)=0",
+        "nophoto": "(p.photo_path IS NULL OR p.photo_path='')",
+        "empty": "COALESCE(p.works,0)=0 AND IFNULL(p.alias,'')='' AND IFNULL(p.birthday,'')=''",
+        "nogender": "IFNULL(p.gender,'')=''",
+    }.get(kind, "COALESCE(p.works,0)=0")
+    sql = ("SELECT p.id, p.name, p.role_type, p.thumb, p.photo_path, p.source, "
+           "p.scraped_at, COALESCE(p.works,0) AS works, COALESCE(p.gender,'') AS gender "
+           "FROM people p WHERE p.role_type=? AND " + cond)
+    if not include_fav:
+        sql += " AND IFNULL(p.favorite,0)=0 AND IFNULL(p.pinned,0)=0"
+    sql += " ORDER BY p.name COLLATE NOCASE"
+    with _LOCK:
+        conn = get_conn()
+        try:
+            return [dict(r) for r in conn.execute(sql, (role_type,)).fetchall()]
         finally:
             conn.close()
 
@@ -938,10 +1064,8 @@ ACTOR_STATUSES = ["现役", "退役", "未知"]
 
 # works / last_year 用 JOIN+GROUP BY 一次算完（原来是对每一行跑 2 个相关子查询，
 # 演员上千人时开销可观）。
-_PEOPLE_SELECT = ("p.*, COUNT(mp.media_id) AS works, MAX(m.year) AS last_year "
-                  "FROM people p "
-                  "LEFT JOIN media_people mp ON mp.person_id = p.id "
-                  "LEFT JOIN media m ON m.id = mp.media_id")
+_PEOPLE_SELECT = ("p.*, COALESCE(p.works, 0) AS works, p.last_year AS last_year "
+                  "FROM people p")
 
 
 def _people_having(status=None, min_works=None, cur_year=None):
@@ -970,7 +1094,7 @@ def _people_having(status=None, min_works=None, cur_year=None):
 
 
 def _people_clauses(role_type="Actor", favorite=None, pinned=None, status=None,
-                    has_photo=None, min_works=None, cur_year=None):
+                    has_photo=None, min_works=None, cur_year=None, gender=None):
     """WHERE / HAVING / 参数 **三处共用**（v1.30.0）。
 
     原来 `query_people` 与 `count_people` 各写一份构造逻辑 —— 两处一旦不同步
@@ -987,6 +1111,9 @@ def _people_clauses(role_type="Actor", favorite=None, pinned=None, status=None,
         clauses.append("IFNULL(p.pinned,0)=1")
     elif pinned is False:
         clauses.append("IFNULL(p.pinned,0)=0")
+    if gender is not None:
+        clauses.append("IFNULL(p.gender,'')=?")
+        params.append(str(gender))
     if has_photo is True:
         clauses.append("p.photo_path IS NOT NULL AND p.photo_path<>''")
     elif has_photo is False:
@@ -1003,16 +1130,17 @@ def _people_order(sort: str, asc: bool) -> str:
 
 def query_people(role_type: str = "Actor", limit: int = 0, offset: int = 0,
                  sort: str = "works", asc: bool = False, favorite=None, pinned=None,
-                 status=None, has_photo=None, min_works=None, cur_year=None):
+                 status=None, has_photo=None, min_works=None, cur_year=None, gender=None):
     """演员库查询（筛选 + 排序 + 分页）。
 
     排序恒以「置顶」优先（与旧行为一致）；`sort` 只接受白名单键。
     """
     clauses, params, having, hparams = _people_clauses(
-        role_type, favorite, pinned, status, has_photo, min_works, cur_year)
-    sql = ("SELECT " + _PEOPLE_SELECT + " WHERE " + " AND ".join(clauses) + " GROUP BY p.id")
+        role_type, favorite, pinned, status, has_photo, min_works, cur_year, gender)
+    body = "SELECT " + _PEOPLE_SELECT + " WHERE " + " AND ".join(clauses)
+    sql = "SELECT * FROM (" + body + ") p"
     if having:
-        sql += " HAVING " + " AND ".join(having)
+        sql += " WHERE " + " AND ".join(having)
     sql += _people_order(sort, asc)
     if limit and int(limit) > 0:
         sql += " LIMIT ? OFFSET ?"
@@ -1027,19 +1155,70 @@ def query_people(role_type: str = "Actor", limit: int = 0, offset: int = 0,
             conn.close()
 
 
+def orphan_people(role_type: str = "Actor", limit: int = 0, include_fav: bool = False):
+    """v1.43.0（需求 3）：**没有任何作品关联**的人物（works=0）—— 演员库清理用。
+
+    默认排除「收藏 / 置顶」的人：那是用户主动留下的，不是冗余。
+    返回 [{id, name, role_type, thumb, photo_path, source, scraped_at, works}]。
+    """
+    sql = ("SELECT p.id, p.name, p.role_type, p.thumb, p.photo_path, p.source, "
+           "p.scraped_at, COUNT(mp.media_id) AS works FROM people p "
+           "LEFT JOIN media_people mp ON mp.person_id = p.id "
+           "WHERE p.role_type=?")
+    if not include_fav:
+        sql += " AND IFNULL(p.favorite,0)=0 AND IFNULL(p.pinned,0)=0"
+    sql += " GROUP BY p.id HAVING works=0 ORDER BY p.name COLLATE NOCASE"
+    if limit:
+        sql += " LIMIT %d" % int(limit)
+    with _LOCK:
+        conn = get_conn()
+        try:
+            return [dict(r) for r in conn.execute(sql, (role_type,)).fetchall()]
+        finally:
+            conn.close()
+
+
+def delete_people(person_ids) -> int:
+    """v1.43.0（需求 3）：删除人物记录，连带清掉 media_people 关联。
+
+    **只删索引记录**：头像文件在 cache/ 下，不动；任何媒体文件更不动。
+    返回实际删除的人物条数。
+    """
+    ids = []
+    for x in (person_ids or []):
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    with _LOCK:
+        conn = get_conn()
+        try:
+            conn.execute(f"DELETE FROM media_people WHERE person_id IN ({marks})", ids)
+            cur = conn.execute(f"DELETE FROM people WHERE id IN ({marks})", ids)
+            conn.commit()
+            return int(cur.rowcount or 0)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
+
+
 def count_people(role_type: str = "Actor", favorite=None, pinned=None, status=None,
-                 has_photo=None, min_works=None, cur_year=None) -> int:
+                 has_photo=None, min_works=None, cur_year=None, gender=None) -> int:
     """`query_people` 同口径的总人数（用于「共 N 位」）。"""
     clauses, params, having, hparams = _people_clauses(
-        role_type, favorite, pinned, status, has_photo, min_works, cur_year)
-    sql = ("SELECT COUNT(*) c FROM (SELECT p.id AS pid, MAX(m.year) AS last_year, "
-           "COUNT(mp.media_id) AS works FROM people p "
-           "LEFT JOIN media_people mp ON mp.person_id = p.id "
-           "LEFT JOIN media m ON m.id = mp.media_id"
-           " WHERE " + " AND ".join(clauses) + " GROUP BY p.id")
+        role_type, favorite, pinned, status, has_photo, min_works, cur_year, gender)
+    body = "SELECT " + _PEOPLE_SELECT + " WHERE " + " AND ".join(clauses)
+    sql = "SELECT COUNT(*) c FROM (" + body + ") p"
     if having:
-        sql += " HAVING " + " AND ".join(having)
-    sql += ")"
+        sql += " WHERE " + " AND ".join(having)
     with _LOCK:
         conn = get_conn()
         try:
@@ -1051,7 +1230,7 @@ def count_people(role_type: str = "Actor", favorite=None, pinned=None, status=No
 
 def people_letter_index(role_type: str = "Actor", asc: bool = True, favorite=None,
                         pinned=None, status=None, has_photo=None, min_works=None,
-                        cur_year=None) -> dict:
+                        cur_year=None, gender=None) -> dict:
     """A-Z 导航条用的「字母 -> 该字母第一个人在列表中的下标（0 基）」映射。
 
     必须与 `query_people(sort="letter", asc=asc)` 的 ORDER BY **逐项一致**
@@ -1063,7 +1242,7 @@ def people_letter_index(role_type: str = "Actor", asc: bool = True, favorite=Non
     绝大多数要靠 romaji 兜），其余字母不出现在返回的 dict 里 → 界面画成暗色不可点。
     """
     clauses, params, having, hparams = _people_clauses(
-        role_type, favorite, pinned, status, has_photo, min_works, cur_year)
+        role_type, favorite, pinned, status, has_photo, min_works, cur_year, gender)
     letter = _ACTOR_LETTER_EXPR
     sql = ("SELECT p.id AS id, " + letter + " AS lt FROM people p "
            "LEFT JOIN media_people mp ON mp.person_id = p.id "
@@ -1390,7 +1569,7 @@ def set_person_photo(person_id: int, photo_path: str) -> None:
 
 #: 「演员检测 → 手动编辑」允许直接改的列（白名单，防止 UI 误传字段写坏库）
 _PERSON_EDITABLE = ("name", "alias", "romaji", "birthday", "status", "bio",
-                    "thumb", "photo_path", "meta", "source", "source_url")
+                    "thumb", "photo_path", "meta", "source", "source_url", "gender")
 
 
 def set_person_fields(person_id: int, **fields) -> int:
@@ -1421,7 +1600,8 @@ def set_person_fields(person_id: int, **fields) -> int:
 
 # ---------- 演员刮削 ----------
 _PERSON_FIELDS = ("name", "thumb", "bio", "photo_path", "alias", "birthday",
-                  "romaji", "source", "source_url", "scraped_at", "meta", "status")
+                  "romaji", "source", "source_url", "scraped_at", "meta", "status",
+                  "gender")
 
 
 def update_person(person_id: int, only_missing: bool = False, **fields) -> int:

@@ -26,7 +26,13 @@
     color: #ece5d8;
 }
 QWidget, QDialog { color: #ece5d8; background: transparent; }
-QMainWindow { background: transparent; }
+/* v1.43.0（反馈 5）：原来是 `background: transparent` —— 窗口**不透明**（没开
+   WA_TranslucentBackground），透明 = Qt 干脆不画这块底。中央区被 veil 自绘的磨砂层
+   盖住看不出来，但**状态栏那一条**（在中央控件之外）只有 rgba 半透明底色，
+   底下没有任何被绘制过的像素：一旦被别的窗口盖住再露出来（例如点了
+   「在资源管理器中显示」把资源管理器提到前台），局部重绘就露出未初始化的黑色。
+   ⇒ 给主窗一个**不透明**底色，半透明状态栏永远有底可叠。 */
+QMainWindow { background: #0d0b0a; }
 /* 文字控件一律透明：否则全局背景规则会给每个 QLabel 铺一块深色底 */
 QLabel { background: transparent; }
 /* 中央容器：磨砂底衬由 veil.VeilWidget 自绘（paintEvent），这里必须保持透明，
@@ -408,8 +414,10 @@ QSlider::groove:horizontal {
     height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.10);
 }
 QSlider::sub-page:horizontal { background: rgba(__ACCENT__, 0.85); border-radius: 3px; }
+/* v1.43.5（反馈 1）：滑块把手原来是正圆（16px + radius 8），用户要求改成
+   **圆角扁平方形** —— 18×12（6px 槽 + 上下各 3px margin）、radius 4。 */
 QSlider::handle:horizontal {
-    width: 16px; margin: -6px 0; border-radius: 8px;
+    width: 18px; margin: -3px 0; border-radius: 4px;
     background: #f3d9a0; border: 1px solid rgba(255, 255, 255, 0.4);
 }
 QProgressBar {
@@ -431,12 +439,45 @@ QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QScrollBar:disabled { background: transparent; }
 
+/* v1.43.2（反馈 1）：数据源列表固定只露三行，必须看得见滚轴 ——
+   全局 handle 只有 0.16 白（太淡），这里给该列表单独加粗到 0.32、
+   并把滚动条槽加一条极淡的底，明确「这里可以滚」。 */
+QListWidget#SrcSourceList QScrollBar:vertical {
+    background: rgba(255, 255, 255, 0.045);
+    width: 11px; margin: 2px; border-radius: 5px;
+}
+QListWidget#SrcSourceList QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.32);
+    border-radius: 5px; min-height: 28px;
+}
+QListWidget#SrcSourceList QScrollBar::handle:vertical:hover {
+    background: rgba(__ACCENT__, 0.85);
+}
+
 /* ---------- 状态栏 / 菜单 / 分隔 ---------- */
+/* v1.43.4（反馈 2「底部黑带」的**最终定位**）：
+   实测用户截图，那条黑带 RGB = (15,13,11)，正好是 v1.43.1 给状态栏设的
+   `#0f0d0b` —— 也就是说「变黑」已经不是重绘问题，而是**状态栏被涂成了近纯黑**：
+   它上方 veil 底衬是 (26,16,13)~(50,39,36)，一条 (15,13,11) 的实心带自然看起来
+   像「一块黑」。⇒ 状态栏改用**比底衬略亮的面板色 #1c1815**（与 QGroupBox 那种
+   「白 4.5% 叠在墨黑上」的面板感一致），既保持不透明（不依赖任何底层重绘），
+   又不会和上面的底衬断开成一条黑边。 */
 QStatusBar {
-    background: rgba(12, 10, 9, __PANEL__); color: #9a8f7d;
+    background: #1c1815; color: #a2967f;
     border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 QStatusBar::item { border: none; }
+/* v1.43.5（反馈 2）：底部版权改成**常驻 QLabel**（addPermanentWidget），
+   否则任何 showMessage 都会把它顶掉且不恢复。 */
+QLabel#FooterNote {
+    color: #9a8f7d; font-size: 11px; background: transparent;
+    padding: 0 6px 0 12px;
+}
+/* v1.44.0（需求 1）：右下临时消息（超时自动消失），与左下版权互不干扰 */
+QLabel#ToastNote {
+    color: #d4af37; font-size: 11px; background: transparent;
+    padding: 0 12px 0 12px;
+}
 QMenu {
     background: rgba(28, 24, 19, __DLG__); color: #ece5d8;
     border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; padding: 6px;
@@ -456,6 +497,12 @@ QSplitter#ActorSplitV::handle:vertical {
     margin: 0px;
 }
 QSplitter#ActorSplitH::handle:horizontal {
+    background: transparent;
+    margin: 0px;
+}
+/* v1.43.3（反馈 1）：图像检测页的「结果树 ↔ 右侧详情」也换成同款把手
+   （虚线 + 5 点，由 ui_actorcheck._GripHandle 自绘），同样透明 + 去 margin。 */
+QSplitter#ImageSplitH::handle:horizontal {
     background: transparent;
     margin: 0px;
 }
@@ -490,4 +537,20 @@ QLabel#Slogan {
    （手型光标与悬停提示在 main_window.LinkFilter 里设）。静态外观与之前完全一致。 */
 QWidget#BrandBox { background: transparent; border-radius: 8px; }
 QWidget#BrandBox:hover { background: rgba(255, 255, 255, 0.07); }
-QStatusBar:hover { background: rgba(32, 26, 23, __PANEL__); }
+QStatusBar:hover { background: #241f1b; }
+
+/* v1.46.4（反馈 1）/ v1.46.5（反馈 1）：状态栏常驻进度条 ——
+   空闲 = 空槽（只有轨道，不填色）；载入/缓存 = 主题高亮朱红 */
+QProgressBar#BusyBar {
+    background: #2a241f;
+    border: 1px solid #3a332c;
+    border-radius: 3px;
+}
+QProgressBar#BusyBar::chunk {
+    background: transparent;
+    border-radius: 3px;
+}
+QProgressBar#BusyBar[busy="true"]::chunk {
+    background: __ACCENT__;
+    border-radius: 3px;
+}

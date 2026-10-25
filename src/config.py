@@ -122,7 +122,7 @@ DEFAULT_ACTOR_PREFS = {"sort": "works", "asc": False, "filters": {}}
 WALL_FILTER_KEYS = ("favorite", "has_user_rating", "min_user_rating", "year_from", "year_to",
                     "quality", "kind", "genre", "certification", "collection", "library",
                     "genre_other", "country_other", "has_collection")
-ACTOR_FILTER_KEYS = ("favorite", "pinned", "status", "has_photo", "min_works")
+ACTOR_FILTER_KEYS = ("favorite", "pinned", "status", "has_photo", "min_works", "gender")
 
 # ---------- v1.24.0 新增偏好 ----------
 # 智能推荐：algo = normal（普通算法）/ ai（本地离线 AI 增强）；count = 一次推荐几部
@@ -252,6 +252,8 @@ ACCENT_DEFAULT = "#c0392b"
 # v1.32.0（反馈 3）：`language` —— 界面语言（19 种，见 src/i18n.py），默认基准语言简体中文。
 DEFAULT_APPEARANCE = {"mode": "磨砂玻璃", "level": "中", "accent": ACCENT_DEFAULT,
                       "show_stats": True, "show_sysmon": True,
+                      # v1.46.0（反馈 2）：演员卡是否显示 ♂/♀ 符号（默认开）
+                      "show_gender": True,
                       "language": "zh_CN"}
 
 
@@ -321,12 +323,22 @@ SCRAPER_SOURCES = [
     {"key": "minnano", "name": "www.minnano-av.com", "desc": "日本 AV 女优资料站（日文名检索，含别名/生日/身高/专属头图）"},
     {"key": "imdb",    "name": "IMDB",               "desc": "国际影人库（英文名检索，含生日/出生地/简介/头图）"},
     {"key": "avbase",  "name": "avbase.net",         "desc": "AV 检索数据库（日文名直达，含生日/身高/三围罩杯/出身地/罗马音/头图，字段最全）"},
+    # v1.43.0（需求 4）：新增三个资料源
+    {"key": "wikipedia", "name": "Wikipedia（日文）", "desc": "日文维基影人/艺人条目（生年月日/身长/三围/出身地/别名/首段简介 + 官方头图，走公开 API）"},
+    {"key": "javdb",     "name": "JavDB",            "desc": "AV 资料库（生日/身高/三围齐全；全站 Cloudflare WAF，需开启「用内置浏览器抓取」并先做站点验证）"},
 ]
 
 DEFAULT_SCRAPER = {
     "enabled": False,            # 总开关（设置页保存后生效）
-    "sources": ["avbase", "minnano", "imdb"],   # 数据源优先级（自上而下依次尝试）
-    "sources_enabled": {"minnano": True, "imdb": True, "avbase": True},
+    # 数据源优先级（自上而下依次尝试）。v1.43.0：追加 wikipedia / theporndb / javdb。
+    "sources": ["avbase", "minnano", "wikipedia", "imdb", "javdb"],
+    # v1.43.0：javdb 默认关闭 —— 全站 WAF，必须先开启「用内置浏览器抓取」并做站点验证，
+    # 否则每个人都会多一次注定失败的请求（日志噪音）。
+    "sources_enabled": {"minnano": True, "imdb": True, "avbase": True,
+                        "wikipedia": True, "javdb": False},
+    # v1.43.0（需求 4）：**头像独立源** gfriends（github.com/gfriends/gfriends）。
+    # 资料源都没给头像时按姓名补一张；纯图库，不带任何资料字段。
+    "gfriends_photo": True,
     "fill_alias": True,          # 补齐别名/爱称
     "fill_birthday": True,       # 补齐生日
     "fill_bio": True,            # 补齐简介/尺寸/出身地等说明
@@ -349,6 +361,10 @@ DEFAULT_SCRAPER = {
     # 实际抓取改走那个 WebView2 常驻会话（复用浏览器 TLS 栈与 cookie 罐）。
     "browser_scrape": False,     # 用内置浏览器抓取（需先对被拦的源点一次「站点验证」）
     "photo_dir": "",             # 头像缓存目录，空 = exe 同级 cache/people
+    # v1.46.5（反馈 2）：**其他数据源** —— 用户自填一个站点，交给内置浏览器过一次
+    # 人机校验后把 cookie 注入该 host（内置 5 个源之外、同样有 WAF 的站点用得上）。
+    "other_source_on": False,    # 「Cookie 获取」的目标是否切到自定义站点
+    "other_source_url": "",      # 自定义站点网址（可省略 https://，保存时规整）
 }
 
 
@@ -544,14 +560,26 @@ class Settings:
             for k in known:
                 if k not in order:
                     order.append(k)
+            self.scraper.pop("theporndb_token", None)   # v1.44.1：该源已删除
             self.scraper["sources"] = order
             en = self.scraper.get("sources_enabled") or {}
-            self.scraper["sources_enabled"] = {k: bool(en.get(k, True)) for k in known}
+            # v1.43.0：**新增源要按它自己的默认值**，不能一律 True ——
+            # javdb 是 WAF 站点，默认关（否则老用户升级后每个人多一次注定失败的请求）。
+            # 老配置里没有的键 → 取 DEFAULT_SCRAPER 的默认；已有的键 → 尊重用户值。
+            _def_en = DEFAULT_SCRAPER.get("sources_enabled") or {}
+            self.scraper["sources_enabled"] = {
+                k: (bool(en[k]) if k in en else bool(_def_en.get(k, True)))
+                for k in known}
             # v1.40.0（反馈 3）：代理开关归一。老配置**没有这个键** → 走 default False
             # （直连）；这是有意的行为变更：老用户升级后刮削默认不再偷偷套系统代理，
             # 想用代理请在「刮削策略 → 使用代理」里打开。脏值（"0"/"no"）也在这里判假。
             self.scraper["proxy_enabled"] = _truthy(
                 self.scraper.get("proxy_enabled", False), False)
+            # v1.46.5（反馈 2）：「其他数据源」—— 脏值归一 + 网址去空白（不做联网校验）。
+            self.scraper["other_source_on"] = _truthy(
+                self.scraper.get("other_source_on", False), False)
+            self.scraper["other_source_url"] = str(
+                self.scraper.get("other_source_url") or "").strip()
         # 后台任务指向的库可能已被删除（尤其是本次升级清掉的内置库）→ 复位为「全部库」
         self._drop_missing_background_library()
 
@@ -1027,7 +1055,7 @@ class Settings:
     # ---------- 外观 ----------
     def set_appearance(self, mode: str = None, level: str = None, accent: str = None,
                        show_stats: bool = None, show_sysmon: bool = None,
-                       language: str = None):
+                       show_gender: bool = None, language: str = None):
         if mode in APPEARANCE_MODES:
             self.appearance["mode"] = mode
         if level in GLASS_LEVELS:
@@ -1037,6 +1065,8 @@ class Settings:
         # v1.28.0（反馈 1）：侧栏「数据统计」/「实时状态」显隐
         if show_stats is not None:
             self.appearance["show_stats"] = bool(show_stats)
+        if show_gender is not None:
+            self.appearance["show_gender"] = bool(show_gender)
         if show_sysmon is not None:
             self.appearance["show_sysmon"] = bool(show_sysmon)
         # v1.32.0（反馈 3）：界面语言。**必须走 i18n.normalize()** ——

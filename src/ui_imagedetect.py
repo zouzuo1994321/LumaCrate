@@ -29,6 +29,7 @@ from PySide6.QtGui import QPixmap
 import database as db
 import imagedetect as idm
 import applog
+from ui_actorcheck import _GripSplitter   # v1.43.3：同款「虚线 + 5 点」拖动条
 
 
 class ImageScanWorker(QThread):
@@ -226,8 +227,11 @@ class ImageDetectPage(QWidget):
         v.addWidget(self.bar)
 
         # --- 结果 + 右侧详情 ---
-        split = QSplitter(Qt.Horizontal)
-        split.setHandleWidth(6)
+        # v1.43.3（反馈 1）：与「演员检测」页统一成「虚线 + 5 点」把手
+        # （`_GripSplitter` / `_GripHandle` 自绘；把手 14px 才画得下 5 点竖排）。
+        split = _GripSplitter(Qt.Horizontal)
+        split.setObjectName("ImageSplitH")
+        split.setHandleWidth(14)
 
         self.tree = QTreeWidget()
         # v1.32.0（反馈 1）：「AI 建议」列只在选了 AI 算法时才加（`_fill_tree` 里动态设表头）

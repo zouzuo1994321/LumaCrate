@@ -91,6 +91,33 @@ def playable_media(media) -> bool:
     return os.path.splitext(fp)[1].lower() in _VIDEO_EXTS
 
 
+class BusyBus(QObject):
+    """v1.46.4（反馈 1）：全局「忙」信号 —— 载入 / 缓存 / 扫描都能上报给状态栏进度条。
+
+    用法：`set_busy(-1)` = 不确定进度（高亮循环），`set_busy(0..100)` = 确定进度，
+    `set_busy(None)` = 空闲（灰色常驻）。任何模块都能 import 后直接上报，
+    不必去拿 MainWindow 引用。
+    """
+    changed = Signal(object, str)      # progress: None / -1 / 0..100；text: 说明
+
+
+BUSY = BusyBus()
+
+# v1.46.8（反馈）：**最短可见时长**。
+# 根因：状态栏进度条的高亮只在 `set_busy(-1)` → `set_busy(None)` 之间亮着，而虚拟网格
+# 建一屏卡（40~54 张）只要几毫秒 → 朱红还没画出来就被回落成空槽，用户只觉得
+# 「载入/缓存时的高亮没了」（截图上永远只看到空槽）。这里给「点亮」一个下限，
+# 任何一次上报都保证看得见；仍在 1.5s 无更新时正常回落。
+BUSY_MIN_MS = 420
+
+
+def set_busy(progress=None, text=""):
+    try:
+        BUSY.changed.emit(progress, text or "")
+    except Exception:
+        pass
+
+
 def _qt_alive(*objs) -> bool:
     """这些 Qt 对象的 C++ 实体是否还在。
 
@@ -578,6 +605,9 @@ ACTOR_FILTER_SPECS = [
                               ("未收藏", {"favorite": False})]),
     ("pinned", "置顶", [("全部", None), ("已置顶", {"pinned": True}), ("未置顶", {"pinned": False})]),
     ("status", "状态", [("全部", None)] + [(s, {"status": s}) for s in db.ACTOR_STATUSES]),
+    # v1.45.4（需求 2）：性别筛选（female / male / 空=未知）
+    ("gender", "性别", [("全部", None), ("女 ♀", {"gender": "female"}),
+                        ("男 ♂", {"gender": "male"}), ("未知", {"gender": ""})]),
     ("photo", "头像", [("全部", None), ("有头像", {"has_photo": True}),
                        ("无头像", {"has_photo": False})]),
 ]
@@ -1006,7 +1036,7 @@ class LazyGrid(QWidget):
     refresh_requested = Signal()      # v1.16.0：随机排序下点「刷新一下」
 
     def __init__(self, fetch, make_card, total, kind="media", batch=60, unit="部",
-                 refreshable=False, parent=None):
+                 refreshable=False, parent=None, virtual=False):
         super().__init__(parent)
         self._fetch = fetch                 # (offset, limit) -> list
         self._make = make_card              # item -> QWidget
@@ -1014,12 +1044,37 @@ class LazyGrid(QWidget):
         self._loaded = 0
         self.batch = max(1, int(batch))
         self.unit = unit
+        self._kind = kind
         self._cols = self.COLS_BY_KIND.get(kind, 8)
         self._busy = False
         self._scrollbar = None
         self._error = ""
         self._jump_target = None      # v1.30.0：A-Z 跳转目标下标
         self._jump_cb = None
+
+        # ---- v1.46.0：**窗口化渲染（虚拟化）** ----
+        # 通用基础能力：只给「当前可视区 ± overscan 行」建控件，其余用上下两个
+        # 固定高度的占位 widget 撑出滚动条高度。10 万条时控件数量恒定（约 30 张），
+        # 滚动/跳转时按需换窗口。`virtual=False` 时行为与旧版完全一致（增量建卡）。
+        self._virtual = bool(virtual) and self._total > 0
+        self._row_h = 0
+        self._overscan = 3
+        self._window = (-1, -1)
+        self._win_key = None
+        self._viewport = None
+        self._built = []
+        self._cards = {}      # 虚拟化：index -> 卡片控件（绝对定位）
+        self._body_w = 0
+        self._card_h = 0
+        self._card_w = 0
+        self._card_w_max = 0     # v1.46.6：卡片可伸展到的最大宽（定宽卡片 = 自身）
+        self._cell_w = 0         # v1.46.6：当前实际卡片宽
+        self._pitch = 0.0        # v1.46.6：每列占的横向格宽（= body 宽 / 列数）
+        self._cols_now = 0     # 当前生效列数（虚拟模式按宽度自适应）
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(16)
+        self._scroll_timer.timeout.connect(self._render)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -1081,15 +1136,66 @@ class LazyGrid(QWidget):
             self.more_btn.setVisible(False)
         else:
             self._update_head()
-            QTimer.singleShot(0, self._pump)     # 首批延后到事件循环，先让页面画出来
+            QTimer.singleShot(0, self._render if self._virtual else self._pump)
 
     # ------ 对外 ------
-    def attach_scroll(self, scrollbar):
-        """挂上外层滚动条：滚到接近底部时自动继续加载。"""
+    def attach_scroll(self, scrollbar, viewport=None):
+        """挂上外层滚动条：滚到接近底部时自动继续加载（虚拟模式下改为换窗口）。"""
+        if scrollbar is None:
+            return
+        # v1.46.7：幂等 —— 页面显式挂一次 + 网格自愈（_adopt_scroll）可能各挂一次，
+        # 重复连接会让 valueChanged 回调跑两遍（换卡两次、白费一次查库）。
+        if self._scrollbar is scrollbar and self._viewport is not None:
+            return
+        old = self._scrollbar
+        if old is not None and old is not scrollbar and _qt_alive(self, old):
+            try:
+                old.valueChanged.disconnect(self._on_scroll)
+            except (RuntimeError, TypeError):
+                pass
         self._scrollbar = scrollbar
         scrollbar.valueChanged.connect(self._on_scroll)
+        if self._virtual:
+            self._viewport = viewport
+            if viewport is None:
+                try:
+                    viewport = scrollbar.parentWidget()
+                except Exception:
+                    viewport = None
+                self._viewport = viewport
+            if self._viewport is not None:
+                self._viewport.installEventFilter(self)
+                self._vh = max(1, self._viewport.height())
+            QTimer.singleShot(0, self._render)
+            # 再补一次：首次布局时视口宽度可能还是 0/旧值（列数会算少），
+            # 60ms 后布局稳定，再重排一次即可拿到正确列数。
+            QTimer.singleShot(60, self._render)
+
+    def _adopt_scroll(self):
+        """v1.46.7：没被页面显式 `attach_scroll()` 时，自己沿父链找最近的 QScrollArea。
+
+        为什么必须有这条兜底：虚拟化靠「滚动条 value + 视口高」决定渲染哪几行。
+        拿不到滚动条时 `y` 恒为 0、视口高退回 700 兜底 → 只渲染前几行，滚下去空白。
+        任何「把网格套进容器再塞给页面」的新写法都会静默触发这个症状，所以在网格
+        自己这一层兜住，比要求每个页面都记得传引用可靠（v1.46.7 的「卡在 48 部」）。
+        """
+        if self._scrollbar is not None or not self._virtual:
+            return
+        try:
+            p = self.parentWidget()
+            while p is not None:
+                if isinstance(p, QScrollArea):
+                    self.attach_scroll(p.verticalScrollBar(), p.viewport())
+                    return
+                p = p.parentWidget()
+        except RuntimeError:
+            return
 
     def _on_scroll(self, value):
+        if self._virtual:
+            if not self._scroll_timer.isActive():
+                self._scroll_timer.start()
+            return
         if self._loaded >= self._total:
             return
         sb = self._scrollbar
@@ -1124,6 +1230,14 @@ class LazyGrid(QWidget):
         if not self._toolbar_ready:
             self.head.setVisible(False)
             return
+        if self._virtual:
+            # v1.46.0：窗口化渲染 —— 不再有「加载进度」，直接给总数
+            self.head.setVisible(True)
+            self.count_lbl.setText(f"共 {self._total} {self.unit}（仅渲染可视区）")
+            self.bar.setVisible(False)
+            self.more_btn.setVisible(False)
+            self.refresh_btn.setVisible(self._refreshable)
+            return
         if self._loaded >= self._total:
             self.head.setVisible(True)
             self.count_lbl.setText(f"共 {self._total} {self.unit}（已全部载入）")
@@ -1133,7 +1247,238 @@ class LazyGrid(QWidget):
             self.head.setVisible(False)     # 加载中不显示计数/进度读条
             self.more_btn.setVisible(True)
 
+    # ---------- v1.46.0：窗口化渲染（虚拟化） ----------
+    def _clear_cards(self):
+        if not _qt_alive(self, self._grid):
+            return
+        while self._grid.count():
+            it = self._grid.takeAt(0)
+            w = it.widget() if it is not None else None
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._built = []
+
+    def _safe_fetch(self, off, lim):
+        try:
+            return self._fetch(int(off), int(lim)) or []
+        except Exception as e:
+            self._error = f"{type(e).__name__}: {e}"
+            applog.log(f"读取列表失败：{self._error}", "error")
+            return []
+
+    def _render(self):
+        """只渲染「可视区 ± overscan 行」——**绝对定位 + 增量换卡**（v1.46.1）。
+
+        为什么不用 QGridLayout / 先清后建：那样每次换窗口都要**删掉全部卡片再重建**，
+        真实显示上会闪一下（用户反馈的「滚轴时页面一闪闪 / 消失」）；高频滚动时
+        每 tick 清一次，观感更差。
+
+        现在的做法（通用，任何 `virtual=True` 的网格都适用）：
+          1. `_body` 高度 = 总行数 × 行高 → 滚动条由它撑开，不再用上下占位；
+          2. 每张卡 `setGeometry(...)` 绝对定位，**不走布局**；
+          3. 新进入窗口的卡**先建出来**，再删离开窗口的卡 —— 任何一帧都有内容。
+        """
+        if not self._virtual or not _qt_alive(self, self._body):
+            return
+        # v1.46.7：兜底自愈 —— 页面没把滚动条交过来时，先沿着父链自己去认领。
+        self._adopt_scroll()
+        # v1.46.2：页面已切走（不可见 / body 不再是自己的孩子）时**绝不建卡**，
+        # 否则 setParent 失败会让卡片变成顶层窗口（空白小窗的第二个来源）。
+        try:
+            if not self.isVisible():
+                return
+            if self._body.parent() is not self:
+                return
+        except RuntimeError:
+            return
+        sb, vp = self._scrollbar, self._viewport
+        if sb is not None and not _qt_alive(self, sb):
+            return
+        if vp is not None and not _qt_alive(self, vp):
+            return
+        vh = max(120, int(getattr(vp, "height", lambda: 700)()) if vp is not None else 700)
+        y = int(sb.value()) if sb is not None else 0
+        if self._row_h <= 0:
+            rows = self._safe_fetch(0, 1)
+            if not rows:
+                return
+            probe = self._make(rows[0])
+            probe.setParent(self._body)
+            probe.hide()
+            probe.adjustSize()
+            self._row_h = max(1, probe.height() + 12)
+            self._card_h = max(1, probe.height())
+            # ★ v1.46.6：卡片宽取**最小宽**（`minimumWidth`），不是 `width()` ——
+            #   v1.46.6 起演员卡宽度可伸缩（没有 setFixedSize），未布局时的 width()
+            #   会返回默认值 640，列数会算成 1 列。`minimumWidth()` 对定宽卡片
+            #   （PosterCard 的 setFixedSize）返回的就是那个定宽，两边都正确。
+            self._card_w = max(1, probe.minimumWidth() or probe.width())
+            self._card_w_max = max(self._card_w, probe.maximumWidth() or self._card_w)
+            probe.deleteLater()
+            self._window = (-1, -1)
+            self._win_key = None
+        rh = self._row_h
+
+        # —— 先算宽度 / 列数 / 卡片宽 / 水平偏移 ——
+        # ⚠ 顺序至关重要（v1.46.6 修的真缺陷）：`total_rows`、`r0/r1`、`body` 高度
+        # 都必须用**最终的列数**。v1.46.5 及以前先用标称列数（actor=6）算出总行数、
+        # 再把 cols 换成自适应值（1680 宽下是 5）→ body 高度按 6 列算（990 行），
+        # 内容实际需要 1188 行 → **最后 987 位演员永远滚不到**（真机实测：拉到底
+        # 索引停在 4949，应为 5936）；同时 r0/r1 的行窗口与摆位坐标系也不自洽。
+        # 宽度以**视口**为准（页面左右边距各 20）：body 与"摆卡片用的宽度"永远一致。
+        # 再留 20px 余量：页面里的工具条（筛选条）自身最小宽比 body 大 18px
+        # （内部滚动区），不留这 20 就会把 host 顶宽 → 底部冒一条横向滚动条（实测 hmax=16）。
+        vpw = int(vp.width()) if vp is not None else int(self.width())
+        width = max(200, vpw - 40 - 20)
+        gap0 = 12
+        cw = self._card_w or 217
+        cmax = max(cw, getattr(self, "_card_w_max", cw))
+        # 能放几列：以**最小卡宽**为准（保证每张卡至少 cw 宽）
+        cols_fit = max(1, int((width + gap0) // (cw + gap0)))
+        cols_fit = min(cols_fit, 24)
+        cols = min(cols_fit, max(1, self._total))
+        # 只有「条目足够排满一整行」时才把卡片/间距拉开铺满整行。
+        # 条目太少时（如只有 3 张卡）硬铺满会让卡片被拉开到 1/3 屏一格，观感像散了架
+        # —— 这种情况下保持常规间距、从左边排起（右侧空白是"东西本来就少"的正常表现）。
+        stretch = self._total >= cols_fit
+        if stretch:
+            # 均分：pitch = 每列占的横向格宽；卡片在格内居中，剩余给列间距。
+            pitch = width / float(cols)
+            cell_w = int(round(pitch - gap0))
+            cell_w = max(cw, min(cmax, cell_w))
+        else:
+            cell_w = cw
+            pitch = float(cw + gap0)
+        self._cols_now = cols
+        self._cell_w = cell_w
+        self._pitch = pitch
+        self._x_off = 0            # 由 pitch 决定，不再需要整体居中偏移
+
+        total_rows = max(1, (self._total + cols - 1) // cols)
+        r0 = max(0, y // rh - self._overscan)
+        r1 = min(total_rows - 1, (y + vh) // rh + self._overscan)
+
+        # 判重键必须包含「行窗口 + 列数 + 卡片宽 + 可用宽」：任何一项变化都要重排，
+        # 否则窗口拉宽后卡片还停在旧列位。
+        _key = (r0, r1, cols, width, cell_w)
+        if _key == getattr(self, "_win_key", None) and self._cards:
+            return
+        self._win_key = _key
+        self._window = (r0, r1)
+
+        try:
+            self._body.setFixedSize(width, total_rows * rh)
+        except RuntimeError:
+            return
+
+        want = []
+        for row in range(r0, r1 + 1):
+            base = row * cols
+            if base >= self._total:
+                break
+            want.append((row, base, min(cols, self._total - base)))
+
+        # v1.46.8（反馈）：滚动换窗也要点亮状态栏进度条（文案「缓存中」）。
+        # 原来只有「首屏首次建卡」会 set_busy(-1)，之后无论滚到哪都不再上报 →
+        # 用户在列表里滚动换页时进度条永远是空槽，观感就是「载入/缓存的高亮没了」。
+        # 点亮放在**查库之前**：查库（search_media + 演职员批量查询）才是耗时大头，
+        # 等建完卡再点亮的话，慢查询期间进度条还是空的。
+        _old_idx = set(self._cards)
+        set_busy(-1, "载入中" if not _old_idx else "缓存中")
+        rows = self._safe_fetch(r0 * cols, (r1 - r0 + 1) * cols)
+        made = {}
+        i = 0
+        for row, base, n in want:
+            for c in range(n):
+                if i >= len(rows):
+                    break
+                idx = base + c
+                if idx in self._cards:
+                    made[idx] = self._cards[idx]
+                else:
+                    try:
+                        w = self._make(rows[i])
+                    except Exception as e:
+                        # v1.46.2：建卡失败也要留下**等高占位**，否则该格子是一个洞
+                        # （用户截图里行与行之间那道"间隙"就是这种洞 + 被裁的高度）
+                        applog.log(f"建卡失败 idx={idx}: {e}", "error")
+                        w = QFrame()
+                        w.setObjectName("CardPlaceholder")
+                    w.setParent(self._body)
+                    made[idx] = w
+                i += 1
+        for row, base, n in want:
+            for c in range(n):
+                idx = base + c
+                w = made.get(idx)
+                if w is not None:
+                    try:
+                        h = w.height() or (rh - 12)
+                        # 高度用于实测行高时可能偏小（还没应用固定尺寸），兜底取 rh-12
+                        if h < 20:
+                            h = rh - 12
+                        # 横向：第 c 列占据 [c*pitch, (c+1)*pitch)，卡片在格内居中 →
+                        # 左侧零留白、右侧零留白，且列间距随窗口宽度连续变化。
+                        x = int(round(c * pitch + (pitch - cell_w) / 2.0))
+                        # ⚠ 必须用**绝对行坐标** row*rh：`_body` 有整个列表那么高，
+                        # 滚动条滚的是整页；若按 (row-r0) 摆，卡片会全堆在 body 顶部，
+                        # 滚到中间就是一片空白（用户截图的「间隙 / 消失」正是这个）。
+                        w.setGeometry(x, row * rh, cell_w, h)
+                        w.show()
+                    except RuntimeError:
+                        pass
+        for idx, w in list(self._cards.items()):
+            if idx not in made:
+                try:
+                    w.hide()
+                    w.deleteLater()
+                except RuntimeError:
+                    pass
+        self._cards = made
+        self._built = list(made.values())
+        self._loaded = min(self._total, (r1 + 1) * cols)
+        # 滚动换窗：有新卡片要建 → 报「缓存中」，让状态栏进度条点亮
+        # （NULL 到 NULL 之间的最短可见时长由 MainWindow._on_busy 保证）。
+        set_busy(None)
+        self._update_head()
+
+    def wheelEvent(self, ev):
+        """v1.46.6（反馈 1）：虚拟网格里，滚轮一律转交给页面视口。
+
+        为什么需要：卡片是 `_body` 的子控件，用户在卡片上滚滚轮时事件先到卡片；
+        Qt 的「未处理就冒泡给父控件」只在**真实窗口事件**那条链上由
+        `QWidgetWindow::handleWheelEvent` 完成，层级一深就容易到不了 QScrollArea
+        → 观感就是「只显示第一批，怎么滚都不再载入」。
+        这里在网格这一层截住并直接投给视口，行为与「光标停在页面空白处滚动」一致。
+        """
+        try:
+            vp = self._viewport
+            if self._virtual and vp is not None and _qt_alive(self, vp):
+                QApplication.sendEvent(vp, ev)
+                ev.accept()
+                return
+        except Exception:
+            pass
+        super().wheelEvent(ev)
+
+    def eventFilter(self, obj, ev):
+        if self._virtual and ev.type() == QEvent.Resize:
+            try:
+                self._body_w = max(120, obj.width())   # 视口宽度变了 → 重算列宽
+                self._cols_now = 0
+                self._window = (-1, -1)
+                self._win_key = None
+                if not self._scroll_timer.isActive():
+                    self._scroll_timer.start(0)
+            except Exception:
+                pass
+        return super().eventFilter(obj, ev)
+
     def _pump(self):
+        if self._virtual:
+            self._render()
+            return
         if self._busy or self._loaded >= self._total:
             return
         # v1.24.1：页面可能已被换掉（定时器仍会触发），C++ 实体没了就安静退出，
@@ -1141,6 +1486,9 @@ class LazyGrid(QWidget):
         if not _qt_alive(self, self._grid):
             return
         self._busy = True
+        # v1.46.8（反馈）：每一批都点亮状态栏（原来只有首批 `_loaded <= 0` 会上报，
+        # 「加载更多」/ 滚动续载全程是空槽 → 用户以为高亮没了）。
+        set_busy(-1, "载入中" if self._loaded <= 0 else "缓存中")
         try:
             rows = self._fetch(self._loaded, self.batch) or []
         except Exception as e:
@@ -1155,6 +1503,8 @@ class LazyGrid(QWidget):
         if not rows:
             self._total = self._loaded          # 到底了
         self._busy = False
+        if self._loaded >= self._total:
+            set_busy(None)
         if self._error:
             self.count_lbl.setText(f"读取出错：{self._error}")
             self.more_btn.setVisible(False)
@@ -1177,8 +1527,14 @@ class LazyGrid(QWidget):
 
     # ------ A-Z 字母索引跳转（v1.30.0 反馈 4） ------
     def card_at(self, index):
-        """第 index 个条目对应的卡片控件（还没建到那里则返回 None）。"""
-        if index is None or not (0 <= index < self._loaded):
+        """第 index 个条目对应的卡片控件（不在当前窗口 / 还没建到则返回 None）。"""
+        if index is None:
+            return None
+        if self._virtual:
+            # v1.46.1：卡片已改为绝对定位（`_cards` 字典），不再挂在 QGridLayout 里
+            w = self._cards.get(int(index))
+            return w if w is not None and _qt_alive(self, w) else None
+        if not (0 <= index < self._loaded):
             return None
         if not _qt_alive(self, self._grid):
             return None
@@ -1186,6 +1542,21 @@ class LazyGrid(QWidget):
         return it.widget() if it is not None else None
 
     def jump_to(self, index, callback=None):
+        if self._virtual:
+            # 虚拟模式无需补载：直接把滚动条设到目标行，重算窗口即可
+            try:
+                row = max(0, int(index)) // max(1, int(self._cols_now or self._cols))
+                rh = self._row_h or 300
+                if self._scrollbar is not None:
+                    self._scrollbar.setValue(int(row * rh))
+                self._window = (-1, -1)
+                self._win_key = None
+                self._render()
+                if callback is not None:
+                    callback(self.card_at(int(index)))
+            except Exception:
+                pass
+            return
         """滚动定位到第 `index` 个条目。
 
         目标位置如果还没被渲染出来，这里会**分批补载**（每批交还一次事件循环，
@@ -1964,6 +2335,9 @@ class ActorCard(QFrame):
     #: 卡片定高。子类 `DirectorCard` 的事实区比演员卡少两行，覆盖此值压低卡片
     #: （v1.28.1 反馈：导演去掉「简介」后卡片高度同步收紧）。
     CARD_H = ACTOR_CARD_H
+    #: v1.46.6：宽度区间（LazyGrid 在区间内均分，铺满整行）。
+    CARD_W_MIN = ACTOR_CARD_W
+    CARD_W_MAX = ACTOR_CARD_W + 84
 
     def __init__(self, person, on_open, on_fav, on_pin, on_select, main_win):
         super().__init__()
@@ -1977,10 +2351,32 @@ class ActorCard(QFrame):
         self._phase = 0.0
         self._timer = None
         self.setObjectName("ActorCard")
-        self.setFixedSize(ACTOR_CARD_W, self.CARD_H)
+        # v1.46.6（反馈 2 / 3）：宽度**不再写死**。
+        # 演员卡是「头像 + 文字行」的横排卡，没有海报那种固定比例，宽度天然可伸缩；
+        # 写死 236 的后果是 LazyGrid 只能按 236 一档一档跳，1920 下 6 列只占 1476
+        # 而可用宽 1682 —— 两侧各空 94px（用户截图里那两条红框）。
+        # 现在：高度仍然锁死（行高不变），宽度给一个 [236, 320] 的区间，
+        # 由 LazyGrid 按可用宽度均分 → 永远铺满整行、两侧零留白。
+        self.setFixedHeight(self.CARD_H)
+        self.setMinimumWidth(self.CARD_W_MIN)
+        self.setMaximumWidth(self.CARD_W_MAX)
+        self.resize(self.CARD_W_MIN, self.CARD_H)
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_StyledBackground, False)
         self._build()
+
+    def _place_buttons(self):
+        """把 ☆ / ▲ 贴到卡片**当前宽度**的右上角（v1.46.6，卡片宽度可伸缩）。"""
+        try:
+            w = int(self.width()) or self.CARD_W_MIN
+            self._star.move(w - 10 - _ACTOR_BTN, 10)
+            self._pin.move(w - 10 - _ACTOR_BTN * 2 - 4, 10)
+        except (RuntimeError, AttributeError):
+            pass
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._place_buttons()
 
     def _build(self):
         v = QVBoxLayout(self)
@@ -2004,6 +2400,18 @@ class ActorCard(QFrame):
         self._name = QLabel(self.person.get("name", ""))
         self._name.setStyleSheet("font-size:15px;font-weight:700;color:#f3e8d6;")
         self._name.setWordWrap(True)
+        # v1.45.4（需求 2）：姓名前加性别符号 —— ♂ 蓝 / ♀ 粉；未知不显示，保持卡片干净
+        _g = (str(self.person.get("gender") or "")).strip().lower()
+        _show_g = bool(cfg.get_settings().appearance.get("show_gender", True))
+        _sym, _gc = (("♂", "#5aa9e6") if _g == "male"
+                     else ("♀", "#e6739f") if _g == "female" else ("", ""))
+        if not _show_g:
+            _sym = ""
+        if _sym:
+            _nm = (self.person.get("name", "") or "").replace("&", "&amp;")                 .replace("<", "&lt;").replace(">", "&gt;")
+            self._name.setTextFormat(Qt.RichText)
+            self._name.setText(
+                '<span style="color:%s;font-size:16px;">%s</span> %s' % (_gc, _sym, _nm))
         col.addWidget(self._name)
         self._status_badge = QLabel()
         self._status_badge.setFixedHeight(16)
@@ -2039,8 +2447,10 @@ class ActorCard(QFrame):
             b.setCursor(Qt.PointingHandCursor)
             b.setToolTip(tip)
             b.clicked.connect(slot)
-        self._star.move(ACTOR_CARD_W - 10 - _ACTOR_BTN, 10)
-        self._pin.move(ACTOR_CARD_W - 10 - _ACTOR_BTN * 2 - 4, 10)
+        # v1.46.6：☆/▲ 是**绝对定位**的浮动按钮，不能再按写死的 ACTOR_CARD_W 摆 ——
+        # 卡片宽度现在会随窗口伸缩（236~320），按老坐标摆会飘到卡片中间。
+        # 统一走 `_place_buttons()`：按**当前实际宽度**贴右上角，resize 时重摆。
+        self._place_buttons()
         self._star.raise_()
         self._pin.raise_()
 
@@ -2762,6 +3172,9 @@ class LinkFilter(QObject):
 
 
 class MainWindow(QMainWindow):
+    #: v1.44.0：底部临时消息（跨线程安全）
+    toast_requested = Signal(str, int)
+
     def __init__(self, logo_path=None):
         super().__init__()
         self._logo_path = logo_path
@@ -2855,10 +3268,14 @@ class MainWindow(QMainWindow):
         if os.environ.get("LMC_NO_BACKDROP") == "1":
             self._backdrop_info = {"ok": False, "method": "none", "detail": "disabled"}
             return self._backdrop_info
+        # ★ v1.43.2（反馈 2「查明变黑原因」）：主窗口**不再启用系统级 backdrop**。
+        #   根因见 `backdrop.apply_plain_dark()` 的注释：Win11 Mica/Acrylic 由 DWM
+        #   在窗口背后合成、并作用于 Qt 不绘制的边框区；窗口失活时切成近黑配色，
+        #   底部就会出现一条黑带（点「在资源管理器中显示」后尤其明显）。
+        #   而 `veil.py` 的实测早就证明系统级模糊在 Qt 窗口上透不出来 —— 零收益。
+        #   ⇒ 保留深色标题栏 + 圆角，清掉所有系统背景材质；磨砂仍由 veil 自绘。
         try:
-            self._backdrop_info = backdrop.apply_backdrop(
-                self, s.appearance.get("mode", "磨砂玻璃"),
-                s.appearance.get("level", "中"))
+            self._backdrop_info = backdrop.apply_plain_dark(self)
         except Exception as e:
             self._backdrop_info = {"ok": False, "method": "none", "detail": str(e)}
         return self._backdrop_info
@@ -2907,10 +3324,14 @@ class MainWindow(QMainWindow):
             w = min(w, avail.width())
             h = min(h, avail.height())
             self.resize(w, h)
+            # v1.46.3（需求 2）：默认 1920×1080，最小 1680×960；
+            # 屏幕装不下时按可用区域钳制，避免窗口大于桌面。
+            self.setMinimumSize(min(1680, avail.width()), min(960, avail.height()))
             self.move(avail.x() + max(0, (avail.width() - w) // 2),
                       avail.y() + max(0, (avail.height() - h) // 2))
         else:
             self.resize(w, h)
+            self.setMinimumSize(1680, 960)
 
     # ---------- 构建 ----------
     def _build(self):
@@ -2938,8 +3359,143 @@ class MainWindow(QMainWindow):
         sb.setToolTip(f"点击访问作者 GitHub 主页\n{ver.AUTHOR_URL}")
         self._footer_link = LinkFilter(ver.AUTHOR_URL, self)   # 留着引用，否则会被 GC
         sb.installEventFilter(self._footer_link)
-        sb.showMessage(
-            f"{ver.FULL_VERSION}  |  {ver.COPYRIGHT}  |  {ver.LICENSE_NOTE}")
+        # ★ v1.44.0（用户拍板：左下常驻 + 右下临时消息加超时）：
+        #   上一版把版权放到**右下**常驻，是为避开 showMessage 的覆盖；用户要求
+        #   版权回**左下**、临时消息放**右下**并自动消失。做法：**彻底不用
+        #   showMessage**，改成两个常驻 QLabel：
+        #     · `_footer_lbl`（stretch=1、左对齐）→ 占满左侧，版权永远在最左；
+        #     · `_toast_lbl`（右对齐）→ `_toast()` 写入，QTimer 到点清空。
+        #   这样任何操作都顶不掉版权，也不必去给 13 处调用逐个改超时。
+        self._footer_lbl = QLabel(
+            f"{ver.FULL_VERSION}　|　{ver.COPYRIGHT}　|　{ver.LICENSE_NOTE}")
+        self._footer_lbl.setObjectName("FooterNote")
+        self._footer_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._footer_lbl.setCursor(Qt.PointingHandCursor)
+        self._footer_lbl.setToolTip(f"点击访问作者 GitHub 主页\n{ver.AUTHOR_URL}")
+        self._footer_lbl.installEventFilter(self._footer_link)
+        sb.addPermanentWidget(self._footer_lbl, 1)     # stretch=1 → 左侧铺满、文字靠左
+
+        self._toast_lbl = QLabel("")
+        self._toast_lbl.setObjectName("ToastNote")
+        self._toast_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._toast_lbl.setVisible(False)
+        sb.addPermanentWidget(self._toast_lbl, 0)      # 固定在右下
+
+        # v1.46.4（反馈 1）：信息栏右侧**常驻**灰色进度条；有载入/缓存时高亮
+        self._busy_bar = QProgressBar()
+        self._busy_bar.setObjectName("BusyBar")
+        self._busy_bar.setTextVisible(False)
+        self._busy_bar.setFixedSize(110, 6)
+        self._busy_bar.setRange(0, 1)
+        self._busy_bar.setValue(0)
+        self._busy_bar.setProperty("busy", False)
+        self._busy_bar.setToolTip("载入 / 缓存进度（空闲时为空槽）")
+        sb.addPermanentWidget(self._busy_bar, 0)
+        BUSY.changed.connect(self._on_busy)
+        # v1.46.8：记录「高亮点亮时刻」，用于最短可见时长（否则一闪而过看不见）
+        self._busy_on_at = 0.0
+        self._busy_idle_timer = QTimer(self)
+        self._busy_idle_timer.setSingleShot(True)
+        self._busy_idle_timer.timeout.connect(lambda: self._on_busy(None, ""))
+
+
+
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._clear_toast)
+        self.toast_requested.connect(self._show_toast)  # 跨线程发信号 → 自动排队回主线程
+
+    # ---------- 状态栏进度条（v1.46.4）----------
+    def _on_busy(self, progress, text=""):
+        """None=空闲；-1=不确定进度（高亮循环）；0..100=确定进度。"""
+        bar = getattr(self, "_busy_bar", None)
+        if bar is None:
+            return
+        try:
+            if progress is None:
+                # v1.46.8（反馈）：**最短可见时长**。
+                # 虚拟网格建一屏卡（40~54 张）只要几毫秒，`set_busy(-1)` 后紧跟
+                # `set_busy(None)` → 朱红还没绘制出来就被回落成空槽，用户看到
+                # 的永远是「空槽」，就会认为「载入/缓存高亮没了」。点亮不足
+                # BUSY_MIN_MS 时推迟回落（定时器到点会再进本函数，那时已够时长）。
+                if self._busy_on_at:
+                    left = BUSY_MIN_MS - int((time.monotonic() - self._busy_on_at) * 1000)
+                    if left > 0:
+                        self._busy_idle_timer.start(left)
+                        return
+                self._busy_on_at = 0.0
+                bar.setRange(0, 1)
+                bar.setValue(0)
+                bar.setToolTip("载入 / 缓存进度（空闲时为空槽）")
+                active = False
+            elif isinstance(progress, (int, float)) and progress < 0:
+                bar.setRange(0, 0)          # 不确定态：Qt 自己画循环块
+                bar.setToolTip(text or "载入 / 缓存中…")
+                active = True
+            else:
+                pct = max(0, min(100, int(progress)))
+                bar.setRange(0, 100)
+                bar.setValue(pct)
+                bar.setToolTip("%s %d%%" % (text or "载入 / 缓存中", pct))
+                active = True
+            if active and not self._busy_on_at:
+                self._busy_on_at = time.monotonic()
+            if bool(bar.property("busy")) != active:
+                bar.setProperty("busy", active)
+                bar.style().unpolish(bar)
+                bar.style().polish(bar)
+            # v1.46.8（反馈，**这是「高亮没了」的第二层根因**）：
+            # `update()` 只是往事件队列里排一个重绘请求，要等事件循环回来才画。
+            # 而 `LazyGrid._render()` 紧接着就**同步查库**（真库 4.8 万片时实测 >1s），
+            # 期间事件循环被完全卡住 → 进度条的高亮根本没机会画出来；等查完再画时，
+            # 已经 `set_busy(None)` 回落成空槽了。用户看到的就是「只会显示空槽」。
+            # `repaint()` 同步绘制，只刷 110×6 这个小控件（微秒级），代价可忽略，
+            # 而且能保证「点亮」在阻塞开始之前就已经落在屏幕上。
+            try:
+                bar.repaint()
+            except Exception:
+                bar.update()
+            if active:
+                # 兜底：1.5s 没有后续更新就自动回落，避免高亮卡住
+                self._busy_idle_timer.start(1500)
+            else:
+                self._busy_idle_timer.stop()
+        except Exception:
+            pass
+
+    def busy(self, progress=None, text=""):
+        set_busy(progress, text)
+
+
+    # ---------- 底部临时消息（v1.44.0）----------
+    def _toast(self, msg: str, ms: int = 4000):
+        """右下角临时消息（**永不覆盖左下版权**，到点自动清空）。
+
+        走信号投递：扫描/刮削的进度回调来自工作线程，直接碰控件会崩；
+        Signal 的 AutoConnection 会自动排队到主线程执行。
+        """
+        try:
+            self.toast_requested.emit(str(msg or ""), int(ms))
+        except Exception:
+            pass
+
+    def _show_toast(self, msg: str, ms: int):
+        try:
+            if not msg:
+                self._clear_toast()
+                return
+            self._toast_lbl.setText(msg)
+            self._toast_lbl.setVisible(True)
+            self._toast_timer.start(max(800, int(ms)))
+        except Exception:
+            pass
+
+    def _clear_toast(self):
+        try:
+            self._toast_lbl.setText("")
+            self._toast_lbl.setVisible(False)
+        except Exception:
+            pass
 
     def _build_sidebar(self):
         side = QFrame(); side.setObjectName("Sidebar"); side.setFixedWidth(186)
@@ -3240,7 +3796,7 @@ class MainWindow(QMainWindow):
         # v1.24.0（反馈 5）：入口名称由「设置」改为「工具」（内容没变，只是叫法对上了）
         settings = QPushButton("工具"); settings.setObjectName("Ghost")
         settings.setToolTip("工具（原「设置」）：个性化 / 画像概览 / 演员刮削 / 智能推荐 / "
-                            "服务管理 / 重复检测 / 数据与日志")
+                            "服务管理 / 重复检测 / 元数据管理")
         settings.clicked.connect(self._open_settings)
         about = QPushButton("关于"); about.setObjectName("Ghost")
         about.clicked.connect(lambda: AboutDialog(self).exec())
@@ -3254,6 +3810,13 @@ class MainWindow(QMainWindow):
 
     # ---------- 导航 ----------
     def go(self, builder, push=True):
+        # v1.46.1：切页时收起残留的悬停提示（tooltip 是独立顶层窗口，
+        # 页面被替换后它不会自己消失，看起来就像"切页弹了个窗"）
+        try:
+            from PySide6.QtWidgets import QToolTip
+            QToolTip.hideText()
+        except Exception:
+            pass
         widget = builder()
         if widget is None:      # 构建器返回空（例如内部已自行跳转）时直接忽略，避免 addWidget(None) 崩溃
             return
@@ -3261,7 +3824,15 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(widget)
         self.stack.setCurrentWidget(widget)
         if old:
+            # v1.46.2：removeWidget 只是"摘出栈"，不会隐藏也不会销毁 ——
+            # 被摘下的页面会变成**无父顶层窗口**（用户截到的那个空白「流明盒」小窗）。
             self.stack.removeWidget(old)
+            try:
+                old.hide()
+                old.setParent(None)
+                old.deleteLater()
+            except RuntimeError:
+                pass
         if push:
             self._nav = self._nav[:self._nav_i + 1]
             self._nav.append(builder)
@@ -3297,8 +3868,31 @@ class MainWindow(QMainWindow):
         target = getattr(body_widget, "lazy_grid", None)
         if target is None and hasattr(body_widget, "attach_scroll"):
             target = body_widget
+        # v1.46.7（反馈）：页面把网格**又包了一层容器**时，上面两条都取不到 target。
+        # "演员/导演详情页 → 全部作品"就是这种写法（`v.addWidget(self._grid(works))`
+        # 之后再 `self._page(None, w)`，w 是普通 QWidget，既没有 lazy_grid 属性、
+        # 也没有 attach_scroll 方法）→ 滚动条**从未挂上**。虚拟网格拿不到 scrollbar
+        # 与 viewport，`y` 恒为 0、视口高退回 700 兜底 → 永远只渲染前 5~6 行
+        # （8 列 ≈ 40~48 张），滚下去全是空白 —— 用户看到的「卡在 48 部不显示」。
+        # 这里在容器内递归找出网格（一个页面只应有一个）。
+        if target is None:
+            try:
+                found = body_widget.findChildren(LazyGrid)
+            except Exception:
+                found = []
+            if found:
+                target = found[0]
         if target is not None:
-            target.attach_scroll(scroll.verticalScrollBar())
+            # v1.46.3：网格页一律不要横向滚动条 —— 卡片按视口宽重排即可，
+            # 出现横向条只会让底部多一条、右侧留白（用户截图）。
+            try:
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                # 竖条常驻：否则"无竖条→body 变高→竖条出现→视口窄 18px"，
+                # 会把 body 顶出 18px，底部又多一条横向条（v1.46.3 实测）。
+                scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+            except Exception:
+                pass
+            target.attach_scroll(scroll.verticalScrollBar(), scroll.viewport())
         return scroll
 
     def _h1(self, text):
@@ -3326,15 +3920,21 @@ class MainWindow(QMainWindow):
                           actor_crew=c.get("actors", []), director_crew=c.get("directors", []))
 
     def _grid(self, items):
-        """已备好数据的小列表（最近播放等）：同样走增量网格，避免一次性建大量控件。"""
+        """已备好数据的小列表（最近播放 / 演员全部作品等）：走增量网格。
+
+        v1.45.3（反馈 3）：`_crewed()` 改为**按批**计算 —— 原来先对整份列表跑
+        `cast_crew_map_ex(ids)` + `parts_counts(ids)`，演员「全部作品」里像
+        「未知演员」这种有 **5,143 部**，两个 IN 查询一次塞 5 千个参数，点开就要等几秒。
+        现在每批（LazyGrid 一屏 ~48 部）只查这几个 id，首屏立刻出来。
+        """
         items = list(items or [])
         if not items:
             w = QWidget(); v = QVBoxLayout(w)
             v.addWidget(QLabel("（暂无内容。点击右上角「＋ 扫描媒体库」选择含 nfo 的目录）"))
             return w
-        pairs = self._crewed(items)
-        return LazyGrid(lambda off, lim: pairs[off:off + lim], self._poster_card,
-                        len(pairs), kind="media")
+        # v1.46.0：演员「全部作品」可能有几千部 → 走窗口化渲染（控件数与总数无关）
+        return LazyGrid(lambda off, lim: self._crewed(items[off:off + lim]),
+                        self._poster_card, len(items), kind="media", virtual=True)
 
     def _wall_page(self, title, base=None, unit="部"):
         """影片墙：**分页读取 + 增量渲染 + 筛选 + 排序**（v1.14.0，反馈 1/2/3/4/8）。
@@ -3363,8 +3963,9 @@ class MainWindow(QMainWindow):
             return self._crewed(rows)
 
         total = db.count_media(top_only=True, **filt)
+        # v1.46.0：影片墙走窗口化渲染（10 万条也只建可视区 ±2 行）
         grid = LazyGrid(fetch, self._poster_card, total, kind="media", unit=unit,
-                        refreshable=random_mode)
+                        refreshable=random_mode, virtual=True)
 
         if random_mode:
             def reshuffle():
@@ -3412,6 +4013,7 @@ class MainWindow(QMainWindow):
         return HomeListView(on_open_actor=self._open_actor, on_open_media=self._open_media,
                             on_hover_media=self._backdrop_from_media,
                             on_changed=self._refresh_stats,
+                            on_open_actors=lambda: self.go(self._view_actors),
                             on_person_replaced=lambda old, new: self._after_person_replaced(old, new))
 
     def _backdrop_from_media(self, m):
@@ -3609,7 +4211,7 @@ class MainWindow(QMainWindow):
                                 on_pin=self._toggle_person_pin, on_select=self._select_card,
                                 main_win=self)
 
-        grid = LazyGrid(fetch, make, total, kind="actor", unit="位")
+        grid = LazyGrid(fetch, make, total, kind="actor", unit="位", virtual=True)
 
         def rebuild():
             cfg.get_settings().set_actor_prefs(bar.sort(), bar.asc(), bar.filters())
@@ -4129,7 +4731,7 @@ class MainWindow(QMainWindow):
                              on_pin=self._toggle_person_pin, on_select=self._select_card,
                              main_win=self)
 
-        grid = LazyGrid(fetch, make, total, kind="actor", unit="位")
+        grid = LazyGrid(fetch, make, total, kind="actor", unit="位", virtual=True)
 
         def rebuild():
             cfg.get_settings().set_actor_prefs(bar.sort(), bar.asc(), bar.filters())
@@ -4227,7 +4829,15 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(widget)
         self.stack.setCurrentWidget(widget)
         if old:
+            # v1.46.2：removeWidget 只是"摘出栈"，不会隐藏也不会销毁 ——
+            # 被摘下的页面会变成**无父顶层窗口**（用户截到的那个空白「流明盒」小窗）。
             self.stack.removeWidget(old)
+            try:
+                old.hide()
+                old.setParent(None)
+                old.deleteLater()
+            except RuntimeError:
+                pass
             old.deleteLater()      # v1.14.0：原来只 remove 不回收，切多次会堆积页面
         self._selected_card = None
 
@@ -4331,6 +4941,7 @@ class MainWindow(QMainWindow):
         self.set_backdrop(m.get("fanart") or m.get("poster"))
         self.go(lambda: HeroView(media, on_open_actor=self._open_actor,
                                  on_back=self._back, on_changed=self._refresh_stats,
+                                 on_open_actors=lambda: self.go(self._view_actors),
                                  on_person_replaced=lambda old, new: self._after_person_replaced(old, new)))
 
     def _play_media(self, media):
@@ -4341,7 +4952,7 @@ class MainWindow(QMainWindow):
             if m.get("id") is not None:
                 db.mark_played(m["id"])     # 与详情页播放口径一致：计入「最近播放 / 观看次数」
                 m["play_count"] = (m.get("play_count") or 0) + 1
-            self.statusBar().showMessage(res.get("msg", "已开始播放"))
+            self._toast(res.get("msg", "已开始播放"))
         else:
             QMessageBox.warning(self, "播放失败", res.get("msg", "无法打开播放器"))
 
@@ -4353,7 +4964,7 @@ class MainWindow(QMainWindow):
             return
         new = db.toggle_favorite(mid)
         media["favorite"] = new
-        self.statusBar().showMessage("已加入收藏" if new else "已取消收藏")
+        self._toast("已加入收藏" if new else "已取消收藏")
         self._refresh_stats()          # 只刷新左下角统计与侧边栏计数，不重建当前页
 
     def _open_actor(self, person):
@@ -4370,7 +4981,7 @@ class MainWindow(QMainWindow):
         old_name = (old_person or {}).get("name") or "原演员/导演"
         new_name = (new_person or {}).get("name") or "所选人"
         try:
-            self.statusBar().showMessage(f"已把本片「{old_name}」替换为「{new_name}」")
+            self._toast(f"已把本片「{old_name}」替换为「{new_name}」")
         except Exception:
             pass
 
@@ -4397,19 +5008,19 @@ class MainWindow(QMainWindow):
         items = db.search_media(kw, person=person, top_only=True)
         title = f"搜索：{self.search.text().strip() or '（空）'}"
         self.go(lambda: self._page(title, self._grid(items)))
-        self.statusBar().showMessage(f"搜索到 {len(items)} 条结果")
+        self._toast(f"搜索到 {len(items)} 条结果")
 
     def _scan(self):
         root = QFileDialog.getExistingDirectory(self, "选择媒体库根目录")
         if not root:
             return
-        self.statusBar().showMessage(f"正在扫描: {root}")
+        self._toast(f"正在扫描: {root}")
         # 顶栏的「扫描媒体库」不指定库名 → 反查这个目录属于哪个媒体库，好把进度环挂到它旁边
         name = self._lib_for_path(root)
         if name:
             self._lib_ring(name, True, 0, f"正在扫描：{root}")
         self._worker = ScanWorker([root], library_name=name)
-        self._worker.progress.connect(lambda m: self.statusBar().showMessage(m))
+        self._worker.progress.connect(lambda m: self._toast(m))
         self._worker.tick.connect(
             lambda d, t, m, N=name: N and self._lib_ring(N, True, (100 * d / t) if t else 0, m))
         self._worker.live.connect(self._on_scan_live)
@@ -4440,13 +5051,13 @@ class MainWindow(QMainWindow):
                 self, "提示",
                 f"媒体库「{lib['name']}」尚未设置媒体文件夹，请先右键「编辑」添加。")
             return
-        self.statusBar().showMessage(
+        self._toast(
             f"正在扫描：{lib['name']}（{self._MODE_CN.get(mode, mode)}）")
         applog.log(f"扫描：{lib['name']} mode={mode} paths={paths}")
         name = lib["name"]
         self._lib_ring(name, True, 0, f"正在扫描「{name}」…")
         self._worker = ScanWorker(paths, library_name=name, mode=mode)
-        self._worker.progress.connect(lambda m: self.statusBar().showMessage(m))
+        self._worker.progress.connect(lambda m: self._toast(m))
         # v1.24.0（反馈 11）：进度环跟着扫描走 —— 库名旁边转圈 + 显示百分比
         self._worker.tick.connect(
             lambda d, t, m: self._lib_ring(name, True, (100 * d / t) if t else 0, m))
@@ -4481,13 +5092,13 @@ class MainWindow(QMainWindow):
             f"（磁盘上的文件本身不会被改动）。\n\n确定继续？",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
-        self.statusBar().showMessage(f"正在检查失效记录：{lib['name']}")
+        self._toast(f"正在检查失效记录：{lib['name']}")
         # v1.24.0（反馈 11）：失效检查也算「该库正在刷新」→ 进度环转起来（无总数 → 转圈态）
         name = lib["name"]
         self._lib_ring(name, True, 0, f"正在检查失效记录：{name}")
         self._purge_worker = PurgeWorker(name, paths)
         self._purge_worker.progress.connect(
-            lambda m, N=name: (self.statusBar().showMessage(m),
+            lambda m, N=name: (self._toast(m),
                                self._lib_ring(N, True, 0, m)))
         self._purge_worker.done.connect(
             lambda c, nm=lib["name"]: self._on_purge_done(c, nm))
@@ -4577,6 +5188,15 @@ class MainWindow(QMainWindow):
         cur = self.stack.currentWidget()
         if isinstance(cur, HomeListView):
             self.go(self._view_home)
+        else:
+            # v1.46.0：性别符号开关变化 → 当前若是演员/导演库（或影片墙）就地重建
+            try:
+                inner = cur.widget() if isinstance(cur, QScrollArea) else None
+                _lg = getattr(inner, "lazy_grid", None) if inner is not None else None
+                if _lg is not None and getattr(_lg, "_kind", "") == "actor":
+                    self.go(self._view_actors)
+            except Exception:
+                pass
 
     # ---------- 后台扫描任务 ----------
     def _start_bg_task(self):
@@ -4649,10 +5269,51 @@ class MainWindow(QMainWindow):
             self.go(self._nav[self._nav_i], push=False)
         else:
             self.go(self._view_home)
-        self.statusBar().showMessage("已刷新")
+        self._toast("已刷新")
+
+    def paintEvent(self, e):
+        """v1.43.4（反馈 2 · 彻底修）：先给整窗铺一层**不透明底**，再走默认绘制。
+
+        为什么 QSS 的 `QMainWindow{background:...}` 还不够：状态栏、中央控件之外的
+        像素只有在「QSS 样式确实覆盖到」时才有底色；样式表重载瞬间、子控件局部重绘、
+        或者某些 DPI / 主题组合下，Qt 可能只重绘子控件区域，**没被覆盖的窗口表面
+        就是未初始化的黑**。这里自己 fillRect 一次，任何空隙都落在一个确定的深色上。
+        """
+        try:
+            _p = QPainter(self)
+            _p.fillRect(self.rect(), QColor(13, 11, 10))
+            _p.end()
+        except Exception:
+            pass
+        super().paintEvent(e)
+
+    def changeEvent(self, e):
+        """v1.43.0（反馈 5）：「在资源管理器中显示」后底部变黑。
+
+        根因是 **QMainWindow 原先 `background: transparent` + 窗口不透明** ——
+        状态栏那条半透明底色下面根本没有被绘制过的像素；外部窗口（资源管理器）
+        盖住再露出来时 Qt 只做局部重绘，未初始化区域就露出黑色。
+        QSS 已改成不透明底色，这里再补一道保险：激活状态变化后主动整窗重绘一次
+        （只做 update()，不阻塞；事件循环下一轮合并重绘）。
+        """
+        try:
+            if e.type() == QEvent.ActivationChange:
+                QTimer.singleShot(0, self._repaint_shell)
+        except Exception:
+            pass
+        super().changeEvent(e)
+
+    def _repaint_shell(self):
+        """整窗 + 状态栏 + 底衬一起重绘（v1.43.0）。"""
+        for w in (getattr(self, "veil", None), self.centralWidget(),
+                  self.statusBar(), self):
+            try:
+                if w is not None:
+                    w.update()
+            except Exception:
+                pass
 
     def closeEvent(self, e):
-        """关闭窗口时停掉后台定时器与扫描线程，确保彻底退出、不留后台进程。"""
         t = getattr(self, "_bg_timer", None)
         if t is not None:
             try:

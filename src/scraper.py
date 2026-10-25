@@ -258,7 +258,9 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 
 SOURCE_NAMES = {"minnano": "www.minnano-av.com", "imdb": "IMDB",
-                "avbase": "avbase.net"}
+                "avbase": "avbase.net", "javdb": "JavDB",
+                "wikipedia": "Wikipedia（日文）",
+                "gfriends": "gfriends（头像）"}
 
 MINNANO_BASE = "https://www.minnano-av.com/"
 IMDB_BASE = "https://www.imdb.com/"
@@ -768,7 +770,10 @@ def minnano_fetch(url: str, timeout=15, proxy="") -> dict:
         aid = m.group(1)
 
     data = {"source": "minnano", "source_url": url, "name": "", "photo_url": "",
-            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {}, "status": ""}
+            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {},
+            "status": "", "gender": ""}
+    # v1.45.4（需求 2）：性别 —— 优先「性別/性别」字段，其次 女優/男優 词
+    data["gender"] = _gender_of(locals().get("flat") or locals().get("text") or "")
 
     # 姓名：优先页面主标题（h1/h2），其次 <title>，都要剥掉站内后缀与括号罗马音
     for pat in (r"<h1[^>]*>(.*?)</h1>", r"<h2[^>]*>(.*?)</h2>",
@@ -902,6 +907,8 @@ def imdb_fetch(url: str, timeout=15, proxy="") -> dict:
     text = http_get(url, timeout, proxy, referer=IMDB_BASE)
     data = {"source": "imdb", "source_url": url, "name": "", "photo_url": "",
             "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {}}
+    # v1.45.4（需求 2）：性别 —— 优先「性別/性别」字段，其次 女優/男優 词
+    data["gender"] = _gender_of(locals().get("flat") or locals().get("text") or "")
 
     # 页面内嵌 JSON-LD（最稳）
     for m in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
@@ -979,7 +986,10 @@ def avbase_fetch(url: str, timeout=15, proxy="") -> dict:
     外加罗马音（姓名后的假名注音）与 DMM 头图。字段最全的一个源。"""
     text = http_get(url, timeout, proxy, referer=AVBASE_BASE)
     data = {"source": "avbase", "source_url": url, "name": "", "photo_url": "",
-            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {}, "status": ""}
+            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {},
+            "status": "", "gender": ""}
+    # v1.45.4（需求 2）：性别 —— 优先「性別/性别」字段，其次 女優/男優 词
+    data["gender"] = _gender_of(locals().get("flat") or locals().get("text") or "")
 
     mh = re.search(r"</head\s*>", text, re.I)
     body = text[mh.end():] if mh else text
@@ -1041,11 +1051,407 @@ def avbase_fetch(url: str, timeout=15, proxy="") -> dict:
     return data
 
 
+# ---------------------------------------------------------------- wikipedia（v1.43.0）
+# 日文维基：AV 女优 / 影人条目覆盖率高，字段干净（生年月日 / 身長 / スリーサイズ / 出身地），
+# 且有官方 API（无需解析整页 HTML）。搜索用 list=search，取详情用 revisions|pageimages
+# 一次拿全（wikitext + 头图）。
+WIKI_BASE = "https://ja.wikipedia.org/"
+WIKI_API = WIKI_BASE + "w/api.php"
+
+
+def _wiki_plain(s: str) -> str:
+    """去 wiki 标记（模板 / 链接 / ref / 粗斜体），得到纯文本。"""
+    s = s or ""
+    s = re.sub(r"<ref[^>]*>.*?</ref>", "", s, flags=re.S | re.I)
+    s = re.sub(r"<ref[^>]*/>", "", s, flags=re.I)
+    s = re.sub(r"\{\{[^{}]*\}\}", "", s)
+    s = re.sub(r"\[\[(?:[^|\]]*\|)?([^\]]*)\]\]", r"\1", s)
+    s = re.sub(r"'{2,}", "", s)
+    s = re.sub(r"<[^>]+>", "", s)
+    return squeeze(s)
+
+
+def wikipedia_search(name: str, timeout=15, proxy="") -> list:
+    """按姓名检索日文维基条目；只收「标题含姓名 / 姓名含标题」的结果。"""
+    q = urllib.parse.quote(name or "")
+    url = (f"{WIKI_API}?action=query&list=search&srsearch={q}&srlimit=6"
+           f"&srnamespace=0&format=json&formatversion=2")
+    d = json.loads(http_get(url, timeout, proxy, referer=WIKI_BASE))
+    out = []
+    for it in ((d.get("query") or {}).get("search") or []):
+        t = (it.get("title") or "").strip()
+        if not t:
+            continue
+        if name and not (name in t or t in name):
+            continue
+        out.append({"name": t,
+                    "url": WIKI_BASE + "wiki/" + urllib.parse.quote(t.replace(" ", "_"))})
+    return out[:3]
+
+
+def wikipedia_fetch(url: str, timeout=15, proxy="") -> dict:
+    """取 wikitext + 头图，交给 `_wiki_parse` 解析。"""
+    title = urllib.parse.unquote(url.rsplit("/wiki/", 1)[-1]).replace("_", " ")
+    params = urllib.parse.urlencode({
+        "action": "query", "prop": "revisions|pageimages",
+        "rvprop": "content", "rvslots": "main",
+        "piprop": "thumbnail", "pithumbsize": 600,
+        "titles": title, "format": "json", "formatversion": 2,
+    })
+    d = json.loads(http_get(f"{WIKI_API}?{params}", timeout, proxy, referer=WIKI_BASE))
+    page = ((d.get("query") or {}).get("pages") or [{}])[0]
+    revs = page.get("revisions") or []
+    wt = ""
+    if revs:
+        wt = ((revs[0].get("slots") or {}).get("main") or {}).get("content") or ""
+    thumb = ((page.get("thumbnail") or {}).get("source") or "")
+    return _wiki_parse(title, wt, thumb, url)
+
+
+def _gender_of(text: str) -> str:
+    """v1.45.4（需求 2）：从页面文本判性别 → "female" / "male" / ""（未知）。
+
+    优先看「性別 / 性别」字段（维基信息框、部分站点资料表都有）；
+    没有就退回职业词：出现「女優 → 女性」、「男優 → 男性」。
+    ⚠ 顺序很重要：男演员页面常提到女演员名字，所以**先看性別字段**，
+    没有字段时才用职业词，且「男優」优先于「女優」判断。
+    """
+    t = text or ""
+    m = re.search(r"性\s*[別别]\s*(?:[:：=]|\|)?\s*(女性|男性|女|男)", t)
+    if m:
+        return "female" if m.group(1).startswith("女") else "male"
+    if "男優" in t:
+        return "male"
+    if "女優" in t:
+        return "female"
+    return ""
+
+
+def _wiki_parse(title: str, wt: str, thumb: str = "", url: str = "") -> dict:
+    """纯函数：wikitext → {birthday / meta / alias / romaji / bio / photo_url}。
+
+    单独抽出来是为了**可离线断言**（冒烟里塞一段真实结构的 wikitext 即可），
+    不必联网。两条实测坑都记在下面。
+    """
+    # ⚠ v1.43.0 实测坑 ①：直接对**原始 wikitext** 搜 `(\d{4})年(\d{1,2})月(\d{1,2})日`
+    #   会先命中 <ref> 里的引用日期（三上悠亜 被解析成 2019-01-14，真实生日 1993-08-16）。
+    #   ⇒ 先剥掉 <ref>…</ref>，再按「信息框字段 → 首段年月日」的顺序找。
+    wt_noref = re.sub(r"<ref[^>]*>.*?</ref>", "", wt or "", flags=re.S | re.I)
+    wt_noref = re.sub(r"<ref[^>]*/>", "", wt_noref, flags=re.I)
+    flat = _wiki_plain(wt_noref)
+
+    data = {"source": "wikipedia", "source_url": url, "name": title, "photo_url": "",
+            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {},
+            "status": "", "gender": ""}
+    # v1.45.4（需求 2）：维基信息框一般有「性別 = 女性」，没有就退回职业词
+    data["gender"] = _gender_of(flat)
+
+    def _field(name_pat):
+        m = re.search(name_pat + r"\s*=\s*([^\n]{1,80})", wt_noref)
+        if not m:
+            return ""
+        v = _wiki_plain(m.group(1)).strip()
+        v = re.split(r"[|}\n]", v)[0].strip()
+        if not v or "{{" in v or "}}" in v:
+            return ""
+        return v
+
+    # ⚠ v1.43.0 实测坑 ②：wikitext 开头是 **{{Infobox YouTube personality}}**（约 1.2KB），
+    #   `_wiki_plain` 去不掉这种跨行模板 → 纯文本前 600 字全是信息框字段，
+    #   首段里的「1993年〈平成5年〉8月16日」根本没进搜索窗。
+    #   ⇒ 以**首个加粗姓名**为锚点截取首段。
+    lead_src = ""
+    ml = re.search(r"'''([^']{1,40})'''", wt_noref)
+    if ml:
+        lead_src = _wiki_plain(wt_noref[ml.start(): ml.start() + 2500])
+        disp = ml.group(1).strip()
+        if disp:
+            data["name"] = disp
+
+    m = re.search(r"生年月日\s*=\s*\{\{生年月日と年齢\s*\|\s*(\d{4})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})",
+                  wt_noref)
+    if not m:
+        m = re.search(r"(?:birth_date|生年月日)\s*=\s*\{\{\s*(?:dts|生年月日と年齢)\s*"
+                      r"\|\s*(\d{4})\s*\|\s*(\d{1,2})\s*\|\s*(\d{1,2})", wt_noref, re.I)
+    if not m:
+        # 首段写法：「1993年〈平成5年〉8月16日」
+        m = re.search(r"(\d{4})年(?:〈[^〉]{1,12}〉)?(\d{1,2})月(\d{1,2})日",
+                      lead_src or flat[:600])
+    if m:
+        data["birthday"] = "%04d-%02d-%02d" % (int(m.group(1)), int(m.group(2)),
+                                               int(m.group(3)))
+
+    h = _field(r"身長")
+    if re.fullmatch(r"\d{2,3}", h or ""):
+        data["meta"]["身高"] = h + "cm"
+    sc3 = _field(r"スリーサイズ")
+    if sc3:
+        data["meta"]["尺寸"] = sc3[:40]
+    bp = _field(r"出身地")
+    if bp:
+        data["meta"]["出身地"] = bp[:40]
+    bt = _field(r"血液型")
+    if re.fullmatch(r"[ABO]{1,2}", bt or ""):
+        data["meta"]["血型"] = bt
+    al = _field(r"別名義?") or _field(r"本名")
+    if al:
+        data["alias"] = al[:60]
+
+    # 读音：`'''三上悠亜'''（みかみ ゆあ、本名：…` —— 先剥掉括号里的 ref/模板再取假名，
+    # 否则「（」到「）」中间夹着几条引用，正则够不着。
+    if ml:
+        after = _wiki_plain(wt_noref[ml.end(): ml.end() + 600])
+        mk = re.match(r"\s*（\s*([ぁ-んァ-ヶー 　]{2,20})", after)
+        if mk:
+            data["romaji"] = mk.group(1).strip()
+
+    data["photo_url"] = thumb or ""
+
+    _bio_src = lead_src or flat
+    if _bio_src:
+        lead = _bio_src.split("。")[0] if "。" in _bio_src else _bio_src[:200]
+        lead = lead.strip()[:200]
+    else:
+        lead = ""
+    bits = []
+    if data["birthday"]:
+        bits.append("生日 " + data["birthday"])
+    for k in ("身高", "尺寸", "出身地"):
+        if data["meta"].get(k):
+            bits.append(f"{k} {data['meta'][k]}")
+    data["bio"] = (" ｜ ".join(bits) if bits else lead)[:300]
+    data["meta"].setdefault("简介来源", "wikipedia")
+    return data
+
+
+# ---------------------------------------------------------------- JavDB（v1.43.0）
+# JavDB 全站挂 Cloudflare WAF（本机实测首页也回挑战页）：无头请求默认拿不到正文。
+# 接入方式与既有架构一致 —— 走 `http_get`；被 WAF 拦时它自己会抛「命中反爬挑战页」，
+# 上层日志会提示去开「用内置浏览器抓取」并用站点验证过一次。
+JAVDB_BASE = "https://javdb.com/"
+
+
+def javdb_search(name: str, timeout=15, proxy="") -> list:
+    url = JAVDB_BASE + "search?q=" + urllib.parse.quote(name or "") + "&f=actor"
+    text = http_get(url, timeout, proxy, referer=JAVDB_BASE)
+    out, seen = [], set()
+    for m in re.finditer(r'href="(/actors/[^"]+)"[^>]*>(.*?)</a>', text, re.S | re.I):
+        href, inner = m.group(1), m.group(2)
+        nm = squeeze(strip_tags(inner))
+        if not nm or href in seen:
+            continue
+        seen.add(href)
+        out.append({"name": nm, "url": _absolute(href, JAVDB_BASE)})
+    return out[:5]
+
+
+def javdb_fetch(url: str, timeout=15, proxy="") -> dict:
+    text = http_get(url, timeout, proxy, referer=JAVDB_BASE)
+    flat = squeeze(strip_tags(text))
+    data = {"source": "javdb", "source_url": url, "name": "", "photo_url": "",
+            "alias": "", "birthday": "", "romaji": "", "bio": "", "meta": {}, "status": ""}
+    # v1.45.4（需求 2）：性别 —— 优先「性別/性别」字段，其次 女優/男優 词
+    data["gender"] = _gender_of(locals().get("flat") or locals().get("text") or "")
+    mt = re.search(r"<title[^>]*>(.*?)</title>", text, re.S | re.I)
+    if mt:
+        data["name"] = re.split(r"[|｜]", squeeze(strip_tags(mt.group(1))))[0].strip()
+    mb = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", flat)
+    if mb:
+        data["birthday"] = "%04d-%02d-%02d" % (int(mb.group(1)), int(mb.group(2)),
+                                               int(mb.group(3)))
+    mh = re.search(r"身長\s*[：:]?\s*(\d{2,3})\s*cm", flat)
+    if mh:
+        data["meta"]["身高"] = mh.group(1) + "cm"
+    ms = re.search(r"(?:スリーサイズ|三围)\s*[：:]?\s*B(\d{2,3})[^\d]{0,6}W(\d{2,3})"
+                   r"[^\d]{0,6}H(\d{2,3})", flat)
+    if ms:
+        data["meta"]["尺寸"] = "B%s W%s H%s" % ms.groups()
+    mc = re.search(r"罩杯\s*[：:]?\s*([A-K])\s*杯?", flat)
+    if mc:
+        data["meta"]["罩杯"] = mc.group(1)
+    data["photo_url"] = _absolute(_meta(text, "og:image"), JAVDB_BASE)
+    bits = []
+    if data["birthday"]:
+        bits.append("生日 " + data["birthday"])
+    for k in ("身高", "尺寸", "罩杯"):
+        if data["meta"].get(k):
+            bits.append(f"{k} {data['meta'][k]}")
+    data["bio"] = " ｜ ".join(bits)[:300]
+    data["meta"].setdefault("简介来源", "javdb")
+    return data
+
+
+# ---------------------------------------------------------------- 假名转写（v1.44.1）
+# ThePornDB 已按用户要求删除（需自备 Key、只认英文/罗马音）；这里保留假名→罗马音
+# 转写工具，供 `scrape_one` 把读音追加成检索词（对 wikipedia / imdb 也有用）。
+_KANA_TABLE = {
+    "あ": "a", "い": "i", "う": "u", "え": "e", "お": "o",
+    "か": "ka", "き": "ki", "く": "ku", "け": "ke", "こ": "ko",
+    "さ": "sa", "し": "shi", "す": "su", "せ": "se", "そ": "so",
+    "た": "ta", "ち": "chi", "つ": "tsu", "て": "te", "と": "to",
+    "な": "na", "に": "ni", "ぬ": "nu", "ね": "ne", "の": "no",
+    "は": "ha", "ひ": "hi", "ふ": "fu", "へ": "he", "ほ": "ho",
+    "ま": "ma", "み": "mi", "む": "mu", "め": "me", "も": "mo",
+    "や": "ya", "ゆ": "yu", "よ": "yo",
+    "ら": "ra", "り": "ri", "る": "ru", "れ": "re", "ろ": "ro",
+    "わ": "wa", "を": "o", "ん": "n",
+    "が": "ga", "ぎ": "gi", "ぐ": "gu", "げ": "ge", "ご": "go",
+    "ざ": "za", "じ": "ji", "ず": "zu", "ぜ": "ze", "ぞ": "zo",
+    "だ": "da", "ぢ": "ji", "づ": "zu", "で": "de", "ど": "do",
+    "ば": "ba", "び": "bi", "ぶ": "bu", "べ": "be", "ぼ": "bo",
+    "ぱ": "pa", "ぴ": "pi", "ぷ": "pu", "ぺ": "pe", "ぽ": "po",
+    "ぁ": "a", "ぃ": "i", "ぅ": "u", "ぇ": "e", "ぉ": "o",
+    "ゃ": "ya", "ゅ": "yu", "ょ": "yo", "ゎ": "wa",
+}
+_KANA_DIGRAPH = {
+    "きゃ": "kya", "きゅ": "kyu", "きょ": "kyo",
+    "しゃ": "sha", "しゅ": "shu", "しょ": "sho",
+    "ちゃ": "cha", "ちゅ": "chu", "ちょ": "cho",
+    "にゃ": "nya", "にゅ": "nyu", "にょ": "nyo",
+    "ひゃ": "hya", "ひゅ": "hyu", "ひょ": "hyo",
+    "みゃ": "mya", "みゅ": "myu", "みょ": "myo",
+    "りゃ": "rya", "りゅ": "ryu", "りょ": "ryo",
+    "ぎゃ": "gya", "ぎゅ": "gyu", "ぎょ": "gyo",
+    "じゃ": "ja", "じゅ": "ju", "じょ": "jo",
+    "びゃ": "bya", "びゅ": "byu", "びょ": "byo",
+    "ぴゃ": "pya", "ぴゅ": "pyu", "ぴょ": "pyo",
+}
+
+
+def kana_to_romaji(s: str) -> str:
+    """假名（平/片假名）→ 平文罗马音（ヘボン式，够做检索用）。非假名字符原样保留。"""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    # 片假名 → 平假名
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        o = ord(ch)
+        if 0x30A1 <= o <= 0x30F6:            # カタカナ
+            ch = chr(o - 0x60)
+        two = s[i:i + 2]
+        two_h = "".join(chr(ord(c) - 0x60) if 0x30A1 <= ord(c) <= 0x30F6 else c
+                        for c in two)
+        if two_h in _KANA_DIGRAPH:
+            out.append(_KANA_DIGRAPH[two_h])
+            i += 2
+            continue
+        if ch in _KANA_TABLE:
+            out.append(_KANA_TABLE[ch])
+            i += 1
+            continue
+        if ch in "っッ":
+            nxt = s[i + 1:i + 2]
+            nxt_h = chr(ord(nxt) - 0x60) if nxt and 0x30A1 <= ord(nxt) <= 0x30F6 else nxt
+            rom = _KANA_DIGRAPH.get(nxt_h, _KANA_TABLE.get(nxt_h, ""))
+            if rom and rom[0] not in "aeiou":
+                out.append(rom[0])
+            i += 1
+            continue
+        if ch in "ー":
+            i += 1
+            continue
+        out.append(ch if ch.isascii() else "")
+        i += 1
+    return re.sub(r"\s+", " ", "".join(out)).strip().lower()
+
+
+# ---------------------------------------------------------------- gfriends 头像源（v1.43.0）
+# 独立的**头像**数据源：https://github.com/gfriends/gfriends
+# 仓库根目录的 `Filetree.json` 是（4.8 MB）索引：
+#   {"Content": {"<图库目录>": {"<女优名>.jpg": "<真实文件名>.jpg?t=时间戳"}}}
+# 图片直链 = Content/<目录>/<真实文件名>（**路径必须 URL 编码**，否则中文名 404）。
+# 目录名带前缀标顺序（y- 高清 / z-DMM / 9-…），这里按画质优先级挑。
+GFRIENDS_TREE_URL = ("https://raw.githubusercontent.com/gfriends/gfriends/"
+                     "master/Filetree.json")
+GFRIENDS_RAW = ("https://raw.githubusercontent.com/gfriends/gfriends/"
+                "master/Content/")
+GFRIENDS_FOLDERS = ["y-Minnano", "z-DMM(步)", "z-DMM(骑)", "y-AVDC",
+                    "9-Javrave", "z-Derekhsu"]
+_GF = {"tree": None, "at": 0.0}
+
+
+def gfriends_tree(cache_dir: str = "", timeout=30, proxy="", max_age_days=7):
+    """载入 gfriends 索引（内存缓存 + 本地文件缓存 7 天）。失败返回 None。"""
+    now = time.time()
+    if _GF["tree"] is not None and now - _GF["at"] < 3600:
+        return _GF["tree"]
+    # v1.45.3（审计 BUG-04）：默认缓存**不再写用户主目录**（原来 `~/.lmacrate`，
+    # 从「测试数据源」入口会凭空造一个隐藏目录、且换电脑就丢）。改到数据目录下，
+    # 与索引库同级、随 exe 移动；仍可被 `cache_dir` 参数覆盖。
+    if not cache_dir:
+        cache_dir = os.path.join(applog.base_dir(), "index_data", "cache", "gfriends")
+    os.makedirs(cache_dir, exist_ok=True)
+    fp = os.path.join(cache_dir, "gfriends_filetree.json")
+    raw = ""
+    if os.path.exists(fp) and (now - os.path.getmtime(fp)) < max_age_days * 86400:
+        try:
+            with open(fp, encoding="utf-8") as f:
+                raw = f.read()
+        except Exception:
+            raw = ""
+    if not raw:
+        try:
+            raw = http_get(GFRIENDS_TREE_URL, timeout, proxy)
+        except Exception:
+            if os.path.exists(fp):
+                try:
+                    with open(fp, encoding="utf-8") as f:
+                        raw = f.read()
+                except Exception:
+                    raw = ""
+        else:
+            try:
+                tmp = fp + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(raw)
+                os.replace(tmp, fp)
+            except Exception:
+                pass
+    if not raw:
+        return None
+    try:
+        tree = json.loads(raw)
+    except Exception:
+        return None
+    _GF["tree"] = tree
+    _GF["at"] = now
+    return tree
+
+
+def gfriends_photo_url(name: str, cache_dir: str = "", timeout=30, proxy="") -> str:
+    """按姓名找 gfriends 头像直链；找不到返回空串。"""
+    name = (name or "").strip()
+    if not name:
+        return ""
+    tree = gfriends_tree(cache_dir, timeout, proxy)
+    if not tree:
+        return ""
+    content = tree.get("Content") or {}
+    folders = [f for f in GFRIENDS_FOLDERS if f in content]
+    folders += [f for f in content.keys() if f not in folders]
+    for folder in folders:
+        files = content.get(folder) or {}
+        if not isinstance(files, dict):
+            continue
+        fn = files.get(name + ".jpg")
+        if not fn:
+            continue
+        real = str(fn).split("?")[0]
+        return (GFRIENDS_RAW + urllib.parse.quote(folder) + "/"
+                + urllib.parse.quote(real))
+    return ""
+
+
 # ---------------------------------------------------------------- 统一入口
 SEARCHERS = {"minnano": minnano_search, "imdb": imdb_search,
-             "avbase": avbase_search}
+             "avbase": avbase_search, "javdb": javdb_search,
+             "wikipedia": wikipedia_search}
 FETCHERS = {"minnano": minnano_fetch, "imdb": imdb_fetch,
-            "avbase": avbase_fetch}
+            "avbase": avbase_fetch, "javdb": javdb_fetch,
+            "wikipedia": wikipedia_fetch}
 
 
 def _network_hint(proxy: str) -> str:
@@ -1328,6 +1734,177 @@ def diagnose_host(host_url: str, proxy: str = "", timeout: int = 8) -> dict:
     return out
 
 
+#: v1.45.5（反馈 3）：「刮削诊断」用的**运行期**记录（不落盘）。
+#: source -> {"kind": "source"/"cookie", "ok": bool, "msg": str, "ms": int, "at": "HH:MM:SS"}
+DIAG = {}
+
+
+def _diag(source, kind, ok, msg, ms=0):
+    import time as _t
+    DIAG[source] = {"kind": kind, "ok": bool(ok), "msg": str(msg or ""),
+                    "ms": int(ms or 0), "at": _t.strftime("%H:%M:%S")}
+
+
+def diag_snapshot():
+    """给「日志中心 → 刮削诊断」用：每个源的 cookie 状态 + 最近一次测试结果。"""
+    out = {}
+    for key, base in SOURCE_BASES.items():
+        st = cookie_state(base)
+        out[key] = {"cookie_ok": bool(st.get("has_pass")), "cookie_n": int(st.get("count") or 0),
+                    "cookie_at": st.get("at") or "", "last": DIAG.get(key)}
+    return out
+
+
+#: 各资料源的站点根（v1.44.1：Cookie 存活检测用）
+SOURCE_BASES = {
+    "minnano": MINNANO_BASE, "imdb": IMDB_BASE, "avbase": AVBASE_BASE,
+    "javdb": JAVDB_BASE, "wikipedia": WIKI_BASE,
+}
+
+
+def normalize_base_url(url: str) -> str:
+    """v1.46.5（反馈 2）：「其他数据源」—— 把用户填的网址规整成一个可用站点根。
+
+    规则（宁可宽松，也别让用户卡在格式上）：
+      · 空 / 只有空白 → 返回 ""（调用方据此提示「请先填写网址」）；
+      · 没写 scheme（`javdb.com` / `www.x.com/a`）→ 自动补 `https://`；
+      · 只有 `file:` 之类的怪 scheme、或 host 里没有点（`localhost` 除外）→ 判为无效。
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", u):
+        u = "https://" + u
+    try:
+        p = urllib.parse.urlparse(u)
+    except Exception:
+        return ""
+    if p.scheme.lower() not in ("http", "https"):
+        return ""
+    netloc = (p.netloc or "").strip()
+    if not netloc or "." not in netloc:
+        return ""
+    # 根路径不留尾巴（`https://a.com/` → `https://a.com`）：UI 输入框里更好看，
+    # 复测时 `http_get("https://a.com")` 与带斜杠等价。
+    path = p.path if p.path not in ("", "/") else ""
+    return urllib.parse.urlunparse((p.scheme, p.netloc, path, "", p.query, ""))
+
+
+def _test_cookie_base(base: str, tag: str, proxy="", timeout=12) -> dict:
+    """Cookie 存活检测的**同一套逻辑**，`test_cookie` / `test_cookie_url` 共用。
+
+    `tag` 只用于 `_diag` 的键（内置源传 key，自定义站点传站点根），
+    这样「刮削诊断」表里两者不会互相覆盖。
+    """
+    t0 = time.time()
+    has = has_pass_cookie(base)
+    if not has:
+        return {"ok": False, "msg": "尚未获取 Cookie（先点「Cookie 获取」）",
+                "ms": 0, "has_cookie": False}
+    try:
+        http_get(base, timeout, proxy, referer=base)
+        _diag(tag, "cookie", True, "Cookie 可用", int((time.time() - t0) * 1000))
+        return {"ok": True, "msg": "Cookie 可用", "ms": int((time.time() - t0) * 1000),
+                "has_cookie": True}
+    except ScrapeError as e:
+        _diag(tag, "cookie", False, _explain(str(e), tag),
+              int((time.time() - t0) * 1000))
+        return {"ok": False, "msg": _explain(str(e), tag),
+                "ms": int((time.time() - t0) * 1000), "has_cookie": True}
+    except Exception as e:
+        return {"ok": False, "msg": f"{type(e).__name__}: {e}",
+                "ms": int((time.time() - t0) * 1000), "has_cookie": True}
+
+
+def test_cookie(source: str, proxy="", timeout=12) -> dict:
+    """v1.44.1（需求 3）：用**当前已注入的 cookie** 发一次轻量请求，判断是否仍存活。
+
+    返回 `{ok, msg, ms, has_cookie}`：
+      · 没拿到过通行 cookie → ok=False，提示先去「Cookie 获取」；
+      · 请求成功（正文不是挑战页，`http_get` 没抛）→ ok=True；
+      · 抛 ScrapeError（WAF / 403 / TLS 被掐）→ ok=False，附分层判因。
+    """
+    base = SOURCE_BASES.get(source)
+    if not base:
+        return {"ok": False, "msg": f"未知数据源 {source}", "ms": 0, "has_cookie": False}
+    return _test_cookie_base(base, source, proxy, timeout)
+
+
+def test_cookie_url(url: str, proxy="", timeout=12) -> dict:
+    """v1.46.5（反馈 2）：「其他数据源」的 Cookie 存活检测（站点由用户自填）。
+
+    与 `test_cookie` 走完全相同的判定链，只是站点根来自入参而非 `SOURCE_BASES`。
+    """
+    base = normalize_base_url(url)
+    if not base:
+        return {"ok": False, "msg": "请先填写有效的站点网址（例如 https://example.com）",
+                "ms": 0, "has_cookie": False}
+    return _test_cookie_base(base, base, proxy, timeout)
+
+
+def source_of_url(url: str) -> str:
+    """v1.46.6（反馈 4）：把站点网址反查成**内置数据源 key**（认不出返回 ""）。
+
+    用途：`CloudflareDialog._verify_now()` 原来写死
+    `src = "minnano" if "minnano" in host_url else "imdb"` —— 对 avbase / javdb /
+    wikipedia / 自定义站点取完 cookie 后，复测的却是 **www.imdb.com**，于是红字
+    永远是「IMDB 用的是 AWS WAF…」，日志里的分层诊断也全是 imdb 的结论。
+    这里按 `SOURCE_BASES` 反查（忽略 `www.` 前缀、允许子域），认不出就返回 ""，
+    由调用方改走 `test_source_url()`。
+    """
+    def _net(u: str) -> str:
+        try:
+            h = urllib.parse.urlparse(u).netloc.lower()
+        except Exception:
+            return ""
+        return h[4:] if h.startswith("www.") else h
+
+    want = _net(normalize_base_url(url) or url)
+    if not want:
+        return ""
+    for key, base in SOURCE_BASES.items():
+        h = _net(base)
+        if h and (want == h or want.endswith("." + h)):
+            return key
+    return ""
+
+
+def test_source_url(url: str, proxy="", timeout=12) -> dict:
+    """v1.46.6（反馈 4）：**自定义站点**的连通自检 —— 真发一次首页请求。
+
+    与 `test_source()` 的区别只是「站点从参数来、不做检索」，判定链完全一致：
+    `http_get` 内部会识别挑战页并抛 `ScrapeError`；失败时再跑一次分层探针
+    `diagnose_host()`，让日志能说清是 TCP / TLS / WAF 哪一层。
+    """
+    t0 = time.time()
+    base = normalize_base_url(url)
+    if not base:
+        return {"ok": False, "msg": "请先填写有效的站点网址（例如 https://example.com）",
+                "ms": 0}
+
+    def done(ok, msg, diag=None):
+        r = {"ok": ok, "msg": msg, "ms": int((time.time() - t0) * 1000)}
+        if diag is not None:
+            r["diag"] = diag
+        _diag(base, "source", ok, msg, r["ms"])
+        return r
+
+    try:
+        body = http_get(base, timeout, proxy, referer=base)
+        return done(True, f"可访问，已取到 {len(body or '')} 字节正文")
+    except ScrapeError as e:
+        msg = _explain(str(e), base)
+        diag = None
+        try:
+            diag = diagnose_host(base, proxy, min(timeout, 8))
+        except Exception:
+            pass
+        return done(False, msg, diag)
+    except Exception as e:
+        return done(False, f"{type(e).__name__}: {e}")
+
+
+
 def test_source(source: str, proxy="", timeout=12) -> dict:
     """连接自检：返回 {ok, msg, ms}。
 
@@ -1344,11 +1921,15 @@ def test_source(source: str, proxy="", timeout=12) -> dict:
         r = {"ok": ok, "msg": msg, "ms": int((time.time() - t0) * 1000)}
         if diag is not None:
             r["diag"] = diag
+        _diag(source, "source", ok, msg, r["ms"])   # v1.45.5：写进刮削诊断
         return r
 
     base = ("https://www.minnano-av.com/" if source == "minnano"
             else "https://www.imdb.com/" if source == "imdb"
-            else "https://avbase.net/" if source == "avbase" else "")
+            else "https://avbase.net/" if source == "avbase"
+            else "https://javdb.com/" if source == "javdb"
+            else "https://ja.wikipedia.org/" if source == "wikipedia"
+            else "https://raw.githubusercontent.com/" if source == "gfriends" else "")
     try:
         if source == "minnano":
             hits = minnano_search("新村あかり", timeout=timeout, proxy=proxy)
@@ -1356,6 +1937,16 @@ def test_source(source: str, proxy="", timeout=12) -> dict:
             hits = imdb_search("Emma Stone", timeout=timeout, proxy=proxy)
         elif source == "avbase":
             hits = avbase_search("糸井瑠花", timeout=timeout, proxy=proxy)
+        elif source == "javdb":
+            hits = javdb_search("三上悠亜", timeout=timeout, proxy=proxy)
+        elif source == "wikipedia":
+            hits = wikipedia_search("三上悠亜", timeout=timeout, proxy=proxy)
+        elif source == "gfriends":
+            u = gfriends_photo_url("三上悠亜", timeout=max(timeout, 20), proxy=proxy)
+            if u:
+                return done(True, "可访问，命中测试头像直链")
+            return done(False, "索引已取到但未命中测试名（可稍后重试，"
+                               "首次需下载 4.8MB 索引）")
         else:
             return done(False, f"未知数据源 {source}")
         if hits:
@@ -1466,7 +2057,7 @@ def scrape_one(person: dict, opts: dict, log=None) -> dict:
         searcher, fetcher = SEARCHERS.get(src), FETCHERS.get(src)
         if not searcher:
             continue
-        for q in queries:
+        for q in list(queries):      # v1.43.0：快照 —— 命中时可能追加读音检索词
             if not q:
                 continue
             # IMDB 只接受拉丁字母检索词，日文名直接跳过以省请求
@@ -1498,12 +2089,21 @@ def scrape_one(person: dict, opts: dict, log=None) -> dict:
             if d.get("romaji") and not person.get("romaji"):
                 collected.setdefault("romaji", d["romaji"])
                 got = True
+                # v1.43.0：把新发现的读音也加进检索词 —— 维基/avbase 给的假名读音
+                # 转写成罗马音后，后面的 ThePornDB（只认英文）才有得查。
+                # 用 list(queries) 做快照：只影响**后续源**，不在当前源里重复请求。
+                for _q in (d["romaji"], kana_to_romaji(d["romaji"])):
+                    if _q and _q not in queries:
+                        queries.append(_q)
             if d.get("meta") and (overwrite or not person.get("meta")):
                 # v1.11.1：原来只在「本地没有 meta」时才写。可本地那份可能是 v1.10.0 写坏的
                 # 样板文案乱码（真机 72/108 条），于是修复重刮永远刷不掉它 —— 覆盖模式下必须重写。
                 collected.setdefault("meta", json.dumps(d["meta"], ensure_ascii=False))
             if d.get("status") and not (only_missing and person.get("status")):
                 collected.setdefault("status", d["status"])
+            if d.get("gender") and not (only_missing and person.get("gender")):
+                collected.setdefault("gender", d["gender"])
+                got = True
             if d.get("photo_url") and not photo_url:
                 photo_url = d["photo_url"]
                 got = True
@@ -1516,6 +2116,23 @@ def scrape_one(person: dict, opts: dict, log=None) -> dict:
                 break
         if res["status"] == "ok" and photo_url and len(collected) >= 2:
             break
+
+    # v1.43.0（需求 4）：**头像独立源 gfriends** —— 资料源都没给头像时按姓名兜底。
+    # 它是纯头像图库（不带任何资料字段），所以不参与上面的 sources 优先级，
+    # 也不影响「命中资料源」的判定：仅在「有资料但没头像」或「完全没命中」时补一张。
+    if not photo_url and opts.get("gfriends_photo", True):
+        try:
+            gu = gfriends_photo_url(person.get("name") or "",
+                                    cache_dir=opts.get("photo_dir") or "",
+                                    timeout=max(timeout, 25), proxy=proxy)
+        except Exception:
+            gu = ""
+        if gu:
+            photo_url = gu
+            if res["status"] != "ok":
+                res["status"] = "ok"
+                res["source"] = "gfriends"
+            res["source_url"] = res.get("source_url") or gu
 
     if res["status"] != "ok":
         res["error"] = last_err
