@@ -80,6 +80,6 @@ class ScanRing(QWidget):
         if not span:
             span = -int(360 * 16 * 0.22)
         start = int(-90 * 16 - (self._phase * 360 * 16 if not self._pct else 0))
-        p.setPen(QPen(QColor("#5fb0ff"), 2.4))
+        p.setPen(QPen(QColor("#338ef7"), 2.4))
         p.drawArc(r, start, span)
         p.end()

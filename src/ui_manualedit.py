@@ -83,7 +83,9 @@ class ManualEditPage(QWidget):
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(8)
         lb = QLabel("检索并选择影片")
-        lb.setStyleSheet("font-size:14px;font-weight:700;color:#d4af37;")
+        # v2.0.2（反馈 6）：用户明确要求这里用**白色**（原来是写死的 #66a9ff，
+        # 既不随主题变色、也不够中性）→ 走 #PlainTitle。
+        lb.setObjectName("PlainTitle")
         lv.addWidget(lb)
 
         srow = QWidget()
@@ -114,7 +116,7 @@ class ManualEditPage(QWidget):
         lv.addWidget(self.list, 1)
 
         self.cnt_lbl = QLabel("")
-        self.cnt_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.cnt_lbl.setStyleSheet("color:#71717a;font-size:11px;")
         lv.addWidget(self.cnt_lbl)
         left.setMinimumWidth(240)
         left.setMaximumWidth(360)
@@ -128,8 +130,9 @@ class ManualEditPage(QWidget):
 
     @staticmethod
     def _mktitle(text):
+        # v2.0.2（反馈 5）：面板标题跟随高亮色（原来是写死的 #66a9ff，换主题不变色）
         l = QLabel(text)
-        l.setStyleSheet("font-size:14px;font-weight:700;color:#d4af37;")
+        l.setObjectName("PanelTitle")
         return l
 
     def _set_scroll_widget(self, host):
@@ -155,7 +158,7 @@ class ManualEditPage(QWidget):
         v.setSpacing(8)
         hint = QLabel(text)
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8c8071;font-size:12px;")
+        hint.setStyleSheet("color:#71717a;font-size:12px;")
         v.addWidget(hint)
         v.addStretch(1)
         self._host = host
@@ -225,20 +228,20 @@ class ManualEditPage(QWidget):
 
         data = nf.from_media(media)
         head = QLabel(media.get("title") or "(无标题)")
-        head.setStyleSheet("font-size:15px;font-weight:700;color:#e8ddc8;")
+        head.setStyleSheet("font-size:15px;font-weight:700;color:#ecedee;")
         head.setWordWrap(True)
         v.addWidget(head)
         if media.get("file_path"):
             fp = QLabel(media["file_path"])
             fp.setWordWrap(True)
             fp.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            fp.setStyleSheet("color:#8c8071;font-size:11px;")
+            fp.setStyleSheet("color:#71717a;font-size:11px;")
             v.addWidget(fp)
         if not data.get("nfo_exists"):
             warn = QLabel("⚠ 这部影片没有 nfo 文件 —— 下面的字段是数据库里的现值，"
                           "保存时**无法**写入 nfo（索引仍会同步）。")
             warn.setWordWrap(True)
-            warn.setStyleSheet("color:#e8b76a;font-size:11px;")
+            warn.setStyleSheet("color:#f5a524;font-size:11px;")
             v.addWidget(warn)
 
         # --- 配图 ---
@@ -267,13 +270,13 @@ class ManualEditPage(QWidget):
             cv.setContentsMargins(0, 0, 0, 0)
             cv.setSpacing(5)
             lab = QLabel(idm.SLOT_CN[slot])
-            lab.setStyleSheet("color:#c9bda7;font-size:11px;")
+            lab.setStyleSheet("color:#d4d4d8;font-size:11px;")
             lab.setAlignment(Qt.AlignHCenter)
             prev = QLabel()
             prev.setObjectName(f"slotprev_{slot}")     # 离屏冒烟按名字找
             prev.setFixedSize(_W, int(_W * 2 / 3))
             prev.setAlignment(Qt.AlignCenter)
-            prev.setStyleSheet("background:#1b1613;border:1px solid #3a3129;color:#8c8071;")
+            prev.setStyleSheet("background:#18181b;border:1px solid #3f3f46;color:#71717a;")
             up = QPushButton("上传…")
             up.setObjectName("Ghost")
             up.setCursor(Qt.PointingHandCursor)
@@ -282,7 +285,7 @@ class ManualEditPage(QWidget):
             tgt.setObjectName(f"slottarget_{slot}")
             tgt.setWordWrap(True)
             tgt.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            tgt.setStyleSheet("color:#8c8071;font-size:10px;")
+            tgt.setStyleSheet("color:#71717a;font-size:10px;")
             for w in (lab, prev, up, tgt):
                 cv.addWidget(w, 0, Qt.AlignHCenter)
             ig.addWidget(cell)
@@ -343,7 +346,7 @@ class ManualEditPage(QWidget):
         fh.addWidget(op)
         fh.addStretch(1)
         self.save_lbl = QLabel("")
-        self.save_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.save_lbl.setStyleSheet("color:#71717a;font-size:11px;")
         fh.addWidget(self.save_lbl)
         return foot
 

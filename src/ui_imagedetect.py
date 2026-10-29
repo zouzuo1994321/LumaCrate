@@ -179,7 +179,7 @@ class ImageDetectPage(QWidget):
         self.ai_state = QLabel("选「AI 算法」时会自动探测本机 Ollama；"
                                "用哪个模型跟「智能推荐」页共用同一项设置。")
         self.ai_state.setWordWrap(True)
-        self.ai_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.ai_state.setStyleSheet("color:#71717a;font-size:11px;")
         av.addWidget(self.ai_state)
         self.rb_ai.toggled.connect(lambda on: on and self._probe_ai())
         v.addWidget(ag)
@@ -215,7 +215,7 @@ class ImageDetectPage(QWidget):
         self.imp_btn.clicked.connect(self._import_result)
         ah.addWidget(self.imp_btn)
         self.status_lbl = QLabel("尚未检测")
-        self.status_lbl.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.status_lbl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         ah.addWidget(self.status_lbl)
         ah.addStretch(1)
         v.addWidget(act)
@@ -254,24 +254,24 @@ class ImageDetectPage(QWidget):
         rv.setSpacing(8)
         self.title_lbl = QLabel("选中左侧任一问题即可处理")
         self.title_lbl.setWordWrap(True)
-        self.title_lbl.setStyleSheet("color:#e8ddc8;font-size:13px;font-weight:700;")
+        self.title_lbl.setStyleSheet("color:#ecedee;font-size:13px;font-weight:700;")
         rv.addWidget(self.title_lbl)
 
         self.preview = QLabel()
         self.preview.setFixedSize(240, 160)
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setStyleSheet("background:#1b1613;border:1px solid #3a3129;color:#8c8071;")
+        self.preview.setStyleSheet("background:#18181b;border:1px solid #3f3f46;color:#71717a;")
         rv.addWidget(self.preview, 0, Qt.AlignHCenter)
 
         self.meta_lbl = QLabel("")
         self.meta_lbl.setWordWrap(True)
-        self.meta_lbl.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.meta_lbl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         rv.addWidget(self.meta_lbl)
 
         self.target_lbl = QLabel("")
         self.target_lbl.setWordWrap(True)
         self.target_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.target_lbl.setStyleSheet("color:#c9bda7;font-size:11px;")
+        self.target_lbl.setStyleSheet("color:#d4d4d8;font-size:11px;")
         rv.addWidget(self.target_lbl)
 
         btn_row = QWidget()
@@ -296,7 +296,7 @@ class ImageDetectPage(QWidget):
         tip = QLabel("替换即把选好的图片**复制**成 `<番号>-poster/thumb/fanart.jpg`"
                      "（源图不动），并同步回索引；原文件不删除。")
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#8c8071;font-size:11px;")
+        tip.setStyleSheet("color:#71717a;font-size:11px;")
         rv.addWidget(tip)
         rv.addStretch(1)
         right.setMinimumWidth(300)
@@ -343,11 +343,11 @@ class ImageDetectPage(QWidget):
             ok, note = ar.ai_available(self._ai_model_name())
         except Exception as e:
             self.ai_state.setText("探测失败：%s" % e)
-            self.ai_state.setStyleSheet("color:#e8b76a;font-size:11px;")
+            self.ai_state.setStyleSheet("color:#f5a524;font-size:11px;")
             return
         self.ai_state.setText(("✓ " if ok else "✗ ") + note)
         self.ai_state.setStyleSheet(
-            ("color:#8fd18f;font-size:11px;" if ok else "color:#e8b76a;font-size:11px;"))
+            ("color:#45d483;font-size:11px;" if ok else "color:#f5a524;font-size:11px;"))
 
     # ---------- 检测 ----------
     def is_busy(self):
@@ -500,7 +500,7 @@ class ImageDetectPage(QWidget):
     # ---------- 结果树 ----------
     ROLE_ROW = Qt.UserRole + 1
 
-    _STATE_COLOR = {"缺图": "#9aa7b8", "破损": "#e8b76a"}
+    _STATE_COLOR = {"缺图": "#a1a1aa", "破损": "#f5a524"}
 
     def _fill_tree(self, rows):
         from PySide6.QtGui import QColor
@@ -528,18 +528,18 @@ class ImageDetectPage(QWidget):
                 it.setData(0, self.ROLE_ROW, i)
                 it.setToolTip(0, p.get("file_path") or "")
                 it.setToolTip(C_NOTE, p.get("detail") or "")
-                it.setForeground(2, QColor(self._STATE_COLOR.get(state_cn, "#c9bda7")))
+                it.setForeground(2, QColor(self._STATE_COLOR.get(state_cn, "#d4d4d8")))
                 if show_ai:
                     if ai:
                         adv = ai.get("advice") or ""
                         # 「可忽略」压成暗色，「需人工核对」用琥珀色提醒，其余正常高亮
                         it.setForeground(C_AI, QColor(
-                            "#8c8071" if adv == "可忽略" else
-                            ("#f0c674" if adv == "需人工核对" else "#8fd18f")))
+                            "#71717a" if adv == "可忽略" else
+                            ("#f5a524" if adv == "需人工核对" else "#45d483")))
                         if ai.get("reason"):
                             it.setToolTip(C_AI, "%s\n%s" % (adv, ai["reason"]))
                     else:
-                        it.setForeground(C_AI, QColor("#6b6257"))
+                        it.setForeground(C_AI, QColor("#71717a"))
                 self.tree.addTopLevelItem(it)
         finally:
             self.tree.setUpdatesEnabled(True)

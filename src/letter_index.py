@@ -17,6 +17,8 @@
 没有 romaji 就用姓名首字符；非 A-Z 的统统归到 "#"。
 **映射里没有这个字母 = 库里没有 = 画成暗色且点了不发信号。**
 """
+import sys
+
 from PySide6.QtCore import Qt, Signal, QRect, QSize
 from PySide6.QtGui import QPainter, QColor, QFont
 from PySide6.QtWidgets import QWidget
@@ -27,11 +29,23 @@ LETTERS = [chr(c) for c in range(ord("A"), ord("Z") + 1)] + ["#"]
 BAR_W = 30
 _MIN_ROW_H = 17
 
-_COLOR_TEXT = QColor(201, 189, 167)     # #c9bda7，与卡片信息值同色
-_COLOR_DIM = QColor(107, 97, 82)        # 无数据的字母（不可点）
-_COLOR_HOVER_BG = QColor(192, 57, 43, 60)
-_COLOR_ACTIVE = QColor(212, 175, 55)    # #d4af37 金色
-_COLOR_ACTIVE_BG = QColor(212, 175, 55, 38)
+# v2.0.0：换成 HeroUI 中性色阶；悬停/选中都**跟随「外观 → 高亮色」**（原来写死朱红+鎏金）
+_COLOR_TEXT = QColor(212, 212, 216)     # #d4d4d8，与卡片信息值同色
+_COLOR_DIM = QColor(82, 82, 91)         # #52525b，无数据的字母（不可点）
+_COLOR_HOVER_BG = QColor(255, 255, 255, 20)   # 白 8%：HeroUI 的幽灵悬停底
+
+
+def _accent_rgb():
+    """现取高亮色（懒读 main_window.ACCENT_RGB，反向 import 会成环）。"""
+    mw = sys.modules.get("main_window")
+    rgb = getattr(mw, "ACCENT_RGB", None) if mw is not None else None
+    try:
+        if rgb is not None:
+            r, g, b = (int(v) for v in tuple(rgb)[:3])
+            return (r, g, b)
+    except (TypeError, ValueError):
+        pass
+    return (0, 111, 238)
 
 
 class LetterIndexBar(QWidget):
@@ -134,6 +148,9 @@ class LetterIndexBar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), Qt.transparent)
+        ar, ag, ab = _accent_rgb()
+        c_active = QColor(ar, ag, ab)
+        c_active_bg = QColor(ar, ag, ab, 40)
         h = self.row_height()
         y = 0.0
         for lt in LETTERS:
@@ -142,12 +159,12 @@ class LetterIndexBar(QWidget):
             if on and lt == self._hover:
                 p.fillRect(r, _COLOR_HOVER_BG)
             elif on and lt == self._active:
-                p.fillRect(r, _COLOR_ACTIVE_BG)
+                p.fillRect(r, c_active_bg)
             f = QFont()
             f.setPixelSize(11)
             f.setBold(bool(on and (lt == self._hover or lt == self._active)))
             p.setFont(f)
-            p.setPen(_COLOR_ACTIVE if (on and lt == self._active) else
+            p.setPen(c_active if (on and lt == self._active) else
                      (_COLOR_TEXT if on else _COLOR_DIM))
             p.drawText(r, Qt.AlignHCenter | Qt.AlignVCenter, lt)
             y += h

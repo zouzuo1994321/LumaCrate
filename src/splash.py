@@ -67,7 +67,7 @@ def _derive_splash_theme(accent_hex):
         "accent_a": QColor(r, g, b),        # 进度条亮端 / logo 渐变起点
         "accent_b": hls(0.30, 0.55),        # 进度条暗端 / logo 渐变终点
         "track": QColor(255, 255, 255, 30),  # 进度槽
-        "text": QColor("#eef3fb"),          # 主文字（近白，保证可读）
+        "text": QColor("#fafafa"),          # 主文字（近白，保证可读）
         "dim": hls(0.62, 0.32),             # 次要文字（高亮色相浅色调）
         "slogan": hls(0.74, 0.50),          # Slogan 行（比副标题亮一档）
         "faint": hls(0.42, 0.22),           # 版本 / 版权行（更暗的浅色调）

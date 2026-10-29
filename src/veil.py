@@ -21,6 +21,8 @@ GetWindowRect 定位 + 窗口内部平均亮度」做二值判定，结果：
   · 不受桌面内容干扰，可读性可控；
   · 与主题的墨黑 / 朱红 / 鎏金基调统一。
 """
+import sys
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (QPixmap, QPainter, QColor, QLinearGradient,
                            QRadialGradient)
@@ -52,18 +54,41 @@ def cover(pm: QPixmap, w: int, h: int) -> QPixmap:
     return pm.scaled(sw, sh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
+def accent_rgb():
+    """当前高亮色 —— 懒读 `main_window.ACCENT_RGB`（反向 import 会成环）。
+
+    拿不到时回落 HeroUI primary #006fee。底衬跟着高亮色走，换色时整块氛围一起变，
+    与 QSS 令牌、自绘控件三处同源。
+    """
+    mw = sys.modules.get("main_window")
+    rgb = getattr(mw, "ACCENT_RGB", None) if mw is not None else None
+    try:
+        if rgb is not None:
+            r, g, b = (int(v) for v in tuple(rgb)[:3])
+            return (r, g, b)
+    except (TypeError, ValueError):
+        pass
+    return (0, 111, 238)
+
+
 def default_backdrop(w: int, h: int) -> QPixmap:
-    """没有剧照时的兜底底图：墨黑底 + 朱红/鎏金柔光，模糊后天然是磨砂质感。"""
+    """没有剧照时的兜底底图（v2.0.0 HeroUI 暗色）：中性近黑 + 高亮色柔光。
+
+    原来是「墨黑 + 朱红 + 鎏金」四处暖光，在 HeroUI 的中性色阶旁边会显出橘调，
+    所以改成：底 = #0a0a0b，左上/右上两团**高亮色**低透明度柔光（54 / 26），
+    右下/左下两团中性提亮。模糊后仍是磨砂质感，但不再与中性面板打架。
+    """
     w, h = max(64, w), max(64, h)
     small = QPixmap(max(64, w // BLUR_FACTOR), max(64, h // BLUR_FACTOR))
-    small.fill(QColor(11, 9, 8))
+    small.fill(QColor(10, 10, 11))
     p = QPainter(small)
     p.setRenderHint(QPainter.Antialiasing, True)
     sw, sh = small.width(), small.height()
-    for (cx, cy, rad, color) in ((0.16, 0.10, 1.05, QColor(139, 43, 33, 210)),
-                                 (0.92, 0.14, 0.85, QColor(201, 162, 74, 150)),
-                                 (0.70, 0.98, 1.15, QColor(74, 32, 28, 200)),
-                                 (0.05, 0.90, 0.75, QColor(120, 96, 42, 110))):
+    ar, ag, ab = accent_rgb()
+    for (cx, cy, rad, color) in ((0.16, 0.10, 1.05, QColor(ar, ag, ab, 54)),
+                                 (0.92, 0.14, 0.85, QColor(ar, ag, ab, 26)),
+                                 (0.70, 0.98, 1.15, QColor(38, 38, 42, 200)),
+                                 (0.05, 0.90, 0.75, QColor(24, 24, 27, 170))):
         g = QRadialGradient(sw * cx, sh * cy, max(sw, sh) * rad)
         c0 = QColor(color); c1 = QColor(color); c1.setAlpha(0)
         g.setColorAt(0.0, c0); g.setColorAt(1.0, c1)
@@ -145,13 +170,13 @@ class Veil:
         if w <= 0 or h <= 0:
             return
         if not self._enabled:
-            painter.fillRect(0, 0, w, h, QColor(15, 13, 12))
+            painter.fillRect(0, 0, w, h, QColor(10, 10, 11))
             return
         pm = self.pixmap(w, h)
         if pm is not None and not pm.isNull():
             painter.drawPixmap(0, 0, pm)
         # 压暗（保证面板上的文字可读）
-        painter.fillRect(0, 0, w, h, QColor(13, 11, 10, self._scrim))
+        painter.fillRect(0, 0, w, h, QColor(10, 10, 11, self._scrim))
         # 四角再压一点，形成玻璃的纵深
         g = QLinearGradient(0, 0, 0, h)
         g.setColorAt(0.0, QColor(0, 0, 0, 46))

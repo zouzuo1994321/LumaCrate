@@ -80,7 +80,7 @@ def pids_of_exe(exe_name):
     res = set()
     for line in raw.decode("gbk", "replace").splitlines():
         parts = [p.strip('"') for p in line.split('","')]
-        if len(parts) >= 2 and parts[0].lower() == exe_name and parts[1].isdigit():
+        if len(parts) >= 2 and parts[0].lower() == exe_name.lower() and parts[1].isdigit():
             res.add(int(parts[1]))
     return res
 

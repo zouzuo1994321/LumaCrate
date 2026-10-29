@@ -323,6 +323,9 @@ _MEDIA_NEW_COLS = {
     "favorite": "INTEGER DEFAULT 0", "play_count": "INTEGER DEFAULT 0",
     "last_played": "REAL",
     "premiere": "TEXT", "user_rating": "REAL", "file_mtime": "REAL",
+    # v1.46.9（反馈 3）：详情页标签行 —— 逗号分隔多值（对应 nfo 的多个 `<tag>`）。
+    # 与 `genres`（类型）分开存：标签是用户自己打的，扫描/刮削不会覆盖。
+    "tags": "TEXT",
 }
 
 # 老库 people 表补列
@@ -595,7 +598,12 @@ def _media_where(keyword: str = "", kind: Optional[str] = None, genre: Optional[
         )
         params.append(f"%{person}%")
     if keyword:
-        clauses.append("(m.title LIKE ? OR m.plot LIKE ?)")
+        # v2.0.2（反馈 4）：关键词也搜**标签**（media.tags 是逗号串，见 set_media_tags）。
+        # 顶栏搜索框的提示语写了「片名 / 类型 / 演员」，但标签一直是搜不到的。
+        # 注意：`_media_where` 被 search_media / count_media **共用**，改这里两边一起生效，
+        # 参数顺序必须与占位符顺序一致（title → plot → tags）。
+        clauses.append("(m.title LIKE ? OR m.plot LIKE ? OR IFNULL(m.tags,'') LIKE ?)")
+        params.append(f"%{keyword}%")
         params.append(f"%{keyword}%")
         params.append(f"%{keyword}%")
     return ((" WHERE " + " AND ".join(clauses)) if clauses else ""), params
@@ -1368,11 +1376,16 @@ def toggle_person_pinned(person_id: int) -> int:
 
 
 def cast_crew_map_ex(ids=None):
-    """取出 media_id -> {'actors': [(name, fav, pin), ...], 'directors': [...]}。
+    """取出 media_id -> {'actors': [(name, fav, pin, gender), ...], 'directors': [...]}。
 
     v1.37.0（反馈 1/2）：除名字外额外携带**每个艺人**的 收藏(fav) / 置顶(pin) 标记，
     供卡片与详情页按标记给名字上色（收藏→金色、置顶→加粗、二者兼有→金色加粗），
     而不必为每张卡片再发一次查询。导演以 media_people.role_type='Director' 区分。
+
+    v2.0.3（反馈 8）：再带上 `p.gender`（female / male / 空）—— 卡片小字要按
+    「女粉 / 男蓝 / 导演黄 / 未知白」着色，颜色已经承担身份语义，所以上一版的
+    「收藏金色」改由**加粗 + 下划线**表达（见 `main_window._crew_names_html`）。
+    ⚠ 元组从 3 项变 4 项：消费方要兼容两种长度（冒烟与旧调用路径仍传 3 项）。
 
     v1.14.0：`ids` 限定只查这批影片 —— 影片墙改成按页加载后，每页只需几十条关联，
     不必再把几十万行关联整表拉进内存（这是「一进媒体库就卡死」的第一元凶）。
@@ -1382,7 +1395,8 @@ def cast_crew_map_ex(ids=None):
         conn = get_conn()
         try:
             base = ("SELECT mp.media_id AS mid, p.name AS name, p.role_type AS rtype, "
-                    "COALESCE(p.favorite,0) AS fav, COALESCE(p.pinned,0) AS pin "
+                    "COALESCE(p.favorite,0) AS fav, COALESCE(p.pinned,0) AS pin, "
+                    "IFNULL(p.gender,'') AS gender "
                     "FROM media_people mp JOIN people p ON p.id=mp.person_id")
             if ids is None:
                 rows = conn.execute(base + " ORDER BY mp.media_id, mp.person_order").fetchall()
@@ -1401,7 +1415,7 @@ def cast_crew_map_ex(ids=None):
         if not nm:
             continue
         mid = r["mid"]
-        t = (nm, int(r["fav"] or 0), int(r["pin"] or 0))
+        t = (nm, int(r["fav"] or 0), int(r["pin"] or 0), (r["gender"] or ""))
         (directors if r["rtype"] == "Director" else actors).setdefault(mid, []).append(t)
     out = {}
     for mid in set(actors) | set(directors):
@@ -1421,9 +1435,11 @@ def cast_crew_map(ids=None):
     ex = cast_crew_map_ex(ids)
     out = {}
     for mid, c in ex.items():
+        # ⚠ 元组在 v2.0.3 变成 (name, fav, pin, gender) —— 这里只取名字，
+        # 写死 `for n, _, _ in ...` 会直接 ValueError（第 4 项没处放）。
         out[mid] = {
-            "actors": " / ".join(dict.fromkeys(n for n, _, _ in c["actors"])),
-            "directors": " / ".join(dict.fromkeys(n for n, _, _ in c["directors"])),
+            "actors": " / ".join(dict.fromkeys(t[0] for t in c["actors"])),
+            "directors": " / ".join(dict.fromkeys(t[0] for t in c["directors"])),
         }
     return out
 
@@ -1497,6 +1513,34 @@ def set_user_rating(media_id: int, value) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def set_media_tags(media_id: int, tags) -> str:
+    """写入标签（v1.46.9 反馈 3）。`tags` 可为列表或逗号串；返回落库的归一化字符串。
+
+    归一化规则（与详情页标签行一致）：去空白 → 去重（保序）→ 逗号拼接。
+    空表也照样写入（空串），这样「删到只剩 0 个标签」能真正清空而不是留在旧值。
+    """
+    if isinstance(tags, str):
+        items = tags.split(",")
+    else:
+        items = list(tags or [])
+    seen, out = set(), []
+    for t in items:
+        t = str(t or "").strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    val = ",".join(out)
+    with _LOCK:
+        conn = get_conn()
+        try:
+            conn.execute("UPDATE media SET tags=? WHERE id=?", (val, media_id))
+            conn.commit()
+        finally:
+            conn.close()
+    return val
 
 
 def favorites(kind: Optional[str] = None):

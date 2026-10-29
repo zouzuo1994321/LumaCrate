@@ -56,12 +56,12 @@ import applog
 
 # —— 颜色 ——
 _TRACK = QColor(255, 255, 255, 26)          # 横条轨道
-_ACCENT_FALLBACK = (192, 57, 43)            # 拿不到 ACCENT_RGB 时的朱红
+_ACCENT_FALLBACK = (0, 111, 238)            # 拿不到 ACCENT_RGB 时的 HeroUI 蓝
 _WARN = (0xD8, 0xA0, 0x4A)                  # 60~85% 琥珀
 _ALERT = (0xD9, 0x63, 0x4A)                 # >85% 警示（资源占用，不是涨跌）
-_DOT_ON = "#6fbf73"                         # 状态点：绿
-_DOT_WARN = "#d8a04a"                       # 状态点：琥珀
-_DOT_OFF = "#8b8071"                        # 状态点：灰
+_DOT_ON = "#45d483"                         # 状态点：绿
+_DOT_WARN = "#f5a524"                       # 状态点：琥珀
+_DOT_OFF = "#71717a"                        # 状态点：灰
 
 _AI_EVERY = 6                               # 每 6 次采样探一次 Ollama（约 9 秒）
 _INTERVAL_MS = 1500
@@ -597,7 +597,7 @@ class SysMonitorPanel(QWidget):
             mb = d.get("proc_mb")
             _v = "—" if mb is None else "%.0f MB" % mb
             self.proc_row.setText(
-                "本程序内存 <span style='color:#d4af37;font-weight:600'>%s</span>" % _v)
+                "本程序内存 <span style='color:#66a9ff;font-weight:600'>%s</span>" % _v)
             self.proc_row.setToolTip("本程序（含索引与封面缓存）当前的常驻内存 RSS：%s" % _v)
         except Exception:
             pass
@@ -627,15 +627,15 @@ class SysMonitorPanel(QWidget):
         if up is not None and down is not None:
             net_tip.append("↑ %.1f KB/s   ↓ %.1f KB/s" % (up, down))
         self.net_row.setText(
-            '<span style="color:#8b8071">网络 · Ollama</span>'
+            '<span style="color:#71717a">网络 · Ollama</span>'
             '<span style="color:%s"> ● </span>'
-            '<span style="color:#c9bda9">%s</span>' % (dot, txt))
+            '<span style="color:#d4d4d8">%s</span>' % (dot, txt))
         self.net_row.setToolTip("\n".join(net_tip))
 
         # 当前模型
         model = str(d.get("model") or "")
         ok = d.get("model_ok", True)
-        head = '<span style="color:#8b8071">当前模型</span>'
+        head = '<span style="color:#71717a">当前模型</span>'
         if not model:
             self.model_row.setText('%s <span style="color:%s">—</span>' % (head, _DOT_OFF))
             self.model_row.setToolTip(

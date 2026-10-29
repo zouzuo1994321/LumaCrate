@@ -33,7 +33,10 @@ FIELDS = [
     ("studio",        "片商",       "text"),
     ("set",           "合集",       "text"),
     ("country",       "国家",       "multi"),
-    ("genre",         "标签",       "multi"),
+    ("genre",         "类型",       "multi"),
+    # v1.46.9（反馈 3）：`<tag>` 标签 —— 与「类型」分开。详情页标签行的增删
+    # 走 `nfo_parser.write_tags()`；这里加一行是为了在「编辑信息」里也能直接改。
+    ("tag",           "标签",       "multi"),
     ("director",      "导演",       "multi"),
     ("tagline",       "标语",       "text"),
     ("plot",          "简介",       "multiline"),
@@ -132,6 +135,9 @@ def from_media(media):
         data["country"] = [c.strip() for c in str(m["country"]).split("/") if c.strip()]
     if not data.get("genre") and m.get("genres"):
         data["genre"] = [g.strip() for g in str(m["genres"]).split(",") if g.strip()]
+    # v1.46.9（反馈 3）：标签以 nfo 为准，缺了才用库里的兜底
+    if not data.get("tag") and m.get("tags"):
+        data["tag"] = [t.strip() for t in str(m["tags"]).split(",") if t.strip()]
     if not data.get("runtime") and m.get("runtime"):
         mm_ = _minutes(m.get("runtime"))
         data["runtime"] = str(mm_) if mm_ is not None else str(m.get("runtime"))
@@ -304,6 +310,8 @@ def save(media, data):
         fields["premiere"] = str(data["premiered"]).strip()
     if isinstance(data.get("genre"), list):
         fields["genres"] = ",".join(str(g).strip() for g in data["genre"] if str(g).strip())
+    if isinstance(data.get("tag"), list):
+        fields["tags"] = ",".join(str(t).strip() for t in data["tag"] if str(t).strip())
     if data.get("studio") is not None:
         fields["studio"] = str(data.get("studio") or "").strip()
     if data.get("set") is not None:

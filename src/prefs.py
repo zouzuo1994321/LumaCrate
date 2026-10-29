@@ -35,6 +35,26 @@ def prefs_export_name() -> str:
     return f"{ver.APP_NAME}-偏好-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
 
 
+# ---------- v1.46.12：进度回调 ----------
+# 为什么要有：导入/导出原来**同步跑在 GUI 线程**，实测一次导入 7.09s
+# （其中 415 个 nfo 回写占 4.24s、结尾整页刷新占 1.4s），期间事件循环
+# 一次都不跳 → Windows 5 秒就判「未响应」，用户还以为卡死了。
+# 现在这两件事都能给一个 `progress(done, total, label)` 回调，由界面
+# 搬到后台线程并画进度条；回调**返回 True** 表示「用户要求停止」。
+
+def _tick(progress, done, total, label) -> bool:
+    """统一出口：没有回调就什么都不做；回调抛异常只当「不停止」。
+
+    返回 True = 调用方要求中止。
+    """
+    if progress is None:
+        return False
+    try:
+        return bool(progress(int(done), int(total), str(label)))
+    except Exception:
+        return False
+
+
 #: 导出范围（v1.44.2，保留兼容）
 SCOPES = (("all", "全部偏好（收藏 + 观看 + 评分）"),
           ("favorite", "仅收藏"),
@@ -71,19 +91,29 @@ def _people_rows():
     return [dict(r) for r in conn.execute(sql).fetchall()]
 
 
-def export_prefs(dest_json: str, scope: str = "all", include=None) -> dict:
+def export_prefs(dest_json: str, scope: str = "all", include=None,
+                 progress=None) -> dict:
     """导出偏好到 JSON。返回 {'ok','path','media','people','no_code','include'}。
 
     `include`（v1.45.5）：勾选项集合 —— "favorite" / "play" / "rating" / "people" / "gender"。
     只写勾选的字段；导入侧本来就是「键存在才写」，所以空字段不会误清对方的值。
+
+    `progress`（v1.46.12）：`progress(done, total, label)`，返回 True 表示中止
+    （中止时**不写文件**，返回 {'ok': False, 'cancelled': True}）。
     """
     inc = set(include) if include else {"favorite", "play", "rating", "people", "gender"}
     if not inc:
         inc = {"favorite", "play", "rating", "people", "gender"}
     try:
+        _tick(progress, 0, 0, "正在读取偏好记录…")
         rows = _media_rows(scope)
         media, seen, no_code = [], {}, 0
-        for r in rows:
+        n_all = len(rows)
+        _tick(progress, 0, n_all, f"整理影片偏好 0/{n_all}")
+        for i, r in enumerate(rows, 1):
+            if i % 100 == 0 and _tick(progress, i, n_all,
+                                      f"整理影片偏好 {i}/{n_all}"):
+                return {"ok": False, "cancelled": True}
             code = duplicates.extract_num(r.get("file_path"), r.get("title"))
             if not code:
                 # 没有番号的片子（剧集 / 纪录片）用标题兜底，仍可恢复
@@ -122,6 +152,7 @@ def export_prefs(dest_json: str, scope: str = "all", include=None) -> dict:
 
         people = []
         if "people" in inc or "gender" in inc:
+            _tick(progress, n_all, n_all, "正在整理人物收藏 / 置顶…")
             for p in _people_rows():
                 if not p.get("name"):
                     continue
@@ -134,6 +165,9 @@ def export_prefs(dest_json: str, scope: str = "all", include=None) -> dict:
                     it["gender"] = (p.get("gender") or "")
                 people.append(it)
 
+        if _tick(progress, n_all, n_all,
+                 f"正在写入文件（影片 {len(media)} 条 · 人物 {len(people)} 位）…"):
+            return {"ok": False, "cancelled": True}       # 写盘前还有机会停
         payload = {
             "type": "lmc-prefs",
             "app": ver.APP_NAME,
@@ -157,28 +191,53 @@ def export_prefs(dest_json: str, scope: str = "all", include=None) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def _num_index(conn):
+def _num_index(conn, progress=None):
     """番号 / 标题兜底键 → [media 行]（一次性建索引，避免逐条全表扫）。"""
+    total = 0
+    try:
+        total = int(conn.execute("SELECT COUNT(*) FROM media").fetchone()[0])
+    except Exception:
+        pass
+    _tick(progress, 0, total, f"正在建立番号索引 0/{total}")
     idx = {}
-    for r in conn.execute("SELECT id, title, file_path, nfo_path FROM media"):
+    for i, r in enumerate(conn.execute(
+            "SELECT id, title, file_path, nfo_path FROM media"), 1):
         code = duplicates.extract_num(r["file_path"], r["title"])
         key = ("n:" + code) if code else ("t:" + (r["title"] or "").strip().lower())
         idx.setdefault(key, []).append(dict(r))
+        if i % 2000 == 0:
+            _tick(progress, i, total, f"正在建立番号索引 {i}/{total}")
+    _tick(progress, total, total, f"番号索引就绪（{len(idx)} 个键），开始合并…")
     return idx
 
 
-def import_prefs(src_json: str, dry_run: bool = False) -> dict:
-    """从 JSON 恢复偏好（合并式；不删数据）。返回统计。"""
+def import_prefs(src_json: str, dry_run: bool = False, progress=None) -> dict:
+    """从 JSON 恢复偏好（合并式；不删数据）。返回统计。
+
+    `progress`（v1.46.12）：`progress(done, total, label)`，返回 True 表示中止。
+    中止时**已处理的部分照常提交**（合并式操作可反复执行，不会写坏数据），
+    返回值里带 `cancelled: True`。
+    """
     try:
+        _tick(progress, 0, 0, "正在读取备份文件…")
         with open(src_json, "r", encoding="utf-8") as f:
             data = json.load(f)
         if data.get("type") != "lmc-prefs":
             return {"ok": False, "error": "不是偏好备份文件（缺少 type=lmc-prefs）"}
         conn = db.get_conn()
-        idx = _num_index(conn)
+        idx = _num_index(conn, progress)
 
+        items = data.get("media") or []
+        n_items = len(items)
+        _tick(progress, 0, n_items, f"正在合并影片偏好 0/{n_items}")
         m_ok = m_miss = nfo_ok = 0
-        for it in data.get("media") or []:
+        cancelled = False
+        for i, it in enumerate(items, 1):
+            if i % 25 == 0 and _tick(
+                    progress, i, n_items,
+                    f"正在合并影片偏好 {i}/{n_items}（已写回 nfo {nfo_ok}）"):
+                cancelled = True
+                break
             code = (it.get("num") or "").strip().lower()
             key = ("n:" + code) if code else \
                   ("t:" + (it.get("title") or "").strip().lower())
@@ -220,7 +279,18 @@ def import_prefs(src_json: str, dry_run: bool = False) -> dict:
                         break
 
         p_ok = p_miss = 0
-        for p in data.get("people") or []:
+        ppl = data.get("people") or []
+        n_ppl = len(ppl)
+        if cancelled:
+            _tick(progress, n_items, n_items,
+                  f"已停止合并影片（影片 {m_ok} 条 · nfo {nfo_ok} 个）")
+        elif _tick(progress, n_items, n_items,
+                   f"影片合并完成 {m_ok} 条，正在合并人物偏好 0/{n_ppl}"):
+            cancelled = True              # 人物阶段前停下也算「停止」
+        for j, p in enumerate(([] if cancelled else ppl), 1):
+            if j % 50 == 0:
+                _tick(progress, n_items, n_items,
+                      f"正在合并人物偏好 {j}/{n_ppl}")
             name = (p.get("name") or "").strip()
             if not name:
                 p_miss += 1
@@ -254,8 +324,9 @@ def import_prefs(src_json: str, dry_run: bool = False) -> dict:
             else:
                 p_miss += 1
         if not dry_run:
+            _tick(progress, n_items, n_items, "正在提交改动…")
             conn.commit()
-        return {"ok": True, "dry_run": bool(dry_run),
+        return {"ok": True, "dry_run": bool(dry_run), "cancelled": bool(cancelled),
                 "media_ok": m_ok, "media_miss": m_miss,
                 "people_ok": p_ok, "people_miss": p_miss, "nfo_written": nfo_ok,
                 "stamp": data.get("exported_at") or ""}

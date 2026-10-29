@@ -270,7 +270,7 @@ _JS = r"""
     d.id = '__lmc_cf_bar';
     return d;
   };
-  var bar = mk('\u2714 我已完成验证，读取 Cookie', '#1f6feb', '#ffffff');
+  var bar = mk('\u2714 我已完成验证，读取 Cookie', '#006fee', '#ffffff');
   bar.onclick = function () {
     bar.textContent = '正在读取…';
     try { window.pywebview.api.done(); } catch (e) {

@@ -14,6 +14,7 @@ v1.5.0 增强：
 """
 import os
 import re
+import threading
 from typing import Callable, Optional
 
 import database as db
@@ -80,6 +81,43 @@ def _under(path: str, dirs: set) -> bool:
     return any(path == d or path.startswith(d + os.sep) for d in dirs)
 
 
+# ---------- v1.46.13（反馈 1/2/3）：逐条目扫描进度 ----------
+# 为什么要个「线程本地上下文」而不是给下面 8 个叶子函数逐个加形参：
+#   ① 索引函数是**分层调用**的（scan → _do_movie → _index_movie），再加一个
+#      `on_item` 形参要穿 5 层，每层都得记得往下传，漏一层就静默无进度；
+#   ② 扫描可能同时跑两份（主窗右键扫描 + 工具窗「扫描」），所以不能放模块级变量，
+#      用 threading.local 各自隔离，互不串数。
+# 约定：`on_item({n, path, new, kind, title, index, total})`，`n` 是**本路径内**已处理数；
+#      抛异常一律吞掉（进度上报绝不能影响扫描本身）。
+_CTX = threading.local()
+
+
+def _ctx_begin(on_item, path_index: int = 0, path_total: int = 0):
+    prev = getattr(_CTX, "cur", None)
+    _CTX.cur = {"on_item": on_item, "index": path_index, "total": path_total, "n": 0}
+    return prev
+
+
+def _ctx_end(prev):
+    _CTX.cur = prev
+
+
+def _ctx_item(path: str, is_new: bool = False, kind: str = "movie", title: str = ""):
+    """每处理完一个条目回报一次（**新增与已存在都报** —— 否则百分比会一直停在 0%）。"""
+    c = getattr(_CTX, "cur", None)
+    if not c:
+        return
+    c["n"] += 1
+    cb = c.get("on_item")
+    if cb is None:
+        return
+    try:
+        cb({"n": c["n"], "path": path, "new": bool(is_new), "kind": kind,
+            "title": title or "", "index": c["index"], "total": c["total"]})
+    except Exception:
+        pass
+
+
 def _link_actors(media_id: int, actors: list):
     db.clear_media_people(media_id)
     for i, a in enumerate(actors):
@@ -123,11 +161,25 @@ def backfill_people_links(limit: int = 1500, progress: Callable[[str], None] = N
 
 
 def scan_library(root: str, progress: Callable[[str], None] = None,
-                 library_name: Optional[str] = None, mode: str = "overwrite") -> dict:
+                 library_name: Optional[str] = None, mode: str = "overwrite",
+                 on_item: Callable[[dict], None] = None,
+                 path_index: int = 0, path_total: int = 0) -> dict:
     """扫描一个媒体库根目录，返回统计。library_name 给定时 media.library=库名。
 
     mode: new(仅新增与修改) / fill(仅补充缺失) / overwrite(全量覆盖，默认)。
+    on_item: v1.46.13 —— 每处理完一个条目回调一次（含「已存在」的），供 UI 算真进度；
+             path_index/path_total 只是随回调带出去的「第几个路径」，本函数不做排序判断。
     """
+    prev = _ctx_begin(on_item, path_index, path_total)
+    try:
+        return _scan_root(root, progress, library_name, mode)
+    finally:
+        _ctx_end(prev)
+
+
+def _scan_root(root: str, progress: Callable[[str], None] = None,
+               library_name: Optional[str] = None, mode: str = "overwrite") -> dict:
+    """真正的扫描实现（一进一出由 scan_library 负责装上/卸下进度上下文）。"""
     root = os.path.abspath(root)
     counts = {"movie": 0, "tvshow": 0, "episode": 0}
     nfo_dirs = set()
@@ -233,6 +285,9 @@ def _index_movie(info: dict, video: str, folder: str, root: str, counts: dict,
     mid = db.upsert_media_by_path(mode=mode, **info)
     if mid and people:
         _link_actors(mid, people)
+    # v1.46.13（反馈 2/3）：**已存在的条目也要回报** —— 旧版只在 was_new 时发进度，
+    # 于是「扫描新添加和修改的」在没新片时进度环 / 进度条一直停在 0%，看着像没动。
+    _ctx_item(video, was_new, "movie", info.get("title") or "")
     if was_new:
         counts["movie"] += 1
         if progress:
@@ -299,6 +354,7 @@ def _do_tvshow(folder: str, root: str, counts: dict, progress, library_name=None
         sid = db.upsert_media_by_path(mode=mode, **info)
         if sid and people:
             _link_actors(sid, people)
+        _ctx_item(nfo_path, was_new, "tvshow", info.get("title") or "")
         if was_new:
             counts["tvshow"] += 1
             if progress:
@@ -356,6 +412,7 @@ def _do_tvshow(folder: str, root: str, counts: dict, progress, library_name=None
                 eid = db.upsert_media_by_path(mode=mode, **ep)
                 if eid and people_e:
                     _link_actors(eid, people_e)
+                _ctx_item(video, was_new, "episode", ep.get("title") or "")
                 if was_new:
                     counts["episode"] += 1
             except Exception as e:
@@ -420,6 +477,7 @@ def _do_bare_episode(video: str, parent_id, parent_title: str, season_dir: str,
         }
         was_new = db.media_id_by_path(video) is None
         db.upsert_media_by_path(mode=mode, **info)
+        _ctx_item(video, was_new, "episode", title or "")
         if was_new:
             counts["episode"] += 1
             if progress:
@@ -471,6 +529,7 @@ def _do_bare_video(path: str, root: str, counts: dict, progress, library_name=No
         }
         was_new = db.media_id_by_path(path) is None
         db.upsert_media_by_path(mode=mode, **info)
+        _ctx_item(path, was_new, "movie", title or "")
         if was_new:
             counts["movie"] += 1
             if progress:

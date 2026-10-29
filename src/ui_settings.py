@@ -53,7 +53,7 @@ from scan_ring import ScanRing     # v1.39.0（需求 3）：导航项「进行�
 # 等宽字体 + 半透明深色底 + 浅色字，复制运行日志的观感（仅样式复刻，不做实时文件 tail）。
 LOG_BOX_STYLE = (
     "font-family: Consolas, 'Courier New', Menlo, monospace; "
-    "font-size:11px; background:rgba(0,0,0,0.25); color:#d9cfbf;"
+    "font-size:11px; background:rgba(0,0,0,0.25); color:#d4d4d8;"
 )
 from ui_hero import compact_button
 
@@ -81,7 +81,15 @@ NAV_ROW_H = 52          # 导航菜单每行高度（含 ↑/↓ + 开关）
 SRC_ROW_H = 44          # 数据源每行高度（描述允许换到第 2 行 + ↑/↓/测试）
 # v1.14.0 反馈 6：媒体库列表每行也要留足高度 —— 原来用 row.sizeHint()，
 # 行内的「编辑/扫描/删除」按钮被压得底部缺一截（截图为证）。
-LIB_ROW_H = 54          # 媒体库每行高度（按此定 sizeHint，按钮完整可见）
+# v1.46.15（反馈「压缩已配置的媒体库的高度」）：54 → 44。54 的时候行里其实空着一大截：
+#   列表项自带 `QListWidget::item{padding:5px 4px}` 吃掉上下各 5px（行内控件实际只有 44，
+#   按钮 28 + 行内边距 8 = 36，还剩 8px 分给上下），视觉上三行像被拉开。
+#   现在把这个列表单独命名 `LibList`，在 QSS 里把 item padding 压到 2px，行高 44 →
+#   行内控件正好 40 = 按钮 28 + 行边距 8 + 4px 余量；列表整体 3 行从 172 → 138。
+LIB_ROW_H = 44          # 媒体库每行高度（按此定 sizeHint，按钮完整可见）
+#: 列表容器自身的额外高度 = 上下边框各 1px + 首/末项 2px 内边距（QSS #LibList::item）。
+#  v1.46.15 之前是写死的 +10：那是给 5px item padding 留的，跟着 44 的行高会多出一条空白。
+LIST_CHROME = 6
 
 
 def html_esc(text):
@@ -113,53 +121,77 @@ def _human_bytes(n):
         n /= 1024
 
 
-# ---------- 自绘色卡（v1.43.4）----------
+# ---------- 自绘色卡（v1.43.4 起自绘；v2.0.0 改 HeroUI 圆形）----------
 class _AccentSwatch(QPushButton):
-    """高亮色色卡：**自绘圆角扁平方形** + 选中白边 + 手绘勾。
+    """高亮色色卡：**正圆色点 + 选中白环 + 手绘勾**（HeroUI 的 swatch 语义）。
 
-    为什么不用「QSS 圆角 + 文字 ✓」（真机截图实锤的两个问题）：
-      ① 原来是 26×26 + `border-radius:13px`（正圆）：圆角把中间的 ✓ 裁掉一圈，
-         用户看到「圆心显示不全」；
-      ② 更要命的是 **✓ 这个字形在按钮字体下根本渲染不出来**，白边里是个 tofu 方框。
-    ⇒ 自绘：矩形/圆角/勾全部用 QPainter 画，尺寸与字形都不再依赖字体与 QSS。
+    为什么不用「QSS 圆角 + 文字 ✓」（v1.43.4 真机截图实锤的两个问题）：
+      ① 26×26 + `border-radius:13px`（正圆）时，圆角会把中间的 ✓ 裁掉一圈；
+      ② **✓ 这个字形在按钮字体下根本渲染不出来**，白边里是个 tofu 方框。
+    ⇒ 自绘：圆、环、勾全部 QPainter 画，尺寸与字形都不依赖字体与 QSS。
+
+    v2.0.0：从「30×24 圆角扁平方形」改成 **28×28 正圆**，选中态参考 HeroUI Pro
+    的模板配色切换器 —— 色点外一圈 2px 白环（留 2px 间隙）+ 居中的白勾。
+    色点的直径固定 20（选中时 18，给白环让位），11 个点排在 1170 宽的内容区里绰绰有余。
     """
 
-    W, H, R = 30, 24, 6      # 圆角扁平方形
+    W = H = 28
+    R_DOT = 10.0          # 未选中：色点半径
+    R_DOT_ON = 9.0        # 选中：色点略缩，给白环留间隙
+    R_RING = 13.0         # 选中：外环半径
+    RING_W = 2.0
 
-    def __init__(self, hexv, parent=None):
+    def __init__(self, hexv, name="", parent=None):
         super().__init__(parent)
         self._hex = hexv
+        self._name = name
         self._on = False
         self.setFixedSize(self.W, self.H)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("QPushButton{background:transparent;border:none;padding:0;}")
+        if name:
+            self.setToolTip(f"{name}  {hexv}")
 
     def set_on(self, on: bool):
         if bool(on) != self._on:
             self._on = bool(on)
             self.update()
 
+    def enterEvent(self, e):
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.update()
+        super().leaveEvent(e)
+
     def paintEvent(self, e):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.Antialiasing, True)
-            w, h = self.width(), self.height()
-            rect = QRectF(1, 1, w - 2, h - 2)
-            p.setBrush(QColor(self._hex))
-            border = QColor(255, 255, 255) if self._on else QColor(255, 255, 255, 56)
-            p.setPen(QPen(border, 2))
-            p.drawRoundedRect(rect, self.R, self.R)
+            cx, cy = self.width() / 2.0, self.height() / 2.0
+            hover = self.underMouse()
             if self._on:
-                # 手绘勾：等比线宽 2、圆头，落在 30×24 的中心，怎么缩都不会被裁
-                pen = QPen(QColor(255, 255, 255), 2)
+                # 选中：外环（白）+ 间隙 + 色点 + 勾
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(255, 255, 255, 235), self.RING_W))
+                p.drawEllipse(QPointF(cx, cy), self.R_RING, self.R_RING)
+                r = self.R_DOT_ON
+            else:
+                r = self.R_DOT + (0.6 if hover else 0.0)
+            p.setBrush(QColor(self._hex))
+            p.setPen(QPen(QColor(255, 255, 255, 70 if not hover else 120), 1.0))
+            p.drawEllipse(QPointF(cx, cy), r, r)
+            if self._on:
+                # 手绘勾：线宽 2、圆头，按色点半径等比缩放，怎么缩都不会被裁
+                pen = QPen(QColor(255, 255, 255), 2.0)
                 pen.setCapStyle(Qt.RoundCap)
                 pen.setJoinStyle(Qt.RoundJoin)
                 p.setPen(pen)
-                cx, cy = w / 2.0, h / 2.0
                 path = QPainterPath()
-                path.moveTo(cx - 5.0, cy + 0.5)
-                path.lineTo(cx - 1.5, cy + 4.0)
-                path.lineTo(cx + 5.0, cy - 4.0)
+                path.moveTo(cx - 3.9, cy + 0.3)
+                path.lineTo(cx - 1.1, cy + 3.1)
+                path.lineTo(cx + 4.1, cy - 3.2)
                 p.drawPath(path)
         finally:
             p.end()
@@ -189,12 +221,12 @@ class ToggleSwitch(QAbstractButton):
         self._anim.finished.connect(self._settle)
         self.toggled.connect(self._animate)
 
-    # 轨道底色：关 #4a4038 → 开 <当前高亮色>。
+    # 轨道底色：关 #3f3f46 → 开 <当前高亮色>。
     # v1.26.0（反馈 1）：原来这里写死朱红 —— 用户在「外观 → 高亮色」里换成藕荷/天青后，
     # 设置页里所有自绘开关的轨道**仍然是红的**（截图：色板高亮停在藕荷，开关全是朱红）。
     # 现在改成每次绘制时现取高亮色（与 QSS 令牌同源）。_ON 保留为兜底值 = ACCENT_DEFAULT。
-    _OFF = (0x4a, 0x40, 0x38)
-    _ON = (0xc0, 0x39, 0x2b)
+    _OFF = (0x3f, 0x3f, 0x46)
+    _ON = (0x00, 0x6f, 0xee)
 
     @staticmethod
     def accent_on():
@@ -232,7 +264,7 @@ class ToggleSwitch(QAbstractButton):
         p.setBrush(QColor(*[int(a + (b - a) * t) for a, b in zip(self._OFF, on)]))
         p.drawRoundedRect(r, tr, tr)
         kx = pad + t * (r.width() - 2 * pad - (h - 2 * pad))
-        p.setBrush(QColor("#f3d9a0"))
+        p.setBrush(QColor("#fafafa"))
         p.drawEllipse(int(kx), pad, h - 2 * pad, h - 2 * pad)
 
     def _animate(self, checked):
@@ -430,7 +462,7 @@ class RadarChart(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         dims = self._dims
         if not dims:
-            p.setPen(QColor("#8c8071"))
+            p.setPen(QColor("#71717a"))
             p.drawText(self.rect(), Qt.AlignCenter, "暂无数据")
             p.end()
             return
@@ -458,12 +490,12 @@ class RadarChart(QWidget):
             a = -math.pi / 2 + 2 * math.pi * i / n
             rr = r * max(0.015, min(1.0, float(v)))
             poly.append(QPointF(cx + rr * math.cos(a), cy + rr * math.sin(a)))
-        p.setPen(QPen(QColor("#5fb0ff"), 2.0))
-        p.setBrush(QBrush(QColor(95, 176, 255, 62)))
+        p.setPen(QPen(QColor("#338ef7"), 2.0))
+        p.setBrush(QBrush(QColor(51, 142, 247, 62)))
         p.drawPolygon(poly)
         # 3) 顶点小圆点
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#8fd0ff"))
+        p.setBrush(QColor("#8fc0ff"))
         for pt in poly:
             p.drawEllipse(pt, 2.6, 2.6)
         # 4) 轴标签
@@ -474,7 +506,7 @@ class RadarChart(QWidget):
             lx = cx + (r + 18) * math.cos(a)
             ly = cy + (r + 16) * math.sin(a)
             box = QRectF(lx - 46, ly - 16, 92, 32)
-            p.setPen(QColor("#e2d7c3"))
+            p.setPen(QColor("#a1a1aa"))
             p.drawText(box, Qt.AlignCenter, f"{label}\n{int(round(v * 100))}%")
         p.end()
 
@@ -615,6 +647,58 @@ class TagOptRunWorker(QThread):
         self.done.emit(st)
 
 
+class PrefsWorker(QThread):
+    """偏好导入 / 导出，搬到后台线程跑（v1.46.12）。
+
+    为什么必须搬：原来 `_export_prefs/_import_prefs` 直接在当前（GUI）线程里调
+    `prefs_mod.export_prefs/import_prefs`，实测一次导入 **7.09s** 且期间事件循环
+    **一次都不跳**（50ms 定时器 0 次触发）——
+      · 415 个 nfo 逐个回写（每个要 exists + ET.parse + tree.write）≈ 4.2s；
+      · 结尾 `on_changed()` 整页重建 ≈ 1.4s；
+      · 中途没有任何 `processEvents()`。
+    Windows 只要 5 秒不泵消息就给窗口打「未响应」，用户看到的就是「卡死了」。
+
+    这里只做两件事：跑真活、把 `progress` 转发出去；界面归页面管。
+    `request_stop()` 是**协作式**的 —— 真正的停止点在 `prefs._tick` 每次回调时
+    看返回值，所以点「停止」最多等到下一批（25 条 / 2 次 nfo 写回）。
+    """
+
+    progress = Signal(int, int, str)      # done, total（0=不定长）, label
+    done = Signal(dict)
+
+    def __init__(self, mode, path, include=None, parent=None):
+        super().__init__(parent)
+        self.mode = mode                  # "export" / "import"
+        self.path = path
+        self.include = list(include or [])
+        self._stop = False
+
+    def request_stop(self):
+        self._stop = True
+
+    def _cb(self, done, total, label):
+        self.progress.emit(int(done), int(total), str(label))
+        return self._stop                 # True → prefs 侧就地中止
+
+    def run(self):
+        try:
+            if self.mode == "export":
+                r = prefs_mod.export_prefs(self.path, "all", self.include,
+                                           progress=self._cb)
+            else:
+                r = prefs_mod.import_prefs(self.path, progress=self._cb)
+        except Exception as e:            # prefs 内部已兜底，这里是双保险
+            r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        finally:
+            # 本线程的 SQLite 连接用完就关 —— 别留给已结束的线程
+            # （db.get_conn 是 thread-local，不关会挂在 threading.local 里等 GC）
+            try:
+                db.close_conn()
+            except Exception:
+                pass
+        self.done.emit(r)
+
+
 class VectorEditorDialog(QDialog):
     """向量编辑（v1.24.0 反馈 8，借鉴 nfo_profiler 的同名功能）。
 
@@ -643,7 +727,7 @@ class VectorEditorDialog(QDialog):
             "权重含义：**>1 加强**、1 = 默认、0~1 减弱、**0 = 屏蔽**、**< 0 = 软排斥**（命中就减分）。\n"
             "权重存在数据库 `vector_overrides` 表里，并在 settings.json 留一份快照随配置一起导出。"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         v.addWidget(hint)
 
         row = QHBoxLayout()
@@ -705,7 +789,7 @@ class VectorEditorDialog(QDialog):
         v.addLayout(btns)
 
         self.status = QLabel("—")
-        self.status.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.status.setStyleSheet("color:#71717a;font-size:11px;")
         self.status.setWordWrap(True)
         v.addWidget(self.status)
 
@@ -920,12 +1004,12 @@ class CloudflareDialog(GlassDialog):
         # v1.44.1（需求 3）：顶部网址**可点击** —— 点一下就用内置浏览器进入该站点
         head = QLabel(
             f"<b>数据源网址：</b><a href='{html_esc(host_url)}' "
-            f"style='color:#e7c86a;'>{html_esc(host_url)}</a><br>"
+            f"style='color:#d4d4d8;'>{html_esc(host_url)}</a><br>"
             "点上面这个网址（或下方「打开内置浏览器」）进入站点，"
             "<b>登录 / 过完人机校验</b>后点「获取 Cookie」，自动抓取并复用。")
         head.setWordWrap(True)
         head.setTextFormat(Qt.RichText)
-        head.setStyleSheet("color:#e8d9b6;font-size:12px;")
+        head.setStyleSheet("color:#d4d4d8;font-size:12px;")
         head.setOpenExternalLinks(False)
         head.linkActivated.connect(lambda _u="": self._open_builtin())
         v.addWidget(head)
@@ -936,7 +1020,7 @@ class CloudflareDialog(GlassDialog):
         steps.setTextFormat(Qt.RichText)
         steps.setWordWrap(True)
         steps.setTextFormat(Qt.RichText)
-        steps.setStyleSheet("color:#a2967f;font-size:11px;")
+        steps.setStyleSheet("color:#a1a1aa;font-size:11px;")
         v.addWidget(steps)
 
         row = QHBoxLayout()
@@ -968,7 +1052,7 @@ class CloudflareDialog(GlassDialog):
 
         self.state = QLabel("—")
         self.state.setWordWrap(True)
-        self.state.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.state.setStyleSheet("color:#a1a1aa;font-size:11px;")
         v.addWidget(self.state)
 
         # ---------- 高级 ▾：手动粘贴 cookie（内置浏览器不可用时的兜底） ----------
@@ -986,7 +1070,7 @@ class CloudflareDialog(GlassDialog):
                      "把整串结果（重点含 <code>cf_clearance</code>）粘到下面：")
         tip.setWordWrap(True)
         tip.setTextFormat(Qt.RichText)
-        tip.setStyleSheet("color:#a2967f;font-size:11px;")
+        tip.setStyleSheet("color:#a1a1aa;font-size:11px;")
         av.addWidget(tip)
         self.ed = QPlainTextEdit()
         self.ed.setPlaceholderText("cf_clearance=…")
@@ -1023,10 +1107,10 @@ class CloudflareDialog(GlassDialog):
             self.state.setText(
                 f"{mark}：该站点已保存 {st['count']} 条（{', '.join(st['names'][:6])}）"
                 f"，保存于 {st['at']}。")
-            self.state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            self.state.setStyleSheet("color:#45d483;font-size:11px;")
         else:
             self.state.setText("当前该站点没有保存任何手工 cookie，请求仍会被拦。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
 
     def _toggle_adv(self, on):
         self.adv.setVisible(bool(on))
@@ -1087,7 +1171,7 @@ class CloudflareDialog(GlassDialog):
         ok, msg = self._webview_ready()
         self.state.setText(("✅ " if ok else "❌ ") + msg)
         self.state.setStyleSheet(
-            "color:#9ecf8a;font-size:11px;" if ok else "color:#e08a7a;font-size:11px;")
+            "color:#45d483;font-size:11px;" if ok else "color:#f87171;font-size:11px;")
 
     def _read_cookie(self):
         """v1.40.2（反馈 2）：**独立**的「读取 Cookie」按钮。
@@ -1119,7 +1203,7 @@ class CloudflareDialog(GlassDialog):
                 self._on_builtin_snapshot = True
                 self.state.setText("正在向内置浏览器请求 cookie…（若窗口无响应，"
                                    "请在窗口里点「读取 Cookie」）")
-                self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+                self.state.setStyleSheet("color:#8fc0ff;font-size:11px;")
                 applog.log("[站点验证] 读取 Cookie：内置浏览器在运行，请求 dump")
                 if not self._timer.isActive():
                     self._timer.start()
@@ -1139,7 +1223,7 @@ class CloudflareDialog(GlassDialog):
         if not snap or not os.path.exists(snap):
             self.state.setText("❌ 还没读到任何 cookie —— 请先点「打开内置浏览器」，"
                                "在弹出的窗口里过一次校验再点本按钮。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             applog.log("[站点验证] 读取 Cookie：无快照文件，需先过一次校验")
             return
         try:
@@ -1147,13 +1231,13 @@ class CloudflareDialog(GlassDialog):
                 data = json.load(f)
         except Exception as e:
             self.state.setText(f"❌ 快照文件解析失败：{e}")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             return
         want = urllib.parse.urlparse(self.host_url).netloc
         if data.get("host") and want and data["host"] != want:
             self.state.setText(f"⚠ 快照是给 {data['host']} 的，与本站 {want} 不符 ——"
                                "请先在内置浏览器里打开本站过一次校验。")
-            self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            self.state.setStyleSheet("color:#8fc0ff;font-size:11px;")
             return
         self.state.setText("已从内置浏览器快照读回 cookie，正在注入并复测…")
         self._on_helper_done(data)
@@ -1200,13 +1284,13 @@ class CloudflareDialog(GlassDialog):
         ok, msg = self._webview_ready()
         if not ok:
             self.state.setText(f"❌ {msg}　可点「高级 ▾」手动粘贴 cookie。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             self.btn_adv.setChecked(True)
             return
         # 已有子进程在跑就不重复开
         if self._proc is not None and self._proc.poll() is None:
             self.state.setText("内置浏览器已在运行 —— 请在弹出的窗口里完成验证。")
-            self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            self.state.setStyleSheet("color:#8fc0ff;font-size:11px;")
             # v1.40.3：窗口可能被主程序挡住 → 顺手把它拉回前台（修「点了没反应」）
             self._focus_builtin_window()
             return
@@ -1226,7 +1310,7 @@ class CloudflareDialog(GlassDialog):
                        f"url={self.host_url}")
             self.state.setText("已在弹出的窗口里打开站点 —— 完成验证后点窗口右下角的"
                               "「✔ 我已完成验证，读取 Cookie」（或直接关窗）。")
-            self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            self.state.setStyleSheet("color:#8fc0ff;font-size:11px;")
             self._timer.start()
             # ★ v1.40.3（本轮反馈 2）：点击后**给即时反馈 + 主动把窗口拉前台**。
             #   子进程要解压 onefile + 起 WebView2，真实窗口出现约需 2~5 秒；
@@ -1245,7 +1329,7 @@ class CloudflareDialog(GlassDialog):
         except Exception as e:
             applog.log(f"[站点验证] 启动内置浏览器失败：{e}")
             self.state.setText(f"❌ 启动失败：{e}　可点「高级 ▾」手动粘贴。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             self._restore_open_btn()
 
     def _restore_open_btn(self):
@@ -1294,13 +1378,13 @@ class CloudflareDialog(GlassDialog):
             err = (data or {}).get("error") or "内置浏览器未取到 cookie"
             self._stop_builtin()
             self.state.setText(f"❌ {err}　可再试一次，或点「高级 ▾」手动粘贴。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             return
         pairs = scraper_mod.parse_cookie_header(data.get("cookie", ""))
         if not pairs:
             self._stop_builtin()
             self.state.setText("❌ 取回的 cookie 解析为空，请重试。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             return
         n = scraper_mod.inject_cookies(self.host_url, pairs)
         has_pass = any(k in scraper_mod._PASS_COOKIE_NAMES for k in pairs)
@@ -1318,7 +1402,7 @@ class CloudflareDialog(GlassDialog):
             self._session_owned = True
             self.state.setText(self.state.text()
                                + "　✅ 浏览器会话已就绪（抓取中，请保持验证窗口开启）")
-            self.state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            self.state.setStyleSheet("color:#45d483;font-size:11px;")
             applog.log(f"[站点验证] 浏览器会话已托管 {self.host_url}（pid={self._proc.pid}）")
         else:
             self._stop_builtin()
@@ -1331,13 +1415,13 @@ class CloudflareDialog(GlassDialog):
             pass
         self.state.setText("已把 `document.cookie` 复制到剪贴板 —— "
                            "到浏览器 Console 里粘贴、回车，再把输出整串复制回来。")
-        self.state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.state.setStyleSheet("color:#8fc0ff;font-size:11px;")
 
     def _save_and_verify(self):
         pairs = scraper_mod.parse_cookie_header(self.ed.toPlainText())
         if not pairs:
             self.state.setText("没解析出任何 cookie —— 请确认粘贴的是 `name=value` 形式的内容。")
-            self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.state.setStyleSheet("color:#f87171;font-size:11px;")
             return
         n = scraper_mod.inject_cookies(self.host_url, pairs)
         has_pass = any(k in scraper_mod._PASS_COOKIE_NAMES for k in pairs)
@@ -1378,7 +1462,7 @@ class CloudflareDialog(GlassDialog):
         diag = res.get("diag") or {}
         if ok:
             self.state.setText(f"✅ 复测通过：{msg}（{res.get('ms')} ms）")
-            self.state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            self.state.setStyleSheet("color:#45d483;font-size:11px;")
             applog.log(f"[站点验证] 复测通过 -> {self.host_url}（{res.get('ms')} ms）")
             return
         # v1.40.2（反馈 2）：**修掉误导性结论**。老文案不管什么原因都甩一句
@@ -1413,7 +1497,7 @@ class CloudflareDialog(GlassDialog):
         # 而实际测的却是写死的 imdb，用户根本看不出测错了对象。
         _hn = urllib.parse.urlparse(self.host_url).netloc or self.host_url
         self.state.setText(f"❌ 复测未通过（{_hn}）：{msg}（{res.get('ms')} ms）{tail}")
-        self.state.setStyleSheet("color:#e08a7a;font-size:11px;")
+        self.state.setStyleSheet("color:#f87171;font-size:11px;")
         # 把分层诊断结论写进运行日志 —— 用户明确要求「查看运行日志，查明失败原因」
         applog.log(f"[站点验证] 复测未通过 -> {self.host_url}：{msg}（{res.get('ms')} ms）")
         if diag:
@@ -1510,7 +1594,7 @@ class AutoFillDialog(GlassDialog):
             "`vector_overrides` 表，立刻对智能推荐生效）。\n"
             "同名条目会被**覆盖**；这里选的参数会记住，下次打开还是这套。"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         v.addWidget(hint)
 
         # ---- 统计范围 ----
@@ -1547,7 +1631,7 @@ class AutoFillDialog(GlassDialog):
             "某个媒体库适合「这个库我口味不一样」。")
         f1.addRow("统计", self.cb_scope)
         self.lb_scope_tip = QLabel("—")
-        self.lb_scope_tip.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.lb_scope_tip.setStyleSheet("color:#71717a;font-size:11px;")
         # v1.34.2（用户反馈 1）根因修复：wordWrap=True 时 QLabel 的 sizeHint 会按多行
         # 估算高度，QFormLayout 把它拉伸到约 3 行高（实测 v1.34.1 tip 高 60px、v1.34.2 初版
         # 仍 45px，而文本只有 1 行 ~17px）—— 这正是「统计范围组框下方留白太多」的真因。
@@ -1567,7 +1651,7 @@ class AutoFillDialog(GlassDialog):
         gl.setVerticalSpacing(8)
         for c, h in enumerate(("维度", "启用", "取前 N 个", "权重", "说明")):
             lb = QLabel(h)
-            lb.setStyleSheet("color:#a2967f;font-size:11px;")
+            lb.setStyleSheet("color:#a1a1aa;font-size:11px;")
             gl.addWidget(lb, 0, c)
         self.dim_rows = {}
         dims_cfg = (self._prefs.get("dims") or {})
@@ -1614,11 +1698,11 @@ class AutoFillDialog(GlassDialog):
             "权重含义与「向量编辑」一致：**>1 加强**、1 = 默认、0~1 减弱、**0 = 屏蔽**。\n"
             "自动填充是**覆盖写**，不会替你删掉别的条目 —— 想清干净先点「全部清空」。"))
         note.setWordWrap(True)
-        note.setStyleSheet("color:#8c8071;font-size:11px;")
+        note.setStyleSheet("color:#71717a;font-size:11px;")
         v.addWidget(note)
 
         self.lb_est = QLabel("—")
-        self.lb_est.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.lb_est.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.lb_est.setWordWrap(True)
         v.addWidget(self.lb_est)
 
@@ -2637,6 +2721,7 @@ class SettingsDialog(QDialog):
             ("_ae_probe_worker", "引擎设置"),
             ("_ae_models_worker", "引擎设置"),
             ("_ae_launch_worker", "引擎设置"),
+            ("_prefs_worker", "数据管理"),      # v1.46.12：偏好导入 / 导出
         ):
             w = getattr(self, attr, None)
             if w is not None and w.isRunning():
@@ -2679,7 +2764,7 @@ class SettingsDialog(QDialog):
         self._current_key = key
         for k, b in self.sub_btns.items():
             b.setStyleSheet(
-                "background:rgba(255,255,255,0.12);color:#f7e3b4;" if k == key else "")
+                "background:rgba(255,255,255,0.12);color:#fafafa;" if k == key else "")
         self.stack.setCurrentWidget({
             "个性化设置": self._pg_personal,
             "手动修改": self._pg_manual,
@@ -2783,20 +2868,24 @@ class SettingsDialog(QDialog):
         g0v.addLayout(af)
         # 语言说明（切到非基准语言时会写明「哪些已译、哪些仍是中文」）
         self.ap_lang_hint = QLabel("")
-        self.ap_lang_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.ap_lang_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.ap_lang_hint.setWordWrap(True)
         g0v.addWidget(self.ap_lang_hint)
         self._refresh_lang_hint()
         self.ap_hint = QLabel("")
-        self.ap_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.ap_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.ap_hint.setWordWrap(True)
         g0v.addWidget(self.ap_hint)
         # 窗口透明度（整窗半透明透出桌面）
+        # v2.0.1（反馈 1）：滑块把手是 18×18 正圆，靠 margin:-6px 0 探出 6px 槽外，
+        # 控件默认 sizeHint 只有 15px → 圆球上下被切平。这里显式抬高到 24px
+        # （18 + 上下各 3px 余量），并给这一行加 4px 上下内边距，避免贴着上一行文字。
         oph = QWidget()
         ophl = QHBoxLayout(oph)
-        ophl.setContentsMargins(0, 0, 0, 0)
+        ophl.setContentsMargins(0, 4, 0, 2)
         ophl.addWidget(QLabel("窗口透明度"))
         self.op_slider = QSlider(Qt.Horizontal)
+        self.op_slider.setFixedHeight(24)
         self.op_slider.setRange(30, 100)
         self.op_slider.setValue(int(round(float(self.s.window_opacity) * 100)))
         self.op_slider.valueChanged.connect(self._preview_opacity)
@@ -2804,10 +2893,14 @@ class SettingsDialog(QDialog):
         ophl.addWidget(self.op_slider, 1)
         self.op_val = QLabel(f"{int(round(float(self.s.window_opacity) * 100))}%")
         self.op_val.setFixedWidth(48)
-        self.op_val.setStyleSheet("color:#d4af37;")
+        # v2.0.2（反馈 6）：百分比读数改**白色**（原写死 #66a9ff —— 换主题色它也不变，
+        # 而且低对比度看不清）。走 #PlainValue，字号沿用全局。
+        self.op_val.setObjectName("PlainValue")
         ophl.addWidget(self.op_val)
         g0v.addWidget(oph)
-        # v1.25.0（反馈 5）：12 种基础「高亮色」。
+        # v2.0.0：色板换成 HeroUI 的语义色（极光蓝 / 天青 / 青碧 / 翡翠 / 琥珀 /
+        # 鎏金 / 玫红 / 粉色 / 紫棠 / 藕荷 / 月白 / 石墨，v2.0.1 在玫红后补「粉色」），
+        # 色卡也改成**正圆色点 + 选中白环 + 白勾**。
         # 卡片选中的描边 + 外发光、按钮 / chip / 滑块 / 勾选框的强调色，
         # 全部由它派生（QSS 走令牌替换，自绘控件走 main_window.ACCENT_RGB），
         # 所以换一个色，整套界面一起变。
@@ -2816,15 +2909,16 @@ class SettingsDialog(QDialog):
         ach.setContentsMargins(0, 2, 0, 0)
         ach.setSpacing(6)
         ach.addWidget(QLabel("高亮色"))
+        ach.addSpacing(4)
         self._accent_btns = {}
         for _nm, _hex in cfg.ACCENT_COLORS:
-            b = _AccentSwatch(_hex)      # v1.43.4：自绘圆角扁平方形（不再靠 QSS 圆角 + 文字勾）
+            b = _AccentSwatch(_hex, _nm)   # v2.0.0：正圆色点（选中白环 + 手绘勾）
             b.clicked.connect(lambda _c, h=_hex: self._apply_accent(h))
             ach.addWidget(b)
             self._accent_btns[_hex] = b
-        ach.addSpacing(10)
+        ach.addSpacing(12)
         self.lb_accent = QLabel("—")
-        self.lb_accent.setStyleSheet("color:#d4af37;font-size:11px;")
+        self.lb_accent.setStyleSheet("color:#a1a1aa;font-size:11px;")
         ach.addWidget(self.lb_accent)
         ach.addStretch(1)
         g0v.addWidget(acrow)
@@ -2849,7 +2943,7 @@ class SettingsDialog(QDialog):
         srl.addWidget(self._row("演员卡性别符号（♂/♀）", self.sw_gender))
         side_hint = QLabel("控制侧栏底部这两块的显隐（侧栏各页面共用）；"
                            "关掉「实时状态」后采集线程也不会启动。")
-        side_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        side_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         side_hint.setWordWrap(True)
         srl.addWidget(side_hint)
         g0v.addWidget(srow)
@@ -2894,7 +2988,7 @@ class SettingsDialog(QDialog):
             sw.toggled.connect(lambda c, k=key: (self.s.content_cards.__setitem__(k, c), self.s.save()))
             g3v.addWidget(self._row(label, sw))
         hint = QLabel("改动立即生效：卡片会按开关自动调整高度，不会留下空白或被裁。")
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         hint.setWordWrap(True)
         g3v.addWidget(hint)
         v.addWidget(g3)
@@ -2965,7 +3059,7 @@ class SettingsDialog(QDialog):
         self._apply_appearance()
 
     def _paint_accent_btns(self):
-        """刷新 12 个色卡的选中态（v1.43.4：改由 `_AccentSwatch.set_on()` 自绘）。
+        """刷新色卡的选中态（v1.43.4 起由 `_AccentSwatch.set_on()` 自绘）。
 
         历史坑（已不再适用，保留记录）：原先用控件级 QSS + 文字「✓」，
         既要显式 `padding:0` 压制全局 `QPushButton{padding:7px 14px}`，
@@ -2976,11 +3070,11 @@ class SettingsDialog(QDialog):
             on = str(hexv).lower() == str(cur).lower()
             if hasattr(b, "set_on"):
                 b.set_on(on)
-            b.setToolTip(f"{cfg.accent_name(hexv)} {hexv}"
-                         + ("（当前使用）" if on else "点击切换"))
+            b.setToolTip(f"{cfg.accent_name(hexv)}  {hexv}"
+                         + ("（当前使用）" if on else "  ·  点击切换"))
         lb = getattr(self, "lb_accent", None)
         if lb is not None:
-            lb.setText(f"当前：{cfg.accent_name(cur)} {cur}")
+            lb.setText(f"当前：{cfg.accent_name(cur)}  {cur}")
 
     def _refresh_toggles(self):
         """换高亮色后让设置页里所有自绘开关**立刻**重画。
@@ -3047,7 +3141,7 @@ class SettingsDialog(QDialog):
         code = i18n.get_lang()
         if code == i18n.BASE_LANG:
             lb.setText("界面语言：简体中文（基准语言）。切换后立即生效，无需重启。")
-            lb.setStyleSheet("color:#a2967f;font-size:11px;")
+            lb.setStyleSheet("color:#a1a1aa;font-size:11px;")
             return
         note = ("界面语言已切到 %s（%s）。导航与常用动作已本地化；"
                 "算法说明、免责声明等业务细节仍保留中文原文 —— "
@@ -3055,7 +3149,7 @@ class SettingsDialog(QDialog):
         if i18n.is_rtl(code):
             note += "　⚠ 该语言从右往左书写，但本软件版面仍是左起 —— 只译文字、未做镜像。"
         lb.setText(note)
-        lb.setStyleSheet("color:#8c8071;font-size:11px;")
+        lb.setStyleSheet("color:#71717a;font-size:11px;")
 
     # ---------- 演员刮削 ----------
     def _build_scraper(self):
@@ -3111,7 +3205,7 @@ class SettingsDialog(QDialog):
         geh.addWidget(self.sc_enabled, 0)
         geh.addStretch(1)
         self.sc_stats = QLabel("—")
-        self.sc_stats.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.sc_stats.setStyleSheet("color:#a1a1aa;font-size:11px;")
         # v1.39.5（反馈 2）：原为 setWordWrap(True) —— 统计串有 6 段（演员 / 头像 / 生日 /
         # 别名 / 已刮削 / 待修复），窄窗口下会折成 2~3 行，把「刷新统计」按钮顶到中间、
         # 整条看起来像没对齐（用户截图要求「单独成行」）。
@@ -3187,7 +3281,7 @@ class SettingsDialog(QDialog):
         #     提示用 wordWrap 折行，窄窗时自己向下长，不再靠换行拉开距离。
         self.src_hint = QLabel("提示：minnano-av 面向日本 AV 女优（日文名检索）；IMDB 面向普通影视演员（英文名检索）；"
                               "无法直连 minnano-av 时在下方填写代理。")
-        self.src_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.src_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.src_hint.setWordWrap(True)
         # ⚠ v1.40.5 血泪：折行 QLabel 与按钮同行时**不能**用 `SizePolicy.Ignored`。
         #   `Ignored` 让布局把它当「宽度可以为 0」——`heightForWidth(0)` 于是算出
@@ -3247,7 +3341,7 @@ class SettingsDialog(QDialog):
             "测试", 52, 28, "用该站点已注入的 cookie 发一次轻量请求，判断是否仍存活")
         self.sc_other_test.clicked.connect(self._test_other_source)
         self.sc_other_state = QLabel("—")
-        self.sc_other_state.setStyleSheet("color:#9b8e7a;font-size:11px;")
+        self.sc_other_state.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.sc_other_state.setMinimumWidth(56)
         oh.addWidget(self.sc_cf_auto, 0)
         oh.addWidget(self.sc_cf_other, 0)
@@ -3415,7 +3509,7 @@ class SettingsDialog(QDialog):
              "修复历史资料：只对旧版本写坏的垃圾记录强制覆盖重刮"),
         )
         modehint = QLabel("刮削模式（点哪个执行哪个）：")
-        modehint.setStyleSheet("color:#a2967f;font-size:11px;")
+        modehint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g3v.addWidget(modehint)
         moderow = QWidget()
         mh = QHBoxLayout(moderow)
@@ -3437,7 +3531,7 @@ class SettingsDialog(QDialog):
         mh.addWidget(self.sc_stop)
         g3v.addWidget(moderow)
         self.sc_mode_hint = QLabel("")
-        self.sc_mode_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.sc_mode_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.sc_mode_hint.setWordWrap(True)
         g3v.addWidget(self.sc_mode_hint)
         self.sc_prog = QProgressBar()
@@ -3469,7 +3563,7 @@ class SettingsDialog(QDialog):
         g3v.addWidget(self.sc_log)
         note = QLabel("说明：仅补齐演员资料并下载头像，不修改任何媒体文件；遵守目标站点 robots / 使用条款，"
                       "间隔过小可能被限流。")
-        note.setStyleSheet("color:#a2967f;font-size:11px;")
+        note.setStyleSheet("color:#a1a1aa;font-size:11px;")
         note.setWordWrap(True)
         g3v.addWidget(note)
         # v1.40.2（反馈 3）：曾把执行组框改成 stretch=1（「让组框吃满余量、底边贴页底」）。
@@ -3552,7 +3646,7 @@ class SettingsDialog(QDialog):
             res = QLabel("—")
             res.setObjectName("SrcTestResult")
             res.setFixedWidth(56)
-            res.setStyleSheet("color:#9b8e7a;font-size:11px;")
+            res.setStyleSheet("color:#a1a1aa;font-size:11px;")
             sw = ToggleSwitch(checked=bool((sc.get("sources_enabled") or {}).get(key, True)))
             sw.toggled.connect(lambda c, k=key: self._toggle_source(k, c))
             h.addWidget(up)
@@ -3718,8 +3812,8 @@ class SettingsDialog(QDialog):
         lbl = self._src_rows.get(key)
         if lbl is not None:
             lbl.setText("Cookie✓" if ok else ("未获取" if not res.get("has_cookie") else "失效"))
-            lbl.setStyleSheet("color:#6fae6f;font-size:11px;" if ok
-                              else "color:#e07a6a;font-size:11px;")
+            lbl.setStyleSheet("color:#45d483;font-size:11px;" if ok
+                              else "color:#f87171;font-size:11px;")
         try:
             applog.log(f"[Cookie 自检] {name} ok={ok} msg={res.get('msg')}")
         except Exception:
@@ -3730,7 +3824,7 @@ class SettingsDialog(QDialog):
         lbl = self._src_rows.get(key)
         if lbl is not None:
             lbl.setText("测试中…")
-            lbl.setStyleSheet("color:#d4af37;font-size:11px;")
+            lbl.setStyleSheet("color:#66a9ff;font-size:11px;")
         w = TestSourceWorker(key, self.s.scraper_proxy(), int(self.sc_timeout.value()))
         w.done.connect(self._on_test_done)
         w.start()
@@ -3753,7 +3847,7 @@ class SettingsDialog(QDialog):
             else "未启用 —— 勾选左侧「其他数据源」后可填")
         if not on:
             self.sc_other_state.setText("—")
-            self.sc_other_state.setStyleSheet("color:#9b8e7a;font-size:11px;")
+            self.sc_other_state.setStyleSheet("color:#a1a1aa;font-size:11px;")
 
     def _on_other_source_toggled(self, on):
         """「其他数据源」被选中 / 取消 → 立刻落盘，并说清「Cookie 获取…」现在打哪儿。"""
@@ -3775,7 +3869,7 @@ class SettingsDialog(QDialog):
         url = scraper_mod.normalize_base_url(raw)
         if raw and not url:
             self.sc_other_state.setText("网址无效")
-            self.sc_other_state.setStyleSheet("color:#e07a6a;font-size:11px;")
+            self.sc_other_state.setStyleSheet("color:#f87171;font-size:11px;")
             self._log("[Cookie 目标] 网址无效（只接受 http / https，且需带域名）：%s" % raw)
             return
         if url and url != raw:
@@ -3793,7 +3887,7 @@ class SettingsDialog(QDialog):
             self.sc_other_url.setFocus()
             return
         self.sc_other_state.setText("测试中…")
-        self.sc_other_state.setStyleSheet("color:#d4af37;font-size:11px;")
+        self.sc_other_state.setStyleSheet("color:#66a9ff;font-size:11px;")
         self._log(f"[Cookie 自检] 其他数据源 {url} …")
         w = TestCookieWorker(url, self.s.scraper_proxy(),
                             int(self.sc_timeout.value()), as_url=True)
@@ -3814,7 +3908,7 @@ class SettingsDialog(QDialog):
             state = "已失效"
         self.sc_other_state.setText("✓ 可用" if ok else state)
         self.sc_other_state.setStyleSheet(
-            "color:#9ecf8a;font-size:11px;" if ok else "color:#e07a6a;font-size:11px;")
+            "color:#45d483;font-size:11px;" if ok else "color:#f87171;font-size:11px;")
         self._log(f"[Cookie] 其他数据源（{url}）：{state} — {res.get('msg')}"
                   f"（{res.get('ms')} ms）")
         try:
@@ -3906,8 +4000,8 @@ class SettingsDialog(QDialog):
         if lbl is not None:
             ok = bool(res.get("ok"))
             lbl.setText("可用" if ok else "不可用")
-            lbl.setStyleSheet("color:#6fae6f;font-size:11px;" if ok
-                              else "color:#e07a6a;font-size:11px;")
+            lbl.setStyleSheet("color:#45d483;font-size:11px;" if ok
+                              else "color:#f87171;font-size:11px;")
 
     @staticmethod
     def _stage_cn(stage):
@@ -4111,6 +4205,19 @@ class SettingsDialog(QDialog):
         if w and w.isRunning():
             w.stop()
             w.wait(4000)
+        # v1.46.12：偏好的后台线程**必须在窗口销毁前收掉** —— 它 parent 是本窗口，
+        # 窗口一 deleteLater 就会「QThread: Destroyed while thread is still running」
+        # 直接把进程 abort（v1.27.0 踩过的同一个坑）。停止点是协作式的，
+        # 每 25 条 / 每次进度回调都会看一眼，所以这里等得住。
+        pw = getattr(self, "_prefs_worker", None)
+        if pw is not None:
+            try:
+                if pw.isRunning():
+                    pw.request_stop()
+                    self.pref_status.setText("正在停止偏好任务…")
+                    pw.wait(10000)
+            except RuntimeError:
+                pass
         for t in (getattr(self, "_test_workers", None) or []):
             if t.isRunning():
                 t.wait(3000)
@@ -4136,7 +4243,7 @@ class SettingsDialog(QDialog):
                       "删除后也不会自动恢复。删除只影响库的配置与（可选的）索引记录，"
                       "磁盘上的视频文件不会动。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(hint)
 
         form = QFormLayout()
@@ -4176,6 +4283,9 @@ class SettingsDialog(QDialog):
         self._sync_default_path_btns()
 
         self.lib_list = QListWidget()
+        # v1.46.15：单独命名 —— QSS 里把它的 ::item 上下 padding 从 5px 压到 2px，
+        # 否则 44 的行高里仍有 10px 被内边距吃掉（见 LIB_ROW_H 注释）。
+        self.lib_list.setObjectName("LibList")
         g1v.addWidget(QLabel("已配置的媒体库："))
         g1v.addWidget(self.lib_list)
         self._rebuild_lib_list()
@@ -4187,7 +4297,7 @@ class SettingsDialog(QDialog):
         # v1.14.0 反馈 7：扫描进度就地显示，**不再弹模态对话框** ——
         # 原来每扫完一个库就弹一个「扫描完成」窗口，设置窗口与主界面都被挡住不能操作。
         self.lib_status = QLabel("未在扫描。")
-        self.lib_status.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.lib_status.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.lib_status.setWordWrap(True)
         g1v.addWidget(self.lib_status)
         v.addWidget(g1)
@@ -4266,7 +4376,7 @@ class SettingsDialog(QDialog):
         self.ins_bar.setFixedWidth(180)
         top.addWidget(self.ins_bar)
         self.ins_status = QLabel("尚未分析。进页面会自动算一次（4.8 万条约 1.5 秒）。")
-        self.ins_status.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.ins_status.setStyleSheet("color:#a1a1aa;font-size:11px;")
         top.addWidget(self.ins_status, 1)
         v.addLayout(top)
 
@@ -4275,7 +4385,7 @@ class SettingsDialog(QDialog):
         g0v = QVBoxLayout(g0)
         self.ins_line = QLabel("—")
         self.ins_line.setWordWrap(True)
-        self.ins_line.setStyleSheet("color:#e8d9b6;font-size:13px;")
+        self.ins_line.setStyleSheet("color:#d4d4d8;font-size:13px;")
         g0v.addWidget(self.ins_line)
         v.addWidget(g0)
 
@@ -4291,7 +4401,7 @@ class SettingsDialog(QDialog):
         g1v.addWidget(self.ins_radar, 1)
         self.ins_radar_tip = QLabel("—")
         self.ins_radar_tip.setWordWrap(True)
-        self.ins_radar_tip.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.ins_radar_tip.setStyleSheet("color:#71717a;font-size:11px;")
         g1v.addWidget(self.ins_radar_tip)
         mid.addWidget(g1, 3)
 
@@ -4300,7 +4410,7 @@ class SettingsDialog(QDialog):
         self.ins_ov = QLabel("—")
         self.ins_ov.setWordWrap(True)
         self.ins_ov.setTextFormat(Qt.RichText)
-        self.ins_ov.setStyleSheet("color:#c9bda7;font-size:12px;")
+        self.ins_ov.setStyleSheet("color:#d4d4d8;font-size:12px;")
         g2v.addWidget(self.ins_ov)
         g2v.addStretch(1)
         mid.addWidget(g2, 2)
@@ -4314,7 +4424,8 @@ class SettingsDialog(QDialog):
         for col, key in enumerate(("tags", "actors", "directors", "studios", "series")):
             lb = QLabel({"tags": "标签", "actors": "演员", "directors": "导演",
                          "studios": "片商", "series": "系列"}[key])
-            lb.setStyleSheet("color:#d4af37;font-size:12px;font-weight:bold;")
+            # v2.0.2（反馈 5）：列标题跟随高亮色（原写死 #66a9ff → 换主题不变色）
+            lb.setObjectName("PanelTitleSm")
             g3v.addWidget(lb, 0, col)
             body = self._bar_label()
             g3v.addWidget(body, 1, col)
@@ -4327,7 +4438,8 @@ class SettingsDialog(QDialog):
         self.ins_dist = {}
         for col, key in enumerate(("画质", "评分", "时长", "年份", "入库月")):
             lb = QLabel(key)
-            lb.setStyleSheet("color:#d4af37;font-size:12px;font-weight:bold;")
+            # v2.0.2（反馈 5）：同上，跟随高亮色
+            lb.setObjectName("PanelTitleSm")
             g4v.addWidget(lb, 0, col)
             body = self._bar_label()
             g4v.addWidget(body, 1, col)
@@ -4346,7 +4458,7 @@ class SettingsDialog(QDialog):
         g5v = QVBoxLayout(g5)
         self.ins_cooc = QLabel("—")
         self.ins_cooc.setWordWrap(True)
-        self.ins_cooc.setStyleSheet("color:#b9ad97;font-size:11px;")
+        self.ins_cooc.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g5v.addWidget(self.ins_cooc)
         v.addWidget(g5)
 
@@ -4479,11 +4591,11 @@ class SettingsDialog(QDialog):
         lb.setTextFormat(Qt.RichText)
         lb.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         lb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lb.setStyleSheet("color:#b9ad97;font-size:12px;"
+        lb.setStyleSheet("color:#a1a1aa;font-size:12px;"
                          "font-family:Consolas,'Courier New',monospace;")
         return lb
 
-    def _bar_lines(self, items, body, show_bar=True, limit=16, accent="#C63975"):
+    def _bar_lines(self, items, body, show_bar=True, limit=16, accent="#f31260"):
         """把 [(名称, 计数)] 画成「文本 + █ 条」的简易条形图（不引图表库）。
 
         v1.39.1（反馈 4）：**按目标标签的实际像素宽度裁剪**，不再按字符数。
@@ -4548,8 +4660,8 @@ class SettingsDialog(QDialog):
             gap = int(max(0, cnt_px - 10 - adv(ctext)) // sp)
             bar = ("  " + "█" * max(1, int(round(c / top * bar_cells)))) if bar_cells else ""
             # 三段上色：名字 tan / 计数浅金 / 条形 accent（&nbsp; 保对齐）
-            line = ('<span style="color:#b9ad97">%s</span>'
-                    '<span style="color:#cdbd9f">%s%s</span>'
+            line = ('<span style="color:#a1a1aa">%s</span>'
+                    '<span style="color:#a1a1aa">%s%s</span>'
                     '<span style="color:%s">%s</span>') % (
                         htm(lab), "&nbsp;" * gap, htm(ctext), accent, htm(bar))
             lines.append(line)
@@ -4574,7 +4686,7 @@ class SettingsDialog(QDialog):
             "· AI 智能算法：在普通算法之上叠加**本地离线 AI** —— 内置标签共现联想；"
             "若本机有 Ollama（127.0.0.1:11434）则再让本地模型做语义扩词，全程不出网。"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(hint)
 
         self.rb_normal = QRadioButton("普通智能算法（向量相似度 + 去重）")
@@ -4588,7 +4700,7 @@ class SettingsDialog(QDialog):
 
         self.ai_state = QLabel("—")
         self.ai_state.setWordWrap(True)
-        self.ai_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.ai_state.setStyleSheet("color:#71717a;font-size:11px;")
         g1v.addWidget(self.ai_state)
         # v1.24.1（反馈 2）：按钮留引用 —— 检测期间要置灰并改文案，让「点了有反应」看得见
         self.ai_test = QPushButton("检测本地 AI 引擎")
@@ -4604,7 +4716,7 @@ class SettingsDialog(QDialog):
             "AI 智能算法要用到的**本地模型**与**自动拉起 Ollama** 的开关，"
             "都放在左侧「基础工具 → <b>引擎设置</b>」页里统一管理。"))
         g1_note.setWordWrap(True)
-        g1_note.setStyleSheet("color:#a2967f;font-size:11px;")
+        g1_note.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(g1_note)
         v.addWidget(g1)
 
@@ -4621,6 +4733,7 @@ class SettingsDialog(QDialog):
         row.addSpacing(16)
         row.addWidget(QLabel("多样性"))
         self.sl_div = QSlider(Qt.Horizontal)
+        self.sl_div.setFixedHeight(24)      # v2.0.1：同「窗口透明度」—— 18px 圆球要完整
         self.sl_div.setRange(0, 90)
         self.sl_div.setValue(int(float(self.s.recommend.get("diversity", 0.5)) * 100))
         self.sl_div.setFixedWidth(180)
@@ -4628,7 +4741,7 @@ class SettingsDialog(QDialog):
         self.sl_div.valueChanged.connect(self._save_smart_prefs)
         row.addWidget(self.sl_div)
         self.lb_div = QLabel("—")
-        self.lb_div.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.lb_div.setStyleSheet("color:#71717a;font-size:11px;")
         row.addWidget(self.lb_div)
         row.addStretch(1)
         g2v.addLayout(row)
@@ -4649,7 +4762,7 @@ class SettingsDialog(QDialog):
         rowr.addWidget(QLabel("内不再重复出现"))
         rowr.addSpacing(16)
         self.lb_hist = QLabel("—")
-        self.lb_hist.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.lb_hist.setStyleSheet("color:#71717a;font-size:11px;")
         rowr.addWidget(self.lb_hist)
         b_hist = QPushButton("清空推荐历史")
         b_hist.setObjectName("Ghost")
@@ -4689,7 +4802,7 @@ class SettingsDialog(QDialog):
             "字形类（三上悠亚 → 三上悠亜、桥本有菜 → 橋本有菜）走逐字对照；"
             "词义类（中出 → 中出し、护士 → ナース、捆绑 → 緊縛）走内置术语表。"))
         g2_hint.setWordWrap(True)
-        g2_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        g2_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g2v.addWidget(g2_hint)
         v.addWidget(g2)
 
@@ -4698,10 +4811,10 @@ class SettingsDialog(QDialog):
         h3 = QLabel("偏好向量的每一项都能手动调权重：加强 / 减弱 / 屏蔽 / 软排斥。"
                     "这是从 nfo_profiler 的同名功能借鉴来的。")
         h3.setWordWrap(True)
-        h3.setStyleSheet("color:#a2967f;font-size:11px;")
+        h3.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g3v.addWidget(h3)
         self.vec_count = QLabel("—")
-        self.vec_count.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.vec_count.setStyleSheet("color:#71717a;font-size:11px;")
         g3v.addWidget(self.vec_count)
         row3 = QHBoxLayout()
         b_open = QPushButton("打开向量编辑…")
@@ -4744,12 +4857,12 @@ class SettingsDialog(QDialog):
             "AI 智能算法会用到的本地模型（Ollama，127.0.0.1:11434，纯离线、不出网）。\n"
             "留空 = 自动使用本机第一个已装模型；填了但本机没装则自动降级为内置联想。"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(hint)
 
         self.ae_state = QLabel("—")
         self.ae_state.setWordWrap(True)
-        self.ae_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.ae_state.setStyleSheet("color:#71717a;font-size:11px;")
         g1v.addWidget(self.ae_state)
         self.ae_test = QPushButton("检测本地 AI 引擎")
         self.ae_test.setObjectName("Ghost")
@@ -4788,7 +4901,7 @@ class SettingsDialog(QDialog):
             "gemma3:12b　/　muse-glimmer:latest　（冒号和标签都要带上）。\n"
             "留空 = 自动使用本机第一个模型；填了但本机没装会自动降级为内置联想。"))
         mhint.setWordWrap(True)
-        mhint.setStyleSheet("color:#a2967f;font-size:11px;")
+        mhint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(mhint)
         v.addWidget(g1)
 
@@ -4810,7 +4923,7 @@ class SettingsDialog(QDialog):
 
         self.ae_launch_state = QLabel("—")
         self.ae_launch_state.setWordWrap(True)
-        self.ae_launch_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.ae_launch_state.setStyleSheet("color:#71717a;font-size:11px;")
         g2v.addWidget(self.ae_launch_state)
         v.addWidget(g2)
 
@@ -4823,7 +4936,7 @@ class SettingsDialog(QDialog):
         w = getattr(self, "_ae_probe_worker", None)
         if w is not None and w.isRunning():
             return
-        self.ae_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.ae_state.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.ae_state.setText(
             f"正在检测本地 AI 引擎…　探测 {rec_mod.OLLAMA_HOST}（最多等 1 秒）")
         self.ae_test.setEnabled(False)
@@ -4840,14 +4953,14 @@ class SettingsDialog(QDialog):
         ts = QTime.currentTime().toString("HH:mm:ss")
         if eng == "ollama":
             head = f"✅ 检测完成（{ts}）—— 引擎：<b>{html_esc(st.get('label'))}</b>"
-            color = "#9ecf8a"
+            color = "#45d483"
         elif eng == "error":
             head = f"❌ 检测失败（{ts}）—— 引擎：<b>未知</b>"
-            color = "#e08a7a"
+            color = "#f87171"
         else:
             head = f"⚠ 检测完成（{ts}）—— 未检测到本地 Ollama，当前引擎：<b>" \
                    f"{html_esc(st.get('label'))}</b>"
-            color = "#e8d27a"
+            color = "#8fc0ff"
         self.ae_state.setStyleSheet(f"color:{color};font-size:11px;")
         self.ae_state.setText(f"{head}<br>{html_esc(st.get('detail'))}")
         applog.log(f"[AI 引擎设置·检测] engine={eng} at {ts}")
@@ -4903,7 +5016,7 @@ class SettingsDialog(QDialog):
             return
         self.ae_launch.setEnabled(False)
         self.ae_launch.setText("拉起中…")
-        self.ae_launch_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.ae_launch_state.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.ae_launch_state.setText("正在用 powershell 拉起 Ollama 服务…（最多等 20 秒）")
         self._ae_launch_worker = OllamaLaunchWorker()
         self._ae_launch_worker.done.connect(self._on_ollama_launch)
@@ -4912,7 +5025,7 @@ class SettingsDialog(QDialog):
     def _on_ollama_launch(self, ok, msg):
         self.ae_launch.setEnabled(True)
         self.ae_launch.setText("立即启动")
-        color = "#9ecf8a" if ok else "#e8b76a"
+        color = "#45d483" if ok else "#f5a524"
         self.ae_launch_state.setStyleSheet(f"color:{color};font-size:11px;")
         self.ae_launch_state.setText(("✅ " if ok else "⚠ ") + msg)
         applog.log(f"[AI 引擎设置·拉起] ok={ok} {msg}")
@@ -4935,7 +5048,7 @@ class SettingsDialog(QDialog):
         w = getattr(self, "_ai_worker", None)
         if w is not None and w.isRunning():
             return
-        self.ai_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.ai_state.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.ai_state.setText(
             f"正在检测本地 AI 引擎…　探测 {rec_mod.OLLAMA_HOST}（最多等 1 秒）")
         self.ai_test.setEnabled(False)
@@ -4952,14 +5065,14 @@ class SettingsDialog(QDialog):
         ts = QTime.currentTime().toString("HH:mm:ss")
         if eng == "ollama":
             head = f"✅ 检测完成（{ts}）—— 引擎：<b>{html_esc(st.get('label'))}</b>"
-            color = "#9ecf8a"
+            color = "#45d483"
         elif eng == "error":
             head = f"❌ 检测失败（{ts}）—— 引擎：<b>未知</b>"
-            color = "#e08a7a"
+            color = "#f87171"
         else:
             head = f"⚠ 检测完成（{ts}）—— 未检测到本地 Ollama，当前引擎：<b>" \
                    f"{html_esc(st.get('label'))}</b>"
-            color = "#e8d27a"
+            color = "#8fc0ff"
         self.ai_state.setStyleSheet(f"color:{color};font-size:11px;")
         self.ai_state.setText(f"{head}<br>{html_esc(st.get('detail'))}")
         applog.log(f"[AI 引擎检测] engine={eng} at {ts}")
@@ -5053,7 +5166,7 @@ class SettingsDialog(QDialog):
             "· 结果可以<b>展开</b>看每个副本的完整路径，<b>双击</b>任意一条即用资源管理器定位到该文件。")
         hint.setTextFormat(Qt.RichText)
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(hint)
 
         # ---- v1.32.0（反馈 1）：算法模式（与「演员检测 / 标签优化」同一套写法）
@@ -5087,7 +5200,7 @@ class SettingsDialog(QDialog):
         self.dd_ai_lbl = QLabel("选「AI 算法」时会自动探测本机 Ollama；"
                                 "用哪个模型跟「基础工具 → 引擎设置」页共用同一项设置。")
         self.dd_ai_lbl.setWordWrap(True)
-        self.dd_ai_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.dd_ai_lbl.setStyleSheet("color:#71717a;font-size:11px;")
         algv.addWidget(self.dd_ai_lbl)
         self.dd_rb_ai.toggled.connect(
             lambda on: on and self._probe_detect_ai(self.dd_ai_lbl))
@@ -5139,7 +5252,7 @@ class SettingsDialog(QDialog):
         self.dd_bar.setValue(0)
         g1v.addWidget(self.dd_bar)
         self.dd_status = QLabel("尚未检测。点「开始检测」扫描当前索引。")
-        self.dd_status.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.dd_status.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.dd_status.setWordWrap(True)
         g1v.addWidget(self.dd_status)
         v.addWidget(g1)
@@ -5166,7 +5279,7 @@ class SettingsDialog(QDialog):
         g2v.addWidget(self.dd_tree)
 
         tip7 = QLabel("双击任意一条（或分组行）即用资源管理器打开它所在的文件夹并选中该文件。")
-        tip7.setStyleSheet("color:#8c8071;font-size:11px;")
+        tip7.setStyleSheet("color:#71717a;font-size:11px;")
         tip7.setWordWrap(True)
         g2v.addWidget(tip7)
 
@@ -5208,14 +5321,14 @@ class SettingsDialog(QDialog):
             ok, note = ar.ai_available(self.s.ai_model() if hasattr(self.s, "ai_model") else "")
         except Exception as e:
             label.setText("探测失败：%s" % e)
-            label.setStyleSheet("color:#e8b76a;font-size:11px;")
+            label.setStyleSheet("color:#f5a524;font-size:11px;")
             return
         if ok:
             label.setText("✓ " + note)
-            label.setStyleSheet("color:#8fd18f;font-size:11px;")
+            label.setStyleSheet("color:#45d483;font-size:11px;")
         else:
             label.setText("✗ " + note)
-            label.setStyleSheet("color:#e8b76a;font-size:11px;")
+            label.setStyleSheet("color:#f5a524;font-size:11px;")
 
     def _save_dedupe_prefs(self, *_):
         self.s.set_dedupe_prefs(exclude_multipart=self.dd_excl.isChecked(),
@@ -5321,7 +5434,7 @@ class SettingsDialog(QDialog):
         self.dd_summary.setText(
             f"重复组 <b>{s['dup_groups']}</b> 组 · 涉及 {s['dup_movies']} 部 · "
             f"冗余 {s['redundant_copies']} 份 · 可回收 <b>{s['redundant_text']}</b> · {mp}"
-            + (f"<br><span style='color:#8c8071;'>AI 复核：{s['ai_note']}</span>"
+            + (f"<br><span style='color:#71717a;'>AI 复核：{s['ai_note']}</span>"
                if report.algo == "ai" and s.get("ai_note") else ""))
         self._fill_dedupe_tree(report)
         self.dd_tree.resizeColumnToContents(0)
@@ -5370,10 +5483,10 @@ class SettingsDialog(QDialog):
                                                   if g.ai.get("reason") else "")
             top.setToolTip(0, f"{g.note or ''}\n可回收 {g.redundant_text}{ai_tip}")
             if g.redundant_bytes:
-                top.setForeground(0, QBrush(QColor("#f0c674")))
+                top.setForeground(0, QBrush(QColor("#f5a524")))
             if show_ai and g.ai:
                 top.setForeground(C_AI, QBrush(QColor(
-                    "#8fd18f" if (g.ai.get("advice") or "") == "全部保留" else "#f0c674")))
+                    "#45d483" if (g.ai.get("advice") or "") == "全部保留" else "#f5a524")))
             # 分组行双击 → 打开它最大的那一份（体积最大的留、其余是冗余）
             if g.members:
                 top.setData(0, Qt.UserRole, g.members[0].path)
@@ -5387,13 +5500,13 @@ class SettingsDialog(QDialog):
                 child.setToolTip(0, m.path)
                 child.setToolTip(C_DIR, m.folder)
                 if m is not g.members[0]:
-                    child.setForeground(1, QBrush(QColor("#e2685a")))
+                    child.setForeground(1, QBrush(QColor("#f87171")))
                 top.addChild(child)
             self.dd_tree.addTopLevelItem(top)
         if report.multipart:
             head = QTreeWidgetItem([f"同目录分片（{len(report.multipart)} 组，未计入重复）"]
                                    + [""] * (len(heads) - 1))
-            head.setForeground(0, QBrush(QColor("#8c8071")))
+            head.setForeground(0, QBrush(QColor("#71717a")))
             for g in report.multipart:
                 it = QTreeWidgetItem([g.label, "同目录多份", g.confidence]
                                      + ([""] if show_ai else [])
@@ -5492,7 +5605,7 @@ class SettingsDialog(QDialog):
             "v1.24.0 起还能**按内容分类导出**（例如只导出「影片收藏」「演员收藏」，"
             "换台机器时只搬这些轻量信息，不必搬 5 万条索引）。"))
         h1.setWordWrap(True)
-        h1.setStyleSheet("color:#a2967f;font-size:11px;")
+        h1.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(h1)
 
         # v1.24.0（反馈 9）：导出内容可勾选
@@ -5556,7 +5669,7 @@ class SettingsDialog(QDialog):
             "「整库导出」的包导入后会**覆盖**当前索引；"
             "「分类导出」的包导入时只**合并**所选的这几类信息。"))
         self.data_hint.setWordWrap(True)
-        self.data_hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.data_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(self.data_hint)
         v.addWidget(g1)
 
@@ -5573,7 +5686,7 @@ class SettingsDialog(QDialog):
             "以及演员库、导演库里**收藏与置顶**的人。\n"
             "换目录、换电脑、重装系统后导入即可找回；备份是单个 JSON，跨版本可读。"))
         _ph.setWordWrap(True)
-        _ph.setStyleSheet("color:#a2967f;font-size:11px;")
+        _ph.setStyleSheet("color:#a1a1aa;font-size:11px;")
         gpv.addWidget(_ph)
         pr = QWidget()
         prh = QHBoxLayout(pr)
@@ -5601,13 +5714,42 @@ class SettingsDialog(QDialog):
         pim.setObjectName("Ghost")
         pim.setToolTip(rich("按**番号**与**姓名**合并回当前索引；不删数据、不覆盖资料字段"))
         pim.clicked.connect(self._import_prefs)
+        self.pref_ex, self.pref_im = pex, pim
+        # v1.46.12：跑到一半可以停（协作式中止，已处理的部分照常提交）
+        self.pref_stop = compact_button("停止", 56, 30, "停止当前的导入 / 导出")
+        self.pref_stop.setVisible(False)
+        self.pref_stop.clicked.connect(self._stop_prefs)
         prh.addWidget(pex)
         prh.addWidget(pim)
+        prh.addWidget(self.pref_stop)
         prh.addStretch(1)
         gpv.addWidget(pr)
+
+        # ---------- v1.46.12（反馈）：导入 / 导出的进度 ----------
+        # 原来这两个动作同步跑在 GUI 线程、全程不泵消息，一次导入实测 7.09s，
+        # Windows 5 秒就判「未响应」，用户既看不到进度也不知道成功了几条。
+        # 现在进度行独立成一条（不定长 → 定量），并显示**当前阶段 + 已完成条数**。
+        prow = QWidget()
+        prl = QHBoxLayout(prow)
+        prl.setContentsMargins(0, 0, 0, 0)
+        prl.setSpacing(8)
+        self.pref_bar = QProgressBar()
+        self.pref_bar.setTextVisible(False)
+        self.pref_bar.setFixedHeight(6)
+        self.pref_bar.setRange(0, 0)
+        self.pref_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.pref_status = QLabel("")
+        self.pref_status.setStyleSheet("color:#d4d4d8;font-size:11px;")   # 进度文字，比说明文字亮一档
+        self.pref_status.setMinimumWidth(0)
+        prl.addWidget(self.pref_bar, 1)
+        prl.addWidget(self.pref_status, 0)
+        prow.setVisible(False)
+        self.pref_prog_row = prow
+        gpv.addWidget(prow)
+
         self.pref_hint = QLabel("尚未导出 / 导入过偏好。")
         self.pref_hint.setWordWrap(True)
-        self.pref_hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.pref_hint.setStyleSheet("color:#71717a;font-size:11px;")
         gpv.addWidget(self.pref_hint)
         v.addWidget(gp)
 
@@ -5619,7 +5761,7 @@ class SettingsDialog(QDialog):
             "下面四项都会**改动本地数据**，每一项都要**连点两次确认**。"
             "执行前建议先用上面的「导出所选分类」把收藏 / 评分备份一份。"))
         dhint.setWordWrap(True)
-        dhint.setStyleSheet("color:#a2967f;font-size:11px;")
+        dhint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         gdv.addWidget(dhint)
         for _label, _tip, _slot in (
                 ("清理缓存",
@@ -5644,7 +5786,7 @@ class SettingsDialog(QDialog):
             _b.clicked.connect(_slot)
             _lab = QLabel(_tip)
             _lab.setWordWrap(True)
-            _lab.setStyleSheet("color:#a2967f;font-size:11px;")
+            _lab.setStyleSheet("color:#a1a1aa;font-size:11px;")
             _rh.addWidget(_b, 0)
             _rh.addWidget(_lab, 1)
             gdv.addWidget(_r)
@@ -5667,7 +5809,7 @@ class SettingsDialog(QDialog):
         dhi = QLabel("显示每个数据源的通行 Cookie 是否已获取，以及最近一次「测试 / Cookie 存活」的结果。"
                      "点「刷新」重读；真正的网络请求在「演员刮削」页发起。")
         dhi.setWordWrap(True)
-        dhi.setStyleSheet("color:#a2967f;font-size:11px;")
+        dhi.setStyleSheet("color:#a1a1aa;font-size:11px;")
         gdv.addWidget(dhi)
         self.diag_tbl = QTableWidget(0, 5)
         self.diag_tbl.setHorizontalHeaderLabels(["数据源", "Cookie", "最近结果", "耗时", "时间"])
@@ -5700,11 +5842,11 @@ class SettingsDialog(QDialog):
         h2 = QLabel("软件会把全部运行记录（启动 / 扫描 / 刮削 / 报错等）写入日志文件。"
                     "出现 BUG 时点「导出日志」把压缩包发给开发者即可快速定位。")
         h2.setWordWrap(True)
-        h2.setStyleSheet("color:#a2967f;font-size:11px;")
+        h2.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g2v.addWidget(h2)
         self.log_path_lbl = QLabel("日志位置：" + applog.log_path())
         self.log_path_lbl.setWordWrap(True)
-        self.log_path_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.log_path_lbl.setStyleSheet("color:#71717a;font-size:11px;")
         g2v.addWidget(self.log_path_lbl)
         r2 = QWidget()
         r2h = QHBoxLayout(r2)
@@ -5728,7 +5870,7 @@ class SettingsDialog(QDialog):
         g3hint = QLabel("实时显示 app.log 的尾部内容（约每 1.5 秒刷新），告诉你软件当前在做什么、进度如何。"
                         "关闭本窗口即停止刷新。")
         g3hint.setWordWrap(True)
-        g3hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        g3hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g3v.addWidget(g3hint)
         # v1.45.5（反馈 3）：过滤与关键词搜索
         _frow = QWidget()
@@ -5752,7 +5894,7 @@ class SettingsDialog(QDialog):
         g3v.addWidget(self._log_view, 1)
         self._log_path_lbl2 = QLabel("日志文件：" + applog.log_path())
         self._log_path_lbl2.setWordWrap(True)
-        self._log_path_lbl2.setStyleSheet("color:#8c8071;font-size:11px;")
+        self._log_path_lbl2.setStyleSheet("color:#71717a;font-size:11px;")
         g3v.addWidget(self._log_path_lbl2)
         v.addWidget(g3)
 
@@ -5916,9 +6058,9 @@ class SettingsDialog(QDialog):
             for c, txt in enumerate(cells):
                 it = QTableWidgetItem(str(txt))
                 if c == 1:
-                    it.setForeground(QColor("#6fae6f" if info.get("cookie_ok") else "#a2967f"))
+                    it.setForeground(QColor("#45d483" if info.get("cookie_ok") else "#a1a1aa"))
                 elif c == 2 and last:
-                    it.setForeground(QColor("#6fae6f" if last.get("ok") else "#e07a6a"))
+                    it.setForeground(QColor("#45d483" if last.get("ok") else "#f87171"))
                 tbl.setItem(r, c, it)
 
     def _refresh_log(self):
@@ -6029,7 +6171,10 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "导入失败", r.get("error") or "未知错误")
 
     # ---------- v1.43.0（需求 2）：偏好管理 ----------
+    # v1.46.12：两个动作都改成「后台线程 + 真进度」，见 PrefsWorker 的注释。
     def _export_prefs(self):
+        if self._prefs_running():
+            return
         default = os.path.join(os.path.expanduser("~"), prefs_mod.prefs_export_name())
         path, _ = QFileDialog.getSaveFileName(self, "导出偏好", default,
                                               "偏好备份 (*.json)")
@@ -6041,22 +6186,11 @@ class SettingsDialog(QDialog):
         if not _inc:
             QMessageBox.information(self, "提示", "请至少勾选一项导出内容。")
             return
-        r = prefs_mod.export_prefs(path, "all", _inc)
-        if r.get("ok"):
-            applog.log(f"偏好导出：{path} 影片 {r['media']} 条、人物 {r['people']} 条")
-            self.pref_hint.setText(
-                f"最近导出：{path}（影片 {r['media']} 条 · 人物 {r['people']} 位）")
-            extra = (f"\n\n（{r['no_code']} 条既无番号也无标题，已跳过）"
-                     if r.get("no_code") else "")
-            QMessageBox.information(
-                self, "导出完成",
-                f"已导出到：\n{path}\n\n"
-                f"影片偏好 {r['media']} 条\n人物收藏 / 置顶 {r['people']} 位" + extra)
-        else:
-            applog.log(f"偏好导出失败：{r.get('error')}", "error")
-            QMessageBox.warning(self, "导出失败", r.get("error") or "未知错误")
+        self._prefs_run("export", path, _inc)
 
     def _import_prefs(self):
+        if self._prefs_running():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "导入偏好", "",
                                               "偏好备份 (*.json)")
         if not path:
@@ -6068,23 +6202,127 @@ class SettingsDialog(QDialog):
                      "**不删除任何数据、不覆盖资料字段**，可反复执行。\n\n是否继续？")
         ) != QMessageBox.Yes:
             return
-        r = prefs_mod.import_prefs(path)
-        if r.get("ok"):
-            applog.log(f"偏好导入：{path} 影片命中 {r['media_ok']}、"
-                       f"人物命中 {r['people_ok']}、nfo 评分写入 {r['nfo_written']}")
-            self.pref_hint.setText(
-                f"最近导入：{path}（影片命中 {r['media_ok']} · 未匹配 {r['media_miss']} · "
-                f"人物 {r['people_ok']} · nfo 写回 {r['nfo_written']}）")
-            QMessageBox.information(
-                self, "导入完成",
-                f"影片偏好命中 {r['media_ok']} 条（未匹配 {r['media_miss']} 条）\n"
-                f"人物收藏 / 置顶命中 {r['people_ok']} 位（未匹配 {r['people_miss']} 位）\n"
-                f"nfo 评分写回 {r['nfo_written']} 个文件\n\n刷新界面即可看到结果。")
-            if self.on_changed:
-                self.on_changed()
+        self._prefs_run("import", path)
+
+    # ---- 进度 / 生命周期 ----
+    def _prefs_running(self) -> bool:
+        w = getattr(self, "_prefs_worker", None)
+        try:
+            return w is not None and w.isRunning()
+        except RuntimeError:               # C++ 侧已销毁
+            return False
+
+    def _prefs_run(self, mode, path, include=None):
+        """起后台线程并进入忙碌态（按钮禁用 + 进度条 + 阶段文字）。"""
+        self._prefs_mode = mode
+        self._prefs_path = path
+        self.pref_ex.setEnabled(False)
+        self.pref_im.setEnabled(False)
+        self.pref_stop.setVisible(True)
+        self.pref_stop.setEnabled(True)
+        self.pref_prog_row.setVisible(True)
+        self.pref_bar.setRange(0, 0)       # 先不定长，收到 total 再转定量
+        self.pref_bar.setValue(0)
+        _t = "正在导出偏好…" if mode == "export" else "正在导入偏好…"
+        self.pref_status.setText(_t)
+        self.pref_hint.setText(("导出中：" if mode == "export" else "导入中：") + path)
+        w = PrefsWorker(mode, path, include, parent=self)
+        w.progress.connect(self._on_prefs_progress)
+        w.done.connect(self._on_prefs_done)
+        self._prefs_worker = w
+        w.start()
+
+    def _stop_prefs(self):
+        """协作式停止：真正的停止点在 prefs 的每次进度回调里。"""
+        w = getattr(self, "_prefs_worker", None)
+        if w is None or not self._prefs_running():
+            return
+        w.request_stop()
+        self.pref_stop.setEnabled(False)
+        self.pref_status.setText("正在停止（等当前这一批处理完）…")
+
+    def _on_prefs_progress(self, done, total, label):
+        if total > 0:
+            if self.pref_bar.maximum() != total or self.pref_bar.minimum() != 0:
+                self.pref_bar.setRange(0, total)
+            self.pref_bar.setValue(max(0, min(int(done), int(total))))
+        elif self.pref_bar.maximum() != 0:
+            self.pref_bar.setRange(0, 0)   # total 未知 → 不定长
+        self.pref_status.setText(label)
+
+    def _prefs_busy_end(self):
+        self.pref_ex.setEnabled(True)
+        self.pref_im.setEnabled(True)
+        self.pref_stop.setVisible(False)
+        self.pref_stop.setEnabled(True)
+        self.pref_prog_row.setVisible(False)
+        self.pref_bar.setRange(0, 1)
+        self.pref_bar.setValue(0)
+
+    def _on_prefs_done(self, r):
+        mode = getattr(self, "_prefs_mode", "import")
+        r = r if isinstance(r, dict) else {}
+        who = "导出" if mode == "export" else "导入"
+        if not r.get("ok"):
+            self._prefs_busy_end()
+            if r.get("cancelled"):
+                applog.log(f"偏好{who}已取消")
+                self.pref_hint.setText(f"已取消{who}（未改动任何数据 / 未生成文件）。")
+            else:
+                applog.log(f"偏好{who}失败：{r.get('error')}", "error")
+                QMessageBox.warning(self, f"{who}失败", r.get("error") or "未知错误")
+            return
+        if mode == "import":
+            # 刷新界面本身也要 1.4s（重建侧栏 + 首页）→ 先把「正在刷新」画出来
+            self.pref_bar.setRange(0, 0)
+            self.pref_status.setText("正在刷新界面…")
+            # 带 context 的 singleShot：窗口在这 60ms 里被销毁也不会回落到已删除对象
+            QTimer.singleShot(60, self, lambda: self._prefs_finish(mode, r))
         else:
-            applog.log(f"偏好导入失败：{r.get('error')}", "error")
-            QMessageBox.warning(self, "导入失败", r.get("error") or "未知错误")
+            self._prefs_finish(mode, r)
+
+    def _prefs_finish(self, mode, r):
+        if mode == "import" and self.on_changed:
+            try:
+                self.on_changed()
+            except Exception as e:
+                applog.log(f"偏好导入后刷新界面失败：{type(e).__name__}: {e}", "error")
+        self._prefs_busy_end()
+        path = r.get("path") or getattr(self, "_prefs_path", "") or ""
+        if mode == "export":
+            applog.log(f"偏好导出：{path} 影片 {r['media']} 条、人物 {r['people']} 条")
+            self.pref_hint.setText(
+                f"最近导出：{path}（影片 {r['media']} 条 · 人物 {r['people']} 位）")
+            extra = (f"\n\n（{r['no_code']} 条既无番号也无标题，已跳过）"
+                     if r.get("no_code") else "")
+            QMessageBox.information(
+                self, "导出完成",
+                f"已导出到：\n{path}\n\n"
+                f"影片偏好 {r['media']} 条\n人物收藏 / 置顶 {r['people']} 位" + extra)
+            return
+        if r.get("cancelled"):
+            applog.log(f"偏好导入已停止：影片命中 {r['media_ok']}、"
+                       f"人物命中 {r['people_ok']}、nfo 写回 {r['nfo_written']}")
+            self.pref_hint.setText(
+                f"已停止导入（已处理的部分已保存）：影片命中 {r['media_ok']} · "
+                f"人物 {r['people_ok']} · nfo 写回 {r['nfo_written']}")
+            QMessageBox.information(
+                self, "已停止导入",
+                f"影片偏好已合并 {r['media_ok']} 条（未匹配 {r['media_miss']} 条）\n"
+                f"人物收藏 / 置顶已合并 {r['people_ok']} 位\n"
+                f"nfo 评分已写回 {r['nfo_written']} 个文件\n\n"
+                "已处理的部分**已经保存**，备份文件没有被动过，可以随时再导入一次。")
+            return
+        applog.log(f"偏好导入：{path} 影片命中 {r['media_ok']}、"
+                   f"人物命中 {r['people_ok']}、nfo 评分写入 {r['nfo_written']}")
+        self.pref_hint.setText(
+            f"最近导入：{path}（影片命中 {r['media_ok']} · 未匹配 {r['media_miss']} · "
+            f"人物 {r['people_ok']} · nfo 写回 {r['nfo_written']}）")
+        QMessageBox.information(
+            self, "导入完成",
+            f"影片偏好命中 {r['media_ok']} 条（未匹配 {r['media_miss']} 条）\n"
+            f"人物收藏 / 置顶命中 {r['people_ok']} 位（未匹配 {r['people_miss']} 位）\n"
+            f"nfo 评分写回 {r['nfo_written']} 个文件\n\n刷新界面即可看到结果。")
 
     def _export_logs(self):
         default = os.path.join(os.path.expanduser("~"), backup_mod.log_export_name())
@@ -6180,11 +6418,11 @@ class SettingsDialog(QDialog):
         if not self.s.libraries:
             li = QListWidgetItem(self.lib_list)
             empty = QLabel("（还没有媒体库 —— 用上面的表单新建一个，名称由你自己定）")
-            empty.setStyleSheet("color:#8c8071;font-size:11px;padding:6px 4px;")
+            empty.setStyleSheet("color:#71717a;font-size:11px;padding:6px 4px;")
             li.setSizeHint(QSize(empty.sizeHint().width(), LIB_ROW_H))
             self.lib_list.addItem(li)
             self.lib_list.setItemWidget(li, empty)
-            self.lib_list.setFixedHeight(LIB_ROW_H + 10)
+            self.lib_list.setFixedHeight(LIB_ROW_H + LIST_CHROME)
             return
         for lib in self.s.libraries:
             li = QListWidgetItem(self.lib_list)
@@ -6196,30 +6434,35 @@ class SettingsDialog(QDialog):
             info = QLabel(f"{lib['name']}  （{lib['kind']} · {len(lib.get('paths', []))} 个路径）")
             info.setMinimumWidth(160)
             h.addWidget(info, 1)
-            edit = QPushButton("编辑")
-            edit.setObjectName("Ghost")
+            # v1.46.15（反馈「压缩后这些按钮显示不全了」）：这三个按钮原来用裸
+            # QPushButton + setFixedHeight(28)。全局 QSS 是 `QPushButton{padding:7px 14px}`，
+            # 28px 高的框减掉上下各 7px 内边距后内容区只剩 12px，而一行「编辑」字要 17px
+            # —— Qt 会把字形**上下各切掉约 3px**，看起来就是「按钮里的字显示不全」。
+            # （sizeHint 实测 56×33，被 setFixedHeight(28) 硬压到 28，证据在此。）
+            # 改走 ui_hero.compact_button()：它给按钮打 compact 属性，
+            # QSS 里 `QPushButton[compact="1"]{padding:0 4px;}` 把内边距压成 0，
+            # 内容区恢复 26px，字完整居中；宽高仍锁 56×28，行高不受影响。
+            edit = compact_button("编辑", 56, 28, "修改这个媒体库的名称 / 类型 / 路径")
             edit.clicked.connect(lambda _c, L=lib: self._edit_library(L))
-            scan = QPushButton("扫描")
-            scan.setObjectName("Ghost")
+            scan = compact_button("扫描", 56, 28, "只扫描这一个媒体库（后台进行）")
             scan.clicked.connect(lambda _c, L=lib: self._scan_library(L))
-            delete = QPushButton("删除")
-            delete.setObjectName("Ghost")
+            delete = compact_button("删除", 56, 28, "从配置里删掉这个媒体库（不动硬盘文件）")
             delete.clicked.connect(lambda _c, L=lib: self._del_library(L))
             for b in (edit, scan, delete):
-                b.setFixedHeight(28)         # 与正文行高匹配，不会被行高裁掉
                 h.addWidget(b)
             # v1.14.0 反馈 6：行高用显式常量（原来 row.sizeHint() 量到的高度不足以
             # 容纳 28px 按钮 + 上下 4px 边距，按钮底部被切掉一截）
             li.setSizeHint(QSize(row.sizeHint().width(), LIB_ROW_H))
             self.lib_list.addItem(li)
             self.lib_list.setItemWidget(li, row)
-        # 列表高度按条目数自适应（3 行以内全显，更多则滚动）
-        self.lib_list.setFixedHeight(min(len(self.s.libraries), 4) * LIB_ROW_H + 10)
+        # 列表高度按条目数自适应（4 行以内全显，更多则滚动）
+        self.lib_list.setFixedHeight(
+            min(len(self.s.libraries), 4) * LIB_ROW_H + LIST_CHROME)
 
     def _scan_library(self, lib):
         self._scan_total = 1
         self._scan_done_n = 0
-        self._set_lib_status(f"正在扫描「{lib['name']}」…（后台进行，可继续使用主界面）", "#d4af37")
+        self._set_lib_status(f"正在扫描「{lib['name']}」…（后台进行，可继续使用主界面）", "#66a9ff")
         self._worker = ScanNamedWorker(lib)
         self._worker.done.connect(self._on_scan_done)
         self._worker.start()
@@ -6235,17 +6478,17 @@ class SettingsDialog(QDialog):
 
     def _scan_next(self):
         if not self._scan_queue:
-            self._set_lib_status("全部媒体库扫描完成。", "#7fc08a")
+            self._set_lib_status("全部媒体库扫描完成。", "#45d483")
             return
         lib = self._scan_queue.pop(0)
         self._set_lib_status(
             f"正在扫描「{lib['name']}」…（{self._scan_done_n + 1}/{self._scan_total}，"
-            f"后台进行，可继续使用主界面）", "#d4af37")
+            f"后台进行，可继续使用主界面）", "#66a9ff")
         self._worker = ScanNamedWorker(lib)
         self._worker.done.connect(lambda c, n: (self._on_scan_done(c, n), self._scan_next()))
         self._worker.start()
 
-    def _set_lib_status(self, text, color="#a2967f"):
+    def _set_lib_status(self, text, color="#a1a1aa"):
         lbl = getattr(self, "lib_status", None)
         if lbl is None:
             return
@@ -6260,13 +6503,13 @@ class SettingsDialog(QDialog):
         用户必须点掉才能继续 —— 这正是「设置里的功能影响了主体功能」。
         """
         if counts.get("error"):
-            self._set_lib_status(f"「{name}」扫描出错：{counts['error']}", "#e08e8e")
+            self._set_lib_status(f"「{name}」扫描出错：{counts['error']}", "#f87171")
         else:
             self._scan_done_n = getattr(self, "_scan_done_n", 0) + 1
             self._set_lib_status(
                 f"「{name}」扫描完成：电影 {counts.get('movie', 0)} 部 / "
                 f"剧集 {counts.get('tvshow', 0)} 部 / 分集 {counts.get('episode', 0)} 个",
-                "#7fc08a")
+                "#45d483")
         if self.on_changed:
             self.on_changed()
 
@@ -6311,7 +6554,7 @@ class SettingsDialog(QDialog):
             "· 普通智能算法：纯本地规则 —— 标题关键词 + 片商 / 系列伪标签 + 全库标签共现；\n"
             "· AI 智能算法：在普通算法之上叠加**本地离线 AI**（Ollama 不可用时自动降级）。"))
         h1.setWordWrap(True)
-        h1.setStyleSheet("color:#a2967f;font-size:11px;")
+        h1.setStyleSheet("color:#a1a1aa;font-size:11px;")
         g1v.addWidget(h1)
 
         srow = QHBoxLayout()
@@ -6353,7 +6596,7 @@ class SettingsDialog(QDialog):
                 self.to_lib.setCurrentIndex(idx)
         lrow.addWidget(self.to_lib)
         self.lb_to_scope = QLabel("—")
-        self.lb_to_scope.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.lb_to_scope.setStyleSheet("color:#71717a;font-size:11px;")
         self.lb_to_scope.setWordWrap(True)
         lrow.addWidget(self.lb_to_scope, 1)
         g1v.addLayout(lrow)
@@ -6376,7 +6619,7 @@ class SettingsDialog(QDialog):
                                   "点下面的按钮可手动检测本机是否可用，"
                                   "用哪个模型跟「智能推荐」页共用同一项设置。")
         self.to_ai_state.setWordWrap(True)
-        self.to_ai_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.to_ai_state.setStyleSheet("color:#71717a;font-size:11px;")
         g2v.addWidget(self.to_ai_state)
 
         # v1.34.3（反馈 2）：显式「检测本地 AI 引擎」按钮 —— 与其它检测页一致。
@@ -6455,7 +6698,7 @@ class SettingsDialog(QDialog):
         self.to_status.setWordWrap(True)
         # 进度文案里会出现 `||`、`&` 之类的原文，强制纯文本，别让 QLabel 当富文本解析
         self.to_status.setTextFormat(Qt.PlainText)
-        self.to_status.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.to_status.setStyleSheet("color:#71717a;font-size:11px;")
         g3v.addWidget(self.to_status)
 
         self.to_table = QTableWidget(0, 5)
@@ -6575,7 +6818,7 @@ class SettingsDialog(QDialog):
     def _on_tagopt_algo_changed(self, *_):
         self._tagopt_save_prefs()
         if not self.rb_to_ai.isChecked():
-            self.to_ai_state.setStyleSheet("color:#8c8071;font-size:11px;")
+            self.to_ai_state.setStyleSheet("color:#71717a;font-size:11px;")
             self.to_ai_state.setText("当前用普通智能算法：纯本地规则 + 全库标签共现，"
                                      "完全不依赖 AI，速度最快。")
             return
@@ -6590,7 +6833,7 @@ class SettingsDialog(QDialog):
         w = getattr(self, "_to_ai_worker", None)
         if w is not None and w.isRunning():
             return
-        self.to_ai_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.to_ai_state.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.to_ai_state.setText("正在检测本地 AI 引擎…")
         self._to_ai_worker = AiProbeWorker()
         self._to_ai_worker.done.connect(self._on_to_ai_probe)
@@ -6600,15 +6843,15 @@ class SettingsDialog(QDialog):
         st = st or {}
         eng = st.get("engine")
         if eng == "ollama":
-            self.to_ai_state.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            self.to_ai_state.setStyleSheet("color:#45d483;font-size:11px;")
             self.to_ai_state.setText("本地离线 AI 可用：" + html_esc(st.get("label"))
                                      + "　—— 想换模型去「智能推荐」页填。")
         elif eng == "error":
-            self.to_ai_state.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.to_ai_state.setStyleSheet("color:#f87171;font-size:11px;")
             self.to_ai_state.setText("AI 引擎检测失败，将退回内置算法："
                                      + html_esc(st.get("detail")))
         else:
-            self.to_ai_state.setStyleSheet("color:#e8d27a;font-size:11px;")
+            self.to_ai_state.setStyleSheet("color:#8fc0ff;font-size:11px;")
             self.to_ai_state.setText("没检测到可用的本地模型，将退回内置算法："
                                      + html_esc(st.get("detail")))
 
@@ -6619,7 +6862,7 @@ class SettingsDialog(QDialog):
         self.to_table.setRowCount(0)
         self.btn_to_run.setEnabled(False)
         self.to_progress.setValue(0)
-        self.to_status.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.to_status.setStyleSheet("color:#71717a;font-size:11px;")
         self.to_status.setText("已清空预览。")
 
     # ---- v1.33.0（反馈 1）：结果文件导出 / 导入 ----
@@ -6664,7 +6907,7 @@ class SettingsDialog(QDialog):
         self._fill_to_table(changed)
         self.btn_to_run.setEnabled(bool(changed))
         self.to_progress.setValue(0)
-        self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.to_status.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.to_status.setText(
             "已导入 %s：%d 条扫描记录、其中 %d 条标签会变化。"
             "确认无误后点「执行写入」即可（**无需重新扫描**）。"
@@ -6684,7 +6927,7 @@ class SettingsDialog(QDialog):
         sc = self._tagopt_scope()
         val = self._tagopt_value()
         if not val:
-            self.to_status.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.to_status.setStyleSheet("color:#f87171;font-size:11px;")
             self.to_status.setText(
                 "✗ 还没有可处理的目标 —— 先填路径（或选一个媒体库）。"
                 if sc != "library" else
@@ -6695,7 +6938,7 @@ class SettingsDialog(QDialog):
         self.btn_to_run.setEnabled(False)
         self.to_table.setRowCount(0)
         self.to_progress.setValue(0)
-        self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.to_status.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.to_status.setText("正在扫描 " + val + " …这一步只读不写。")
         opt = tagopt_mod.TagOptimizer(self.s)
         self._to_scan_worker = TagOptScanWorker(opt, sc, val, self._tagopt_kwargs())
@@ -6712,7 +6955,7 @@ class SettingsDialog(QDialog):
             self._to_changed = []
             self.to_table.setRowCount(0)
             self.btn_to_run.setEnabled(False)
-            self.to_status.setStyleSheet("color:#e08a7a;font-size:11px;")
+            self.to_status.setStyleSheet("color:#f87171;font-size:11px;")
             self.to_status.setText("✗ " + str(err))
             return
         changed = [p for p in plans if not p.get("error")
@@ -6721,7 +6964,7 @@ class SettingsDialog(QDialog):
         self._fill_to_table(changed)
         self.btn_to_run.setEnabled(bool(changed))
         if not changed:
-            self.to_status.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            self.to_status.setStyleSheet("color:#45d483;font-size:11px;")
             self.to_status.setText(
                 "✓ 扫了 %d 个 nfo，标签都已经是最新的，没有需要改的。" % len(plans))
             return
@@ -6738,7 +6981,7 @@ class SettingsDialog(QDialog):
         if bad_n:
             bits.append("；另有 %d 个读取失败" % bad_n)
         bits.append("。确认无误后点「执行写入」。表格里的数字都能悬停看明细。")
-        self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.to_status.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.to_status.setText("".join(bits))
 
     def _fill_to_table(self, plans, cap=800):
@@ -6788,7 +7031,7 @@ class SettingsDialog(QDialog):
         self.btn_to_run.setEnabled(False)
         self.btn_to_scan.setEnabled(False)
         self.to_progress.setValue(0)
-        self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
+        self.to_status.setStyleSheet("color:#8fc0ff;font-size:11px;")
         self.to_status.setText("正在写入 %d 个 nfo…（同时同步数据库里的标签）" % n)
         opt = tagopt_mod.TagOptimizer(self.s)
         self._to_run_worker = TagOptRunWorker(opt, changed, backup)
@@ -6806,9 +7049,9 @@ class SettingsDialog(QDialog):
                    s.get("failed", 0), s.get("db_synced", 0)))
         if errs:
             head += "（首个错误：" + str(errs[0]) + "）"
-            self.to_status.setStyleSheet("color:#e8d27a;font-size:11px;")
+            self.to_status.setStyleSheet("color:#8fc0ff;font-size:11px;")
         else:
-            self.to_status.setStyleSheet("color:#9ecf8a;font-size:11px;")
+            self.to_status.setStyleSheet("color:#45d483;font-size:11px;")
         self.to_status.setText(head)
         applog.log("[标签优化] " + head)
         self._to_plans = []

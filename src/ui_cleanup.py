@@ -39,7 +39,7 @@ class PeopleCleanDialog(QDialog):
         v.setSpacing(10)
 
         title = QLabel("演员库清理 · 删除没有任何作品关联的冗余条目")
-        title.setStyleSheet("font-size:15px;font-weight:bold;color:#ece5d8;")
+        title.setStyleSheet("font-size:15px;font-weight:bold;color:#ecedee;")
         v.addWidget(title)
 
         hint = QLabel(
@@ -47,7 +47,7 @@ class PeopleCleanDialog(QDialog):
             "删除只清索引记录（people 与作品关联），不会动头像文件，也不会动任何媒体文件；"
             "收藏 / 置顶的人默认不列入。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         v.addWidget(hint)
 
         row = QWidget()
@@ -65,7 +65,7 @@ class PeopleCleanDialog(QDialog):
         rh.addWidget(self.ck_director)
         rh.addStretch(1)
         self.count_lbl = QLabel("—")
-        self.count_lbl.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.count_lbl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         rh.addWidget(self.count_lbl)
         v.addWidget(row)
 
@@ -105,7 +105,7 @@ class PeopleCleanDialog(QDialog):
         btns.addWidget(b_re)
         btns.addStretch(1)
         self.sel_lbl = QLabel("已选 0 项")
-        self.sel_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.sel_lbl.setStyleSheet("color:#71717a;font-size:11px;")
         btns.addWidget(self.sel_lbl)
         btns.addWidget(self.del_btn)
         v.addLayout(btns)

@@ -64,8 +64,8 @@ import main_window as mw
 from ui_hero import HeroView
 
 print("== 版本 ==")
-check("VERSION == v1.46.8", VER.VERSION == "v1.46.8", VER.VERSION)
-check("BUILD == 2610230110", VER.BUILD == "2610230110", VER.BUILD)
+check("VERSION == v2.0.4", VER.VERSION == "v2.0.4", VER.VERSION)
+check("BUILD == 2610290125", VER.BUILD == "2610290125", VER.BUILD)
 
 # ============================================================
 print("== ① 导航名：数据与日志（v1.43.1 回改） ==")
@@ -291,10 +291,10 @@ check("ThePornDB Token 接口已删除", not hasattr(sc, "set_theporndb_token"))
 # ============================================================
 print("== ⑤ 底部变黑缺陷 ==")
 qss = mw.render_style(cfg.get_settings().appearance)
-check("QMainWindow 使用不透明底色（不再 transparent）",
-      "QMainWindow { background: #0d0b0a; }" in qss)
-check("状态栏为不透明面板色（v1.43.4：不再是近纯黑 #0f0d0b）",
-      "background: #1c1815" in qss and "background: #241f1b" in qss
+check("QMainWindow 使用不透明底色（v2.0.0：HeroUI 页面底 #0a0a0b）",
+      "QMainWindow { background: #0a0a0b; }" in qss)
+check("状态栏为不透明面板色（v2.0.0：#111113，hover #17171a；不再是近纯黑 #0f0d0b）",
+      "background: #111113" in qss and "background: #17171a" in qss
       and "background: #0f0d0b" not in qss)
 check("菜单关闭后强制重绘（v1.43.1 反馈 3 保险）",
       hasattr(HeroView, "_repaint_after_menu"))
@@ -337,8 +337,8 @@ _src_mw = open(os.path.join(ROOT, "src", "main_window.py"), encoding="utf-8").re
 check("主窗已不再使用 showMessage", ".showMessage(" not in _src_mw)
 # v1.43.5（反馈 1）：透明度滑块把手由正圆改圆角扁平方形
 _qss2 = mw.render_style(cfg.get_settings().appearance)
-check("滑块把手为 18×12 圆角扁平方形（radius 4，不再是 16/radius 8）",
-      "width: 18px; margin: -3px 0; border-radius: 4px;" in _qss2)
+check("滑块把手为 18×18 正圆（radius 9，HeroUI 纯白圆点）",
+      "width: 18px; height: 18px; margin: -6px 0; border-radius: 9px;" in _qss2)
 check("底部版权标签有专属样式", "QLabel#FooterNote" in _qss2)
 check("状态栏存在且可见", win.statusBar() is not None)
 # v1.43.2：主窗 backdrop 必须是 plain-dark（系统 Acrylic 已关）
@@ -442,8 +442,8 @@ check("偏好按钮存在且不裁字", "导出偏好…" in btns and "导入偏
 check("偏好说明标签存在", hasattr(dlg, "pref_hint"))
 # v1.43.4（反馈 1）：高亮色卡由正圆改圆角扁平方形
 _sw = list(getattr(dlg, "_accent_btns", {}).values())
-check("色卡为 30x24 圆角扁平方形",
-      bool(_sw) and all(b.width() == 30 and b.height() == 24 for b in _sw),
+check("色卡为 28x28 正圆（HeroUI 色点，选中套白环 + 勾）",
+      bool(_sw) and all(b.width() == 28 and b.height() == 28 for b in _sw),
       f"{_sw[0].width()}x{_sw[0].height()}" if _sw else "无")
 check("色卡是自绘 _AccentSwatch（不依赖字体勾号）",
       bool(_sw) and hasattr(_sw[0], "set_on")
@@ -652,8 +652,10 @@ _card_f = mw.ActorCard({"id": _g1, "name": "森沢かな", "gender": "female"},
 _card_m = mw.ActorCard({"id": _g2, "name": "男演员", "gender": "male"},
                     on_open=lambda *_: None, on_fav=lambda *_: None,
                     on_pin=lambda *_: None, on_select=lambda *_: None, main_win=win)
-check("卡片显示 ♀（粉）", "♀" in _card_f._name.text() and "#e6739f" in _card_f._name.text())
-check("卡片显示 ♂（蓝）", "♂" in _card_m._name.text() and "#5aa9e6" in _card_m._name.text())
+check("卡片显示 ♀（玫红 #f31260）",
+      "♀" in _card_f._name.text() and "#f31260" in _card_f._name.text())
+check("卡片显示 ♂（天青 #338ef7）",
+      "♂" in _card_m._name.text() and "#338ef7" in _card_m._name.text())
 _card_f.deleteLater(); _card_m.deleteLater()
 
 
@@ -1160,18 +1162,25 @@ import time as _time
 def _img_of(_w):
     _im = _w.grab().toImage().convertToFormat(_QImage.Format_RGBA8888)
     _iw, _ih = _im.width(), _im.height()
-    _bg = _PILImage.new("RGB", (_iw, _ih), (34, 29, 25))
+    _bg = _PILImage.new("RGB", (_iw, _ih), (17, 17, 19))
     _raw = _PILImage.frombytes("RGBA", (_iw, _ih), bytes(_im.constBits()))
     return _PILImage.alpha_composite(_bg.convert("RGBA"), _raw).convert("RGB")
 
 
 def _accent_n(_im):
+    """数「强调色」像素：与**当前高亮色**三通道差都 <= 46。
+
+    v1 时这里写死判红（r>110 且 r-g>40 且 r-b>35）；v2.0.0 默认色换成 #006fee
+    之后那套判据恒为 0（三条断言集体假红）。改成按 ACCENT_RGB 做距离判定，
+    换任何高亮色都成立，也不再叫「朱红像素」。
+    """
+    _ar, _ag, _ab = tuple(mw.ACCENT_RGB)[:3]
     _n = 0
     _px = _im.load()
     for _y in range(_im.height):
         for _x in range(_im.width):
             _r, _g, _b = _px[_x, _y]
-            if _r > 110 and _r - _g > 40 and _r - _b > 35:
+            if max(abs(_r - _ar), abs(_g - _ag), abs(_b - _ab)) <= 46:
                 _n += 1
     return _n
 
@@ -1185,21 +1194,21 @@ def _spin(_ms):
 
 _bb = win._busy_bar
 mw.set_busy(None, ""); _spin(600)
-check("进度条空闲 = 空槽（0 朱红像素）", _accent_n(_img_of(_bb)) == 0,
+check("进度条空闲 = 空槽（0 强调色像素）", _accent_n(_img_of(_bb)) == 0,
       _accent_n(_img_of(_bb)))
 mw.set_busy(-1, "载入中"); _spin(15)
 _n1 = _accent_n(_img_of(_bb))
-check("进度条不确定态高亮", _n1 > 0, "朱红像素=%d" % _n1)
+check("进度条不确定态高亮", _n1 > 0, "强调色像素=%d" % _n1)
 mw.set_busy(45, "缓存中"); _spin(15)
 _n2 = _accent_n(_img_of(_bb))
-check("进度条确定态(45%)高亮", _n2 > 0, "朱红像素=%d" % _n2)
+check("进度条确定态(45%)高亮", _n2 > 0, "强调色像素=%d" % _n2)
 # 核心：快闪（-1 → None 只隔几毫秒）仍要看得见
 mw.set_busy(None, ""); _spin(600)
 mw.set_busy(-1, "载入中"); mw.set_busy(None, "")
 _spin(30)
 _n3 = _accent_n(_img_of(_bb))
-check("快闪后 30ms 仍可见朱红（最短可见时长）", _n3 > 0,
-      "朱红像素=%d（未修时恒为 0）" % _n3)
+check("快闪后 30ms 仍可见高亮色（最短可见时长）", _n3 > 0,
+      "强调色像素=%d（未修时恒为 0）" % _n3)
 _spin(700)
 check("700ms 后回落空槽（不卡高亮）", _accent_n(_img_of(_bb)) == 0,
       _accent_n(_img_of(_bb)))
@@ -1256,6 +1265,1558 @@ check("ui_home 已接入 set_busy", "def _busy(" in _ui_home_txt
       and "_busy(-1" in _ui_home_txt and "载入列表" in _ui_home_txt)
 
 print()
+print("== ⑳ v1.46.9：标题按行数收高 / extrafanart 剧照横条 / 标签增删 ==")
+import ui_hero as _uh
+import nfo_parser as _nfo
+
+_hero_src = open(os.path.join(ROOT, "src", "ui_hero.py"), encoding="utf-8").read()
+
+# ---- 反馈 1：标题只有 1 行时不该留第 2 行的空白 ----
+_host = QWidget()
+_host.resize(900, 300)
+_hv = QVBoxLayout(_host)
+_hv.setContentsMargins(0, 0, 0, 0)
+_short = _uh.ElidedLabel("短标题", max_lines=2, px=34)
+_long = _uh.ElidedLabel("这是一个足够长的标题" * 6, max_lines=2, px=34)
+_hv.addWidget(_short)
+_hv.addWidget(_long)
+_host.show()
+for _ in range(20):
+    app.processEvents()
+_ls = _short._eff_font_metrics().lineSpacing()
+check("反馈1 单行标题只占 1 行高度（不再锁 2 行）",
+      _short._lines == 1 and _short.height() <= _ls + 6 + 2,
+      "lines=%d h=%d lineSpacing=%d" % (_short._lines, _short.height(), _ls))
+check("反馈1 长标题仍是 2 行（并带省略号）",
+      _long._lines == 2 and _long.height() > _ls + 6,
+      "lines=%d h=%d" % (_long._lines, _long.height()))
+check("反馈1 两种行数的高度差正好一行",
+      (_long.height() - _short.height()) >= _ls - 2,
+      "diff=%d" % (_long.height() - _short.height()))
+check("反馈1 高度重算挂在 resize/show 上（防止回退成 __init__ 一次性锁死）",
+      "def _apply_lines" in _hero_src and "def resizeEvent" in _hero_src
+      and "def showEvent" in _hero_src and "setFixedHeight" in _hero_src)
+
+# ---- 反馈 2：extrafanart 剧照 ----
+_mov = os.path.join(TMP, "smoke_stills", "LMC-900")
+_st = os.path.join(_mov, "extrafanart")
+os.makedirs(_st, exist_ok=True)
+from PySide6.QtGui import QPixmap as _QPixmap, QColor as _QColor
+for _i in range(4):
+    _pm = _QPixmap(320, 180)
+    _pm.fill(_QColor(40 + _i * 20, 30, 25))
+    _pm.save(os.path.join(_st, "fanart%d.jpg" % (_i + 1)))
+_mov_file = os.path.join(_mov, "LMC-900.mp4")
+open(_mov_file, "wb").write(b"\x00" * 64)
+_mdict = {"file_path": _mov_file, "nfo_path": os.path.join(_mov, "movie.nfo")}
+_found = _uh.find_extrafanart(_mdict)
+check("反馈2 识别 extrafanart 目录里的 4 张剧照", len(_found) == 4, len(_found))
+check("反馈2 自然序（fanart1..4）",
+      [os.path.basename(p) for p in _found] == ["fanart%d.jpg" % (i + 1) for i in range(4)],
+      [os.path.basename(p) for p in _found])
+_empty_dir = os.path.join(TMP, "smoke_no_stills")
+os.makedirs(_empty_dir, exist_ok=True)
+check("反馈2 无 extrafanart 目录时不误报",
+      _uh.find_extrafanart({"file_path": os.path.join(_empty_dir, "x.mp4"),
+                            "nfo_path": os.path.join(_empty_dir, "x.nfo")}) == [])
+_strip = _uh.StillStrip()
+_strip.setFixedSize(500, 160)
+_strip_host = QWidget()
+from PySide6.QtWidgets import QHBoxLayout as _QHBox, QLabel as _QLabel
+_shl = _QHBox(_strip_host)
+_shl.setContentsMargins(0, 0, 0, 0)
+for _p in _found:
+    _lab = _QLabel()
+    _lab.setFixedSize(_uh._STILL_W, _uh._STILL_H)
+    _lab.setPixmap(_uh.cover_pixmap(_p, _uh._STILL_W, _uh._STILL_H))
+    _shl.addWidget(_lab)
+_strip.setWidget(_strip_host)
+_strip.show()
+for _ in range(20):
+    app.processEvents()
+_sbar = _strip.horizontalScrollBar()
+check("反馈2 剧照条可左右滑（横向滚动范围 > 0）", _sbar.maximum() > 0,
+      "max=%d viewport=%d" % (_sbar.maximum(), _strip.viewport().width()))
+check("反馈2 剧照条不出现竖向滚动条",
+      _strip.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOff)
+_old_v = _sbar.value()
+_strip.page(1)
+check("反馈2 ‹ › 翻页真的移动了", _sbar.value() > _old_v, _sbar.value())
+_strip.setFixedWidth(420)
+for _ in range(1):
+    app.processEvents()
+check("反馈2 详情页把剧照段接进主体（没有该目录则整块不建）",
+      "self._extrafanart_section(m)" in _hero_src and "if still_box is not None" in _hero_src)
+
+# ---- 反馈 3：标签 ----
+_media_id = db.upsert_media_by_path(
+    mode="overwrite", kind="movie", title="SMOKE-900", file_path=_mov_file,
+    nfo_path=os.path.join(TMP, "smoke_no_stills", "movie.nfo"))
+_mid = db.set_media_tags(_media_id, [" 已看 ", "已看", "", "收藏向"])
+check("反馈3 标签落库 + 归一化（去空/去重/去空白）", _mid == "已看,收藏向", _mid)
+check("反馈3 库里能读回 tags", (db.get_media(_media_id).get("tags") or "") == "已看,收藏向",
+      db.get_media(_media_id).get("tags"))
+
+_nfo_file = os.path.join(TMP, "smoke_tags.nfo")
+open(_nfo_file, "w", encoding="utf-8").write(
+    '<?xml version="1.0" encoding="utf-8"?>\n<movie>\n  <title>T</title>\n'
+    "  <tag>旧标签</tag>\n  <genre>剧情</genre>\n</movie>\n")
+check("反馈3 nfo 能解析 <tag>", _nfo.read_tags(_nfo_file) == ["旧标签"], _nfo.read_tags(_nfo_file))
+check("反馈3 parse_movie 带出 tags 字段",
+      _nfo.parse_movie(_nfo_file).get("tags") == "旧标签",
+      _nfo.parse_movie(_nfo_file).get("tags"))
+_nfo.write_tags(_nfo_file, ["新标签", "第二个"])
+check("反馈3 标签能写回 nfo", _nfo.read_tags(_nfo_file) == ["新标签", "第二个"],
+      _nfo.read_tags(_nfo_file))
+_genre_left = "<genre>剧情</genre>" in open(_nfo_file, encoding="utf-8").read()
+check("反馈3 写标签不动 <genre>（两回事）", _genre_left)
+_nfo.write_tags(_nfo_file, [])
+check("反馈3 清空标签后不留空节点", _nfo.read_tags(_nfo_file) == [])
+
+import nfo_editor as _nfe
+check("反馈3 nfo 编辑器里也有「标签」字段",
+      any(k == "tag" and t == "multi" for k, _l, t in _nfe.FIELDS),
+      [f[0] for f in _nfe.FIELDS if f[2] == "multi"])
+check("反馈3 media 表已有 tags 列",
+      "tags" in {r["name"] for r in db.get_conn().execute("PRAGMA table_info(media)").fetchall()})
+check("反馈3 详情页有 ＋/－ 按钮与落库调用",
+      "添加标签" in _hero_src and "删除标签" in _hero_src
+      and "db.set_media_tags" in _hero_src and "nfo_mod.write_tags" in _hero_src)
+
+# 真点一次「＋」：QInputDialog 打桩返回文本，断言按钮 → 落库 → nfo 全链路
+_hero_media = db.get_media(_media_id)
+_hv2 = _uh.HeroView(dict(_hero_media))
+_hv2.resize(1100, 1000)
+_hv2.show()
+for _ in range(20):
+    app.processEvents()
+_plus = [b for b in _hv2.findChildren(_uh.QPushButton) if b.text() == "＋"]
+check("反馈3 找得到「＋」按钮", len(_plus) == 1, len(_plus))
+if _plus:
+    _orig_get = _uh.QInputDialog.getText
+    _uh.QInputDialog.getText = staticmethod(lambda *a, **k: ("真机标签, 第二个", True))
+    try:
+        _plus[0].click()
+        for _ in range(20):
+            app.processEvents()
+    finally:
+        _uh.QInputDialog.getText = _orig_get
+    _saved = db.get_media(_media_id).get("tags") or ""
+    check("反馈3 点「＋」后按钮路径真落库", "真机标签" in _saved and "第二个" in _saved, _saved)
+
+print()
+print("== ㉑ v1.46.10：演职人员并入基本信息右侧 / 右键搜索框可打中文 ==")
+from PySide6.QtCore import QPoint as _QPoint, QEvent as _QEvent
+from PySide6.QtGui import QMouseEvent as _QMouseEvent
+
+# ---- 反馈 1：_intro_section 改成「海报 | 基本信息 | 演职人员」三栏 ----
+_poster_f = os.path.join(TMP, "smoke_cast_poster.jpg")
+_pm = _QPixmap(300, 450)
+_pm.fill(_QColor(60, 44, 36))
+_pm.save(_poster_f)
+_fan_f = os.path.join(TMP, "smoke_cast_fan.jpg")
+_pm = _QPixmap(1200, 500)
+_pm.fill(_QColor(50, 36, 28))
+_pm.save(_fan_f)
+_v901 = os.path.join(TMP, "smoke_stills", "SMOKE-901.mp4")
+_mid2 = db.upsert_media_by_path(
+    mode="overwrite", kind="movie", title="SMOKE-901", year=2026,
+    plot="简介一行。", file_path=_v901, library="演示库", genres="剧情",
+    poster=_poster_f, fanart=_fan_f)
+for _i, (_nm, _role) in enumerate([("枳アリス", "Actor"), ("赤井彗星", "Director")]):
+    _pid = db.upsert_person(_nm, role_type=_role)
+    db.link_media_person(_mid2, _pid, "", _i)
+_hv3 = _uh.HeroView(dict(db.get_media(_mid2)))
+_hv3.resize(1200, 1500)
+_hv3.show()
+for _ in range(30):
+    app.processEvents()
+check("反馈1 演职人员区块在横向 intro 布局里",
+      _hv3._cast_layout is not None and _hv3._cast_layout.indexOf(_hv3._cast_box) >= 0,
+      _hv3._cast_layout.indexOf(_hv3._cast_box) if _hv3._cast_layout else None)
+check("反馈1 主体竖向布局里不再有它（不再独占一整行）",
+      _hv3._body_layout.indexOf(_hv3._cast_box) < 0)
+_hw = _hv3.widget()
+_poster_lbl = None
+_facts_lbl = None
+_file_lbl = None
+for _w in _hv3.findChildren(_QLabel):
+    if _w.text() == "基本信息":
+        _facts_lbl = _w
+    elif _w.text() == "文件信息":
+        _file_lbl = _w
+    elif _w.pixmap() is not None and not _w.pixmap().isNull() \
+            and _w.width() == 150 and _w.height() == 225:
+        _poster_lbl = _w
+check("反馈1 找得到海报 / 「基本信息」/「文件信息」",
+      _poster_lbl is not None and _facts_lbl is not None and _file_lbl is not None)
+_cast_geo = _hv3._cast_box.mapTo(_hw, _QPoint(0, 0))
+if _poster_lbl is not None and _facts_lbl is not None:
+    _px = _poster_lbl.mapTo(_hw, _QPoint(0, 0)).x()
+    _fx = _facts_lbl.mapTo(_hw, _QPoint(0, 0)).x()
+    _fy = _facts_lbl.mapTo(_hw, _QPoint(0, 0)).y()
+    check("反馈1 顺序：海报 → 基本信息 → 演职人员",
+          _px < _fx < _cast_geo.x(),
+          "poster=%d facts=%d cast=%d" % (_px, _fx, _cast_geo.x()))
+    check("反馈1 演职人员与「基本信息」同一行（不是压到下面）",
+          _cast_geo.x() > _fx + 100 and abs(_cast_geo.y() - _fy) <= 24,
+          "cast_x=%d facts_x=%d dy=%d" % (_cast_geo.x(), _fx, _cast_geo.y() - _fy))
+    check("反馈1 演职人员没有挤到海报下方",
+          _cast_geo.y() < _poster_lbl.mapTo(_hw, _QPoint(0, 0)).y() + 225)
+if _file_lbl is not None:
+    check("反馈1 「文件信息」仍在底部（在演职人员栏下方）",
+          _file_lbl.mapTo(_hw, _QPoint(0, 0)).y() > _cast_geo.y() + 60,
+          "file.y=%d cast.y=%d" % (_file_lbl.mapTo(_hw, _QPoint(0, 0)).y(), _cast_geo.y()))
+_hv3.resize(700, 1400)
+for _ in range(25):
+    app.processEvents()
+check("反馈1 700px 窄栏下不撑出页面级横向滚动条",
+      _hv3.horizontalScrollBar().maximum() == 0, _hv3.horizontalScrollBar().maximum())
+_old_cb = _hv3._cast_box
+_idx_before = _hv3._cast_layout.indexOf(_old_cb)
+_hv3._refresh_cast()
+for _ in range(10):
+    app.processEvents()
+check("反馈1 右键替换演员后就地重建、仍插回同一栏位",
+      _hv3._cast_box is not _old_cb
+      and _hv3._cast_layout.indexOf(_hv3._cast_box) == _idx_before,
+      "idx=%s" % _hv3._cast_layout.indexOf(_hv3._cast_box))
+
+# ---- 反馈 2：右键搜索弹层能被激活（输入法的前提）----
+_dlg = _uh.PersonSearchDialog(initial="", old_name="八森わかな", parent=_hw.window())
+_flags = _dlg.windowFlags()
+# Qt.Popup 的值是 0x9（Window|Popup），直接 `flags & Qt.Popup` 会被 Window 位污染，
+# 必须先用 WindowType_Mask 取基类型再比。
+_base = int(_flags) & int(Qt.WindowType_Mask)
+check("反馈2 基类型是 Dialog 不是 Popup（Popup 不被激活 → 输入法挂不上）",
+      _base == int(Qt.Dialog)
+      and _base != (int(Qt.Popup) & int(Qt.WindowType_Mask)),
+      "base=0x%x flags=0x%x" % (_base, int(_flags)))
+check("反馈2 仍是无边框面板", (int(_flags) & int(Qt.FramelessWindowHint)) != 0)
+check("反馈2 窗口允许激活（WA_ShowWithoutActivating 为假）",
+      not _dlg.testAttribute(Qt.WA_ShowWithoutActivating))
+check("反馈2 输入框接受输入法事件（WA_InputMethodEnabled + ImhNone）",
+      _dlg._edit.testAttribute(Qt.WA_InputMethodEnabled)
+      and _dlg._edit.inputMethodHints() == Qt.ImhNone,
+      "attr=%s hints=%s" % (_dlg._edit.testAttribute(Qt.WA_InputMethodEnabled),
+                            _dlg._edit.inputMethodHints()))
+_dlg.move_to(_QPoint(600, 400))
+_dlg.show()
+for _ in range(15):
+    app.processEvents()
+check("反馈2 弹出后装了「点外面关闭」过滤器", _dlg._outside is not None)
+check("反馈2 输入框拿到焦点", _dlg._edit.hasFocus())
+_vis_before = _dlg.isVisible()
+_dlg._outside.eventFilter(
+    _dlg, _QMouseEvent(_QEvent.MouseButtonPress, _QPoint(-50, -50), _QPoint(-50, -50),
+                       Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+for _ in range(5):
+    app.processEvents()
+check("反馈2 点面板外面会关闭（原 Qt.Popup 自带能力已补回）",
+      _vis_before and not _dlg.isVisible())
+check("反馈2 关闭后事件过滤器已摘除（不泄漏）", _dlg._outside is None)
+check("反馈2 源码里不再用 Qt.Popup 做输入弹层",
+      "Qt.Popup | Qt.FramelessWindowHint" not in _hero_src
+      and "class ClickOutsideCloser" in _hero_src)
+
+print()
+print("== ㉒ v1.46.11：列表右键批量操作 / 首页悬停不再叠加 ==")
+import inspect as _inspect
+import ui_home as _uhome
+
+_calls = []
+_lvx = _uhome.HomeListView(on_bulk_action=lambda a, ms: _calls.append((a, len(ms))))
+_lvx.resize(1100, 760)
+_lvx.show()
+for _ in range(60):
+    app.processEvents()
+
+check("反馈1 表格走自定义右键菜单",
+      _lvx.table.contextMenuPolicy() == Qt.CustomContextMenu,
+      _lvx.table.contextMenuPolicy())
+_ctx_src = _inspect.getsource(_uhome.HomeListView._on_context_menu)
+check("反馈1 右键命中用 viewport 坐标（customContextMenuRequested 实测给的就是它）",
+      "self.table.indexAt(pos)" in _ctx_src and "mapFrom(self.table, pos)" not in _ctx_src)
+
+_lvx.table.clearSelection()
+_lvx.table.selectRow(0)
+_one = _lvx.selected_medias()
+check("反馈1 单选 → selected_medias 1 项", len(_one) == 1, len(_one))
+_m1 = _lvx._build_context_menu(_one)
+_t1 = [a.text() for a in _m1.actions() if not a.isSeparator()]
+check("反馈1 五项且顺序固定",
+      _t1 == ["播放选中视频", "打开视频文件夹", "刷新数据", "删除数据", "删除源文件"], _t1)
+check("反馈1 单选时不加数量后缀", all("项）" not in t for t in _t1), _t1)
+
+_lvx.table.selectAll()
+_many = _lvx.selected_medias()
+check("反馈1 全选 → selected_medias 拿到全部行",
+      len(_many) == _lvx.table.rowCount() and len(_many) >= 2, len(_many))
+_m2 = _lvx._build_context_menu(_many)
+_t2 = [a.text() for a in _m2.actions() if not a.isSeparator()]
+check("反馈1 多选时每项都带「（N 项）」",
+      all(t.endswith("（%d 项）" % len(_many)) for t in _t2), _t2)
+_acts = getattr(_m2, "_actions_by_key", {})
+check("反馈1 五个动作键齐全",
+      set(_acts) == {"play", "folder", "refresh", "delete_index", "delete_files"},
+      sorted(_acts))
+if _acts:
+    _acts["refresh"].trigger()
+check("反馈1 点菜单真的回调到主窗口（动作键 + 整批）",
+      _calls and _calls[-1] == ("refresh", len(_many)), _calls)
+
+# 就地回写：删一条 / 刷一条
+_n0, _r0 = len(_lvx._view), _lvx.table.rowCount()
+_victim = _lvx._view[0]
+_lvx.drop_ids([_victim.get("id")])
+check("反馈1 drop_ids 同时减 _view 与表格行",
+      len(_lvx._view) == _n0 - 1 and _lvx.table.rowCount() == _r0 - 1,
+      str((len(_lvx._view), _lvx.table.rowCount())))
+_tgt = _lvx._view[0]
+db.update_media_fields(_tgt["id"], title="SMOKE-REFRESHED")
+_hit = _lvx.refresh_ids([_tgt["id"]])
+check("反馈1 refresh_ids 从库里读回最新值", _hit == 1 and _tgt.get("title") == "SMOKE-REFRESHED",
+      str((_hit, _tgt.get("title"))))
+
+# 反馈 2：悬停叠层的两个来源
+_setrow_src = _inspect.getsource(_uhome.HomeListView._set_row)
+check("反馈2 单元格不再挂 tooltip（与悬停卡叠层的来源）",
+      "item.setToolTip" not in _setrow_src, "item.setToolTip" in _setrow_src)
+_qss_src = open(os.path.join(ROOT, "src", "style.qss"), encoding="utf-8").read()
+_card_seg = _qss_src.split("QFrame#HoverCard")[1][:180]
+check("反馈2 悬停卡不再半透明（v2.0.0：#18181b，列表文字不会透上来）",
+      "#18181b" in _card_seg and "__DLG__" not in _card_seg, _card_seg.split("}")[0])
+_pvx = _lvx._preview
+# 用一份字段齐全的 media 喂卡片（列表里的行不一定都带 year/studio，别让断言依赖数据）
+_pvx.set_media({"title": "卡片完整度 SMOKE", "year": 2026, "runtime": "01:12:00",
+                "rating": 4.5, "actors_text": "三上悠亜", "genres": "剧情",
+                "studio": "同人配信", "premiere": "2026-10-01"})
+check("反馈2 悬停卡信息完整（标题 / 副行 / 演员类型制片上映）",
+      _pvx.title.text() and _pvx.sub.text() and "制片" in _pvx.info.text(),
+      str((_pvx.title.text()[:12], _pvx.sub.text(),
+           _pvx.info.text().replace("\n", " | "))))
+
+# 删除源文件走回收站（真调 SHFileOperationW，不触碰真实媒体文件）
+_vfile = os.path.join(TMP, "smoke_recycle.txt")
+open(_vfile, "w", encoding="utf-8").write("x")
+_okr, _badr = mw.MainWindow._recycle_paths(None, [_vfile])
+check("反馈1 删源文件走回收站（文件确实消失、无失败）",
+      _okr == [_vfile] and not _badr and not os.path.exists(_vfile), str((_okr, _badr)))
+_okm, _badm = mw.MainWindow._recycle_paths(None, [os.path.join(TMP, "smoke_missing.mp4")])
+check("反馈1 文件已不存在 → 只清索引，不报错", _okm and not _badm, str((_okm, _badm)))
+
+print()
+print("== ㉓ v1.46.12：偏好导入 / 导出的进度（后台线程，不再「未响应」） ==")
+
+# ---- prefs 侧：progress 回调 ----
+_ev = []
+_xjson = os.path.join(TMP, "prefs_prog.json")
+_rp = prefs_mod.export_prefs(_xjson, "all", None,
+                             progress=lambda a, b, c: _ev.append((a, b, c)))
+check("导出接受 progress 回调并上报", _rp.get("ok") and len(_ev) >= 3, str(len(_ev)))
+check("导出首条是不定长阶段（读库前 total=0）", _ev[0][1] == 0, str(_ev[0]))
+check("导出随后转定量（total=行数）", any(b > 0 for _a, b, _c in _ev),
+      str([b for _a, b, _c in _ev]))
+check("导出最后一条是「写入文件」", "写入文件" in _ev[-1][2], _ev[-1][2])
+
+_cx = os.path.join(TMP, "prefs_cancel.json")
+_n = {"n": 0}
+
+
+def _cancel_cb(a, b, c):
+    _n["n"] += 1
+    return _n["n"] >= 2                 # 第二次回调起要求停止
+
+
+_rc = prefs_mod.export_prefs(_cx, "all", None, progress=_cancel_cb)
+check("导出中止 → cancelled=True 且不生成文件",
+      _rc.get("cancelled") is True and not os.path.exists(_cx), str(_rc))
+
+# ---- import 侧同样有进度 / 可中止 ----
+_imp = {"type": "lmc-prefs", "app": VER.APP_NAME, "version": VER.FULL_VERSION,
+        "exported_at": "2026-10-28 00:00:00",
+        "media": [{"num": "smoke-0001", "favorite": 1}],
+        "people": [{"name": "冒烟演员", "role_type": "Actor", "favorite": 1}]}
+_jp = os.path.join(TMP, "prefs_import.json")
+with open(_jp, "w", encoding="utf-8") as _f:
+    json.dump(_imp, _f, ensure_ascii=False)
+_ev2 = []
+_r3 = prefs_mod.import_prefs(_jp, dry_run=True,
+                             progress=lambda a, b, c: _ev2.append((a, b, c)))
+_lab2 = [c for _a, _b, c in _ev2]
+check("导入成功且上报了阶段", _r3.get("ok") and len(_ev2) >= 4, str(len(_ev2)))
+check("导入有「建立番号索引」阶段", any("番号索引" in c for c in _lab2), str(_lab2[:2]))
+check("导入有「合并影片」阶段", any("合并影片" in c for c in _lab2))
+check("导入有「合并人物」阶段", any("合并人物" in c for c in _lab2))
+check("导入 dry_run 不标取消", not _r3.get("cancelled"), str(_r3.get("cancelled")))
+_n2 = {"n": 0}
+
+
+def _cancel_cb2(a, b, c):
+    _n2["n"] += 1
+    return _n2["n"] >= 1
+
+
+_r4 = prefs_mod.import_prefs(_jp, dry_run=True, progress=_cancel_cb2)
+check("导入中止 → cancelled=True（合并前就停，命中 0）",
+      _r4.get("ok") and _r4.get("cancelled") is True and _r4.get("media_ok") == 0,
+      str({k: _r4.get(k) for k in ("ok", "cancelled", "media_ok")}))
+
+# ---- UI 侧：后台线程 + 忙碌态 + 停止 ----
+from PySide6.QtWidgets import QMessageBox as _QMB
+_src_ui = open(os.path.join(ROOT, "src", "ui_settings.py"), encoding="utf-8").read()
+check("新增 PrefsWorker（QThread 子类）",
+      hasattr(uis, "PrefsWorker") and getattr(uis.PrefsWorker, "__mro__", None)
+      and "QThread" in [c.__name__ for c in uis.PrefsWorker.__mro__])
+check("导入/导出不再在 GUI 线程直接调 prefs（都交给 worker）",
+      "prefs_mod.export_prefs(path" not in _src_ui
+      and "prefs_mod.import_prefs(path" not in _src_ui
+      and "PrefsWorker(mode, path" in _src_ui)
+check("关闭工具窗会先停偏好线程（避免 QThread 被销毁 abort）",
+      '"_prefs_worker", None' in _src_ui
+      and "pw.request_stop()" in _src_ui and "pw.wait(" in _src_ui)
+check("导航忙碌映射含「数据管理」", '("_prefs_worker", "数据管理")' in _src_ui)
+
+_dlg = uis.SettingsDialog(None)
+_dlg.show()                       # 不 show 的话子控件 isVisible() 恒为 False
+_dlg._show("数据管理")
+for _ in range(5):
+    app.processEvents()
+check("进度行默认隐藏", not _dlg.pref_prog_row.isVisible())
+check("停止按钮默认隐藏", not _dlg.pref_stop.isVisible())
+
+# 用「慢速导出」替身验忙碌态与停止（真导出太快，断言会跟线程赛跑）
+_orig_export = prefs_mod.export_prefs
+
+
+def _slow_export(path, scope="all", include=None, progress=None):
+    for _i in range(11):
+        time.sleep(0.02)
+        if progress and progress(_i * 10, 100, "冒烟导出 %d/100" % (_i * 10)):
+            return {"ok": False, "cancelled": True}
+    return {"ok": True, "path": path, "media": 0, "people": 0, "no_code": 0}
+
+
+_q_info, _q_warn = _QMB.information, _QMB.warning
+_QMB.information = staticmethod(lambda *a, **k: None)
+_QMB.warning = staticmethod(lambda *a, **k: None)
+prefs_mod.export_prefs = _slow_export
+try:
+    _dlg._prefs_run("export", os.path.join(TMP, "ui_async.json"),
+                    ["favorite", "play", "rating", "people", "gender"])
+    check("启动后两个按钮禁用",
+          not _dlg.pref_ex.isEnabled() and not _dlg.pref_im.isEnabled())
+    check("启动后进度行 / 停止按钮可见",
+          _dlg.pref_prog_row.isVisible() and _dlg.pref_stop.isVisible())
+    check("启动后先是不定长进度条", _dlg.pref_bar.maximum() == 0,
+          _dlg.pref_bar.maximum())
+    # 让 worker 先吐几条真进度
+    _t0 = time.time()
+    while time.time() - _t0 < 0.12:
+        app.processEvents()
+        time.sleep(0.005)
+    check("跑起来后进度条转定量并跟随",
+          _dlg.pref_bar.maximum() == 100 and _dlg.pref_bar.value() > 0,
+          str((_dlg.pref_bar.maximum(), _dlg.pref_bar.value())))
+    check("状态文字是当前阶段", "冒烟导出" in _dlg.pref_status.text(),
+          _dlg.pref_status.text())
+    check("过程中按钮保持禁用（不会重复触发）", not _dlg.pref_ex.isEnabled())
+    _dlg._stop_prefs()
+    check("点停止 → 置停止标志 + 停用停止按钮",
+          getattr(_dlg._prefs_worker, "_stop", False) is True
+          and not _dlg.pref_stop.isEnabled())
+    _t0 = time.time()
+    while _dlg._prefs_running() and time.time() - _t0 < 20:
+        app.processEvents()
+        time.sleep(0.01)
+    for _ in range(6):
+        app.processEvents()
+        time.sleep(0.01)
+    check("停止后后台线程已结束", not _dlg._prefs_running())
+    check("停止后按钮恢复", _dlg.pref_ex.isEnabled() and _dlg.pref_im.isEnabled())
+    check("停止后进度行隐藏", not _dlg.pref_prog_row.isVisible())
+    check("停止后提示写明已取消", "取消" in _dlg.pref_hint.text(), _dlg.pref_hint.text())
+finally:
+    prefs_mod.export_prefs = _orig_export
+    _QMB.information, _QMB.warning = _q_info, _q_warn
+_dlg.close()
+
+print("== ㉔ v1.46.13：扫描逐路径自上而下 / 边扫边出 / 底部扫描状态与进度条 ==")
+
+import inspect
+
+import scanner as _scanner
+
+# ---- ① 扫描器：每个处理过的条目都回报（**含已存在**，否则百分比永远 0%） ----
+_scanroot = os.path.join(TMP, "scan_lib")
+_pa = os.path.join(_scanroot, "path-1")
+_pb = os.path.join(_scanroot, "path-2")
+for _p, _tag in ((_pa, "A"), (_pb, "B")):
+    _d = os.path.join(_p, "S_" + _tag)
+    os.makedirs(_d, exist_ok=True)
+    with open(os.path.join(_d, "movie.nfo"), "w", encoding="utf-8") as _f:
+        _f.write('<?xml version="1.0" encoding="UTF-8"?>'
+                 '<movie><title>%s</title><year>2021</year></movie>' % _tag)
+    with open(os.path.join(_d, "S_%s.mp4" % _tag), "wb") as _f:
+        _f.write(b"\0" * 1024)
+
+_it1 = []
+_r1 = _scanner.scan_library(_pa, None, library_name="冒烟库", mode="new",
+                            on_item=lambda d: _it1.append(dict(d)), path_index=1, path_total=2)
+check("on_item：新条目回报 1 条且标 new",
+      len(_it1) == 1 and _it1[0]["new"] is True, _it1)
+check("on_item：带 path_index / path_total",
+      _it1 and _it1[0]["index"] == 1 and _it1[0]["total"] == 2, _it1)
+_it2 = []
+_r2 = _scanner.scan_library(_pa, None, library_name="冒烟库", mode="new",
+                            on_item=lambda d: _it2.append(dict(d)), path_index=1, path_total=2)
+check("on_item：已存在的条目也回报（v1.46.13 之前是 0 条 → 进度恒 0%）",
+      len(_it2) == 1 and _it2[0]["new"] is False, _it2)
+check("scan_library：不传 on_item 也不报错（老调用点兼容）",
+      _scanner.scan_library(_pa, None, library_name="冒烟库", mode="new").get("movie") == 0)
+
+# ---- ② ScanWorker：按传入顺序逐条扫 + 进度口径是「已处理/总数」 ----
+_wk = mw.ScanWorker([_pa, _pb], library_name="冒烟库", mode="new")
+_tk, _lv, _dn = [], [], []
+_wk.tick.connect(lambda d, t, m: _tk.append((d, t, m)))
+_wk.live.connect(lambda: _lv.append(1))
+_wk.done.connect(lambda c: _dn.append(dict(c)))
+_wk.run()
+_seq = []
+for _dd, _tt, _mm in _tk:
+    for _s in _mm.split(" · "):
+        if _s.startswith("路径 ") and _s not in _seq:
+            _seq.append(_s)
+check("ScanWorker：按传入顺序逐条扫（路径 1/2 → 2/2）", _seq == ["路径 1/2", "路径 2/2"], _seq)
+check("ScanWorker：最后一条 tick 是定量 2/2",
+      bool(_tk) and _tk[-1][0] == 2 and _tk[-1][1] == 2,
+      str(_tk[-1]) if _tk else "")
+check("ScanWorker：有新片才发 live（边扫边刷新）", len(_lv) >= 1, len(_lv))
+check("ScanWorker：done 带统计", _dn and "movie" in _dn[0], _dn)
+_wk2 = mw.ScanWorker([_pa, _pb], library_name="冒烟库", mode="new", quiet=True)
+_tk2 = []
+_wk2.tick.connect(lambda d, t, m: _tk2.append(1))
+_wk2.run()
+check("ScanWorker(quiet=True)：后台扫描不上报 tick", len(_tk2) == 0, len(_tk2))
+
+# ---- ③ 底部状态栏三态（真 MainWindow） ----
+win._scan_begin("冒烟库", 2, "新添加和修改的")
+check("开始：底部写出扫描情况（库名+模式+路径数）",
+      win._scan_lbl.isVisible()
+      and all(x in win._scan_lbl.text() for x in ("冒烟库", "新添加和修改的", "2 个路径")),
+      win._scan_lbl.text())
+check("开始：进度条交给扫描独占（BusyBus 暂时断开）",
+      getattr(win, "_scan_busy_owned", False) is True
+      and getattr(win, "_busy_bus_on", True) is False)
+check("开始：起步是不定长", win._busy_bar.maximum() == 0, win._busy_bar.maximum())
+win._on_scan_tick("冒烟库", 1, 4, "扫描 冒烟库 · 路径 1/2 · path-1 · 1/4")
+check("进行中：进度条定量 25%",
+      win._busy_bar.maximum() == 100 and win._busy_bar.value() == 25,
+      str((win._busy_bar.maximum(), win._busy_bar.value())))
+check("进行中：文字就是扫描文案（不再弹 toast）",
+      win._scan_lbl.text().endswith("1/4"), win._scan_lbl.text())
+check("进行中：进度条已点亮（busy=True）", win._busy_bar.property("busy") is True)
+win._scan_end()
+check("结束：文字收回", not win._scan_lbl.isVisible())
+check("结束：进度条还给 BusyBus",
+      getattr(win, "_busy_bus_on", False) is True
+      and getattr(win, "_scan_busy_owned", True) is False)
+
+# ---- ④ 结构自检（这些是「静默失效」的高危点，必须钉住） ----
+_src_mw = inspect.getsource(mw)
+check("_scan_library_cat 原样传 paths（不乱序）+ 接上 tick/live/done",
+      "ScanWorker(paths, library_name=name, mode=mode)" in _src_mw
+      and "_on_scan_tick(N, d, t, m)" in _src_mw
+      and "_scan_end()" in _src_mw)
+check("_on_scan_live 会刷新影片墙（且认得出套了一层的网格）",
+      "live_reload()" in inspect.getsource(mw.MainWindow._on_scan_live)
+      and "findChildren(LazyGrid)" in inspect.getsource(mw.MainWindow._on_scan_live))
+check("LazyGrid 有 count_fn / live_reload / _upgrade_virtual",
+      "count_fn" in inspect.signature(mw.LazyGrid.__init__).parameters
+      and hasattr(mw.LazyGrid, "live_reload") and hasattr(mw.LazyGrid, "_upgrade_virtual"))
+check("空库建页也能升级为窗口化（_virtual 不是死路）",
+      "_upgrade_virtual" in inspect.getsource(mw.LazyGrid.live_reload))
+check("_wall_page 传入 count_fn（总数能跟着扫描变）",
+      "count_fn=lambda: db.count_media" in inspect.getsource(mw.MainWindow._wall_page))
+check("_page 把标题标签挂到页面上（扫描中改「（N 部）」用）",
+      "scroll.title_lbl = ttl" in inspect.getsource(mw.MainWindow._page))
+import ui_home as _ui_home
+check("首页 live_refresh 有自适应节流（不再固定 1.2s 死刷全库）",
+      "_live_next_at" in inspect.getsource(_ui_home.HomeListView.live_refresh))
+check("后台定时扫描走 quiet=True", "quiet=True" in _src_mw)
+_src_qss = open(os.path.join(ROOT, "src", "style.qss"), encoding="utf-8").read()
+check("QSS：有 #ScanNote，且没有多余的第二条进度条（ScanBar）",
+      "QLabel#ScanNote" in _src_qss and "ScanBar" not in _src_qss)
+
+# =============== ㉕ v1.46.14：「我的评分」去掉空按钮块 + 宽度收到内容 ===============
+print("== ㉕ v1.46.14：「我的评分」对话框（错位 / 左右留空）==")
+from PySide6.QtWidgets import QAbstractSpinBox, QSizePolicy, QLabel
+import ui_hero
+
+rd = ui_hero.RateDialog(None, 7.5)
+rd.show()
+for _ in range(4):
+    app.processEvents()
+
+# v2.0.2（反馈 3）：v1.46.14 当时因为箭头画不出来改成了 NoButtons；
+# v2.0.1 的 glyphs + `image:` 方案已让箭头真机可见，本版恢复 UpDownArrows。
+check("数值框恢复了上下微调按钮（v2.0.2：箭头已能靠 image: 画出来）",
+      rd.spin.buttonSymbols() == QAbstractSpinBox.UpDownArrows, rd.spin.buttonSymbols())
+check("数值框改成撑满整行（不再是 setFixedWidth(140)）",
+      rd.spin.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+      and rd.spin.minimumWidth() >= 120
+      and rd.spin.maximumWidth() > 1000,
+      str((rd.spin.sizePolicy().horizontalPolicy(), rd.spin.minimumWidth(),
+           rd.spin.maximumWidth())))
+check("数值框真的铺到右内边距（右侧不再空 130px）",
+      rd.spin.geometry().right() >= rd.width() - 17,
+      str((rd.spin.geometry().right(), rd.width())))
+check("窗口宽度收紧（302 → 240，留 ±8 余量）",
+      200 <= rd.sizeHint().width() <= 248, rd.sizeHint().width())
+
+_btns = {b.text(): b for b in rd.findChildren(QPushButton)}
+check("三个按钮都在（清除 / 取消 / 确定）",
+      set(_btns) >= {"清除", "取消", "确定"}, str(sorted(_btns)))
+if {"清除", "取消", "确定"} <= set(_btns):
+    g_clear, g_cancel, g_ok = (_btns["清除"].geometry(), _btns["取消"].geometry(),
+                              _btns["确定"].geometry())
+    check("「清除」贴左（左下不再空 82px）", g_clear.x() <= 17, g_clear.x())
+    check("「清除」与「取消/确定」之间有分组间距",
+          g_cancel.x() - (g_clear.x() + g_clear.width()) >= 20,
+          g_cancel.x() - (g_clear.x() + g_clear.width()))
+    check("「确定」贴右内边距", g_ok.right() >= rd.width() - 17,
+          str((g_ok.right(), rd.width())))
+    check("顺序：清除 → 取消 → 确定", g_clear.x() < g_cancel.x() < g_ok.x())
+
+_hint = [w for w in rd.findChildren(QLabel) if "范围" in w.text()]
+check("提示文字不再重复「清除」的作用（已挪进按钮 tooltip）",
+      bool(_hint) and "清除" not in _hint[0].text()
+      and "清除" in _btns["清除"].toolTip(),
+      _hint[0].text() if _hint else "没找到提示标签")
+
+# 行为不许回归：NoButtons 下键盘/代码仍能步进；确定回写、清除置空
+_before = rd.spin.value()
+rd.spin.stepBy(1)
+check("去掉按钮后仍能步进（键盘 ↑↓ / 滚轮照常）",
+      abs(rd.spin.value() - (_before + 0.1)) < 1e-6, str((_before, rd.spin.value())))
+rd.spin.setValue(6.3)
+rd._ok()
+check("「确定」把当前分值回写到 value（v1.19.0 反馈 100 不许回归）",
+      abs(rd.value - 6.3) < 1e-6, rd.value)
+rd2 = ui_hero.RateDialog(None, None)
+rd2._clear()
+check("「清除」把 value 置空", rd2.value is None, rd2.value)
+check("空评分打开时数值框显示 0.0（不是空）",
+      abs(rd2.spin.value()) < 1e-9, rd2.spin.value())
+rd.close()
+rd2.close()
+
+# =============== ㉖ v1.46.15：压缩「已配置的媒体库」列表高度 ===============
+print("== ㉖ v1.46.15：「服务管理 → 已配置的媒体库」列表行距压紧 ==")
+
+# 本段要量「真实样式下的几何」，必须先上全局样式表（前面各段都没上）。
+mw.load_style(app)
+
+_s3 = cfg.get_settings()
+_orig_libs = _s3.libraries
+_LIBS3 = [
+    {"name": "Javlibrary", "kind": "电影",
+     "paths": ["D:/a%d" % _i for _i in range(14)], "filter": {}},
+    {"name": "Jav-VR", "kind": "电影", "paths": ["D:/vr"], "filter": {}},
+    {"name": "Jav-临时", "kind": "混合", "paths": ["D:/tmp"], "filter": {}},
+]
+_dlg3 = uis.SettingsDialog(None)
+_dlg3.resize(uis.SettingsDialog.DEF_W, uis.SettingsDialog.DEF_H)
+_dlg3.show()                       # 不 show 几何恒为 0
+_dlg3._show("服务管理")
+_dlg3.s.libraries = [dict(_x) for _x in _LIBS3]
+_dlg3._rebuild_lib_list()
+for _ in range(10):
+    app.processEvents()
+
+_lst = _dlg3.lib_list
+check("LIB_ROW_H 压到 44（原 54；28px 按钮 + 行内边距 8 仍放得下）",
+      uis.LIB_ROW_H == 44, uis.LIB_ROW_H)
+check("列表余量抽成常量 LIST_CHROME = 6（原写死的 +10 是给 5px item padding 留的）",
+      uis.LIST_CHROME == 6, uis.LIST_CHROME)
+check("该列表单独命名 LibList（QSS 命名作用域只影响它，不动全站）",
+      _lst.objectName() == "LibList", _lst.objectName())
+check("3 个库时列表高 == min(3,4)*44 + 6 == 138（原 172）",
+      _lst.height() == 3 * uis.LIB_ROW_H + uis.LIST_CHROME, _lst.height())
+
+_rows = []
+for _i in range(_lst.count()):
+    _it = _lst.item(_i)
+    _w = _lst.itemWidget(_it)
+    _r = _lst.visualItemRect(_it)
+    _rows.append((_it.sizeHint().height(), _r.height(),
+                  _w.height() if _w is not None else -1, _w))
+check("每项 sizeHint 高跟着 LIB_ROW_H 走（3 行都是 44）",
+      [_x[0] for _x in _rows] == [44, 44, 44], str([_x[0] for _x in _rows]))
+check("visualRect 高 = 44 —— item padding 已从 5px 压到 2px",
+      [_x[1] for _x in _rows] == [44, 44, 44], str([_x[1] for _x in _rows]))
+check("交给 setItemWidget 的行控件高 = 40（原 44；h 差 10 → 4）",
+      [_x[2] for _x in _rows] == [uis.LIB_ROW_H - 4] * 3, str([_x[2] for _x in _rows]))
+
+_btn_ok, _btn_dbg = True, []
+for _i, (_sh, _vr, _rh, _w) in enumerate(_rows):
+    if _w is None:
+        _btn_ok = False
+        _btn_dbg.append("item%d 没挂行控件" % _i)
+        continue
+    _bs = _w.findChildren(QPushButton)
+    if len(_bs) != 3:
+        _btn_ok = False
+        _btn_dbg.append("item%d 按钮数 %d" % (_i, len(_bs)))
+    for _b in _bs:
+        _g = _b.geometry()
+        if _g.height() != 28 or _g.y() < 0 or _g.y() + _g.height() > _rh:
+            _btn_ok = False
+        if _i == 0:
+            _btn_dbg.append("%s:%dpx@%d" % (_b.text(), _g.height(), _g.y()))
+check("三个按钮仍是完整 28px、且不越出行控件（v1.14.0 反馈 6 不许回归）",
+      _btn_ok, str(_btn_dbg))
+
+# v1.46.15 重打（用户真机截图：「压缩后这些按钮显示不全了」）：根因是**按钮内边距**——
+# 全局 QSS `QPushButton{padding:7px 14px}` 让 28px 高的框只剩 12px 内容区，字上下各被切 3px。
+_btns0 = _rows[0][3].findChildren(QPushButton) if _rows[0][3] is not None else []
+check("三个按钮都走了 compact_button（带 compact 属性 → QSS 内边距压成 0）",
+      bool(_btns0) and all(b.property("compact") == "1" for b in _btns0),
+      str([b.property("compact") for b in _btns0]))
+check("按钮的 sizeHint 高不再超过实际高度（内边距没把内容区压负）",
+      bool(_btns0) and all(b.sizeHint().height() <= b.height() for b in _btns0),
+      str([(b.sizeHint().height(), b.height()) for b in _btns0]))
+check("按钮尺寸仍是 56×28（宽度给足两个字，行内不挤压）",
+      bool(_btns0) and all((b.width(), b.height()) == (56, 28) for b in _btns0),
+      str([(b.width(), b.height()) for b in _btns0]))
+check("3 个库时不出竖向滚动条",
+      _lst.verticalScrollBar().maximum() == 0,
+      _lst.verticalScrollBar().maximum())
+
+# 条目数超过 4：高度封顶在 4 行，其余靠滚动
+_dlg3.s.libraries = [_x for _x in _LIBS3] + [
+    {"name": "L%d" % _i, "kind": "电影", "paths": ["D:/z%d" % _i], "filter": {}}
+    for _i in range(3)]
+_dlg3._rebuild_lib_list()
+for _ in range(4):
+    app.processEvents()
+check("6 个库时高度封顶 4*44 + 6 == 182（不再无脑按条目数长高）",
+      _dlg3.lib_list.height() == 4 * uis.LIB_ROW_H + uis.LIST_CHROME,
+      _dlg3.lib_list.height())
+check("6 个库时确实出现竖向滚动条",
+      _dlg3.lib_list.verticalScrollBar().maximum() > 0,
+      _dlg3.lib_list.verticalScrollBar().maximum())
+
+# 空库分支：也必须走 LIST_CHROME，否则会多出一条空白
+_dlg3.s.libraries = []
+_dlg3._rebuild_lib_list()
+for _ in range(4):
+    app.processEvents()
+check("空库分支同样用 LIB_ROW_H + LIST_CHROME（不再写死 +10）",
+      _dlg3.lib_list.height() == uis.LIB_ROW_H + uis.LIST_CHROME,
+      _dlg3.lib_list.height())
+
+_qss = open(os.path.join(ROOT, "src", "style.qss"), encoding="utf-8").read()
+check("QSS 里给 #LibList::item 单独把 padding 压到 2px",
+      "QListWidget#LibList::item" in _qss and "padding: 2px 4px" in _qss)
+_seg = _qss.split("QListWidget#LibList::item", 1)[1].split("}", 1)[0]
+check("该选择器只改 padding，不写 height/min-height（否则盖掉按条目数自适应）",
+      "height" not in _seg, _seg.strip().replace("\n", " ")[:60])
+
+_dlg3.close()
+_s3.libraries = _orig_libs
+
+# =============== ㉗ v2.0.0：组件套件切 HeroUI 暗色语言 ===============
+print("== ㉗ v2.0.0：HeroUI 组件套件 / 色板迁移 / 拖拽条原样保留 ==")
+import ui_actorcheck as uac
+
+# ---- 色板 ----
+check("色板换成 HeroUI 语义 12 色（v2.0.1 在玫红后补「粉色」）",
+      len(cfg.ACCENT_COLORS) == 12, len(cfg.ACCENT_COLORS))
+check("默认高亮色是 HeroUI primary #006fee",
+      cfg.ACCENT_DEFAULT == "#006fee", cfg.ACCENT_DEFAULT)
+check("色板里每个 hex 都合法且不重复",
+      len({h for _n, h in cfg.ACCENT_COLORS}) == 12
+      and all(len(h) == 7 and h.startswith("#") for _n, h in cfg.ACCENT_COLORS),
+      str([h for _n, h in cfg.ACCENT_COLORS]))
+check("默认色确实在色板里（否则载入会被归一闪打回默认，看不出差别）",
+      cfg.ACCENT_DEFAULT in [h for _n, h in cfg.ACCENT_COLORS])
+
+# ---- 旧色迁移表：必须**幂等**，否则老用户升级后每存一次配置就漂一格 ----
+_MAP = cfg.LEGACY_ACCENT_MAP
+check("旧朱红 #c0392b 迁到玫红 #f31260",
+      _MAP.get("#c0392b") == "#f31260", _MAP.get("#c0392b"))
+check("旧鎏金 #d4af37 迁到琥珀金 #eab308",
+      _MAP.get("#d4af37") == "#eab308", _MAP.get("#d4af37"))
+check("迁移表是幂等的：映射目标本身不再被映射（不会二次漂移）",
+      all(v not in _MAP for v in _MAP.values()),
+      str([v for v in _MAP.values() if v in _MAP]))
+check("迁移目标全部落在新色板里（否则归一闪会把它打回默认）",
+      all(v in [h for _n, h in cfg.ACCENT_COLORS] for v in _MAP.values()),
+      str([v for v in _MAP.values() if v not in [h for _n, h in cfg.ACCENT_COLORS]]))
+
+# load() 里迁移必须发生在「必须是色板之一」的归一闪**之前**。
+# 别用文本序判（ACCENT_COLORS 在文件顶部还有定义处，find 到的是那一处），
+# 直接造老配置跑一遍 load() —— 这才是真行为。
+import json as _json
+_cfg_file = cfg.config_path()
+_old_settings = getattr(cfg, "_SETTINGS", None)
+try:
+    for _old_hex, _want in (("#c0392b", "#f31260"), ("#d4af37", "#eab308"),
+                            ("#f31260", "#f31260")):
+        with open(_cfg_file, "w", encoding="utf-8") as _f:
+            _json.dump({"appearance": {"accent": _old_hex, "style": "glass"}},
+                       _f, ensure_ascii=False)
+        cfg._SETTINGS = None
+        _got = cfg.get_settings().appearance.get("accent")
+        check("老配置 accent=%s 载入后迁成 %s（迁移幂等，已在新色板的值不动）"
+              % (_old_hex, _want),
+              _got == _want, str(_got))
+finally:
+    cfg._SETTINGS = _old_settings
+
+# ---- 派生色：亮度必须单调，不然按下态会比常态更亮 ----
+def _lum(rgb):
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+_sh = cfg.accent_shades("#006fee")
+check("accent_shades 仍返回 base/dark/deep/light 四档",
+      set(_sh) == {"base", "dark", "deep", "light"}, str(sorted(_sh)))
+check("base 就是原色", _sh["base"] == (0, 111, 238), str(_sh["base"]))
+check("dark < deep < base < light（亮度单调，按下不会比常态更亮）",
+      _lum(_sh["dark"]) < _lum(_sh["deep"]) < _lum(_sh["base"]) < _lum(_sh["light"]),
+      "%.1f/%.1f/%.1f/%.1f" % (_lum(_sh["dark"]), _lum(_sh["deep"]),
+                              _lum(_sh["base"]), _lum(_sh["light"])))
+check("对每个色板色都能派生（不抛异常、四档齐全）",
+      all(set(cfg.accent_shades(h)) == {"base", "dark", "deep", "light"}
+          for _n, h in cfg.ACCENT_COLORS))
+
+# ---- QSS：新令牌渲染干净 + 旧墨金不再出现 ----
+_q = mw.render_style({"accent": "#006fee", "style": "glass", "alpha": None})
+_import_re = __import__("re")
+# 注释里会提到「原来是与墨金底衬配套的 #1c1815」这类历史说明，检查必须去掉注释
+_qb = _import_re.sub(r"/\*.*?\*/", "", _q, flags=_import_re.S)
+check("渲染后没有剩下任何 __XXX__ 令牌",
+      _import_re.search(r"__[A-Z_]+__", _q) is None,
+      str(_import_re.findall(r"__[A-Z_]+__", _q)[:6]))
+check("render_style 顺手把 ACCENT_RGB 刷成 (0, 111, 238)",
+      tuple(mw.ACCENT_RGB) == (0, 111, 238), str(mw.ACCENT_RGB))
+check("QSS 里已无旧鎏金 #d4af37", "#d4af37" not in _qb.lower())
+check("QSS 里已无旧墨底 #1c1815", "#1c1815" not in _qb.lower())
+check("QSS 用上了 HeroUI 中性色阶 #0a0a0b / #18181b / #27272a",
+      all(c in _qb.lower() for c in ("#0a0a0b", "#18181b", "#27272a")))
+check("选中态改成高亮色柔光底 rgba(0, 111, 238, 0.22)",
+      "rgba(0, 111, 238, 0.22)" in _q)
+
+# 裸令牌必须替换成 #rrggbb（塞 "r, g, b" 会让整条声明被 Qt 静默丢掉）
+_bad = _import_re.findall(r":\s*\d+,\s*\d+,\s*\d+\s*;", _q)
+check("没有把 \"r, g, b\" 误填成裸值（那会让整条声明被丢掉）",
+      not _bad, str(_bad[:4]))
+
+# ---- 拖拽条：用户明确要求「只保留这两条拖拽条」→ handle 必须仍是透明的 ----
+for _name in ("ActorSplitV", "ActorSplitH", "ImageSplitH"):
+    _key = "QSplitter#%s::handle" % _name
+    check("QSS 仍有 %s 规则（拖拽条不许被重写掉）" % _key, _key in _q, _key)
+    _seg2 = _q.split(_key, 1)[1].split("}", 1)[0] if _key in _q else ""
+    check("%s 仍是 transparent 且 margin: 0（把手靠自绘，不能被底色盖住）" % _name,
+          "transparent" in _seg2 and "margin: 0" in _seg2,
+          _seg2.strip().replace("\n", " ")[:70])
+check("自绘把手类 _GripHandle 仍在", hasattr(uac, "_GripHandle"))
+check("_GripSplitter 仍在（5 点把手的分发器）", hasattr(uac, "_GripSplitter"))
+
+# ---- 色卡：HeroUI 正圆 + 白环 + 勾 ----
+check("_AccentSwatch 是 28×28 正圆尺寸", (uis._AccentSwatch.W, uis._AccentSwatch.H) == (28, 28),
+      "%sx%s" % (uis._AccentSwatch.W, uis._AccentSwatch.H))
+check("选中态用「色点缩一点 + 外环」两层（R_DOT_ON < R_DOT < R_RING）",
+      uis._AccentSwatch.R_DOT_ON < uis._AccentSwatch.R_DOT < uis._AccentSwatch.R_RING,
+      "%s/%s/%s" % (uis._AccentSwatch.R_DOT_ON, uis._AccentSwatch.R_DOT,
+                    uis._AccentSwatch.R_RING))
+_sw = uis._AccentSwatch("#006fee", "极光蓝")
+_sw.set_on(True)
+check("色卡实例的固定尺寸就是 28×28",
+      (_sw.width(), _sw.height()) == (28, 28), "%dx%d" % (_sw.width(), _sw.height()))
+_sw.set_on(False)
+check("set_on(False) 可切回未选中（不抛异常）", True)
+
+# ---- 开关轨道：旧的暖棕 → 中性，兜底开态 → HeroUI 蓝 ----
+check("开关关态轨道换成 #3f3f46（原暖棕 #4a4038）",
+      uis.ToggleSwitch._OFF == (0x3F, 0x3F, 0x46), str(uis.ToggleSwitch._OFF))
+check("开关开态兜底换成 #006fee（原朱红 #c0392b）",
+      uis.ToggleSwitch._ON == (0x00, 0x6F, 0xEE), str(uis.ToggleSwitch._ON))
+check("开关绘制时仍现取高亮色（不自锁在兜底值）",
+      uis.ToggleSwitch.accent_on() == (0, 111, 238), str(uis.ToggleSwitch.accent_on()))
+
+# ---- 源码里不再有旧墨金色系（config.py 例外：迁移表的键就是旧值）----
+_OLD_HEX = ("#d4af37", "#ece5d8", "#a2967f", "#8c8071", "#1c1815", "#2a241c",
+            "#362e23", "#c0392b", "#e08a7a", "#9ecf8a")
+_leak = []
+for _fn in sorted(os.listdir(os.path.join(ROOT, "src"))):
+    if not _fn.endswith(".py") or _fn in ("config.py", "version.py"):
+        continue
+    _txt = open(os.path.join(ROOT, "src", _fn), encoding="utf-8").read().lower()
+    for _h in _OLD_HEX:
+        if _h in _txt:
+            _leak.append("%s:%s" % (_fn, _h))
+check("src/*.py 里没有旧墨金色系残留（version.py 是历史记录、config.py 是迁移表）",
+      not _leak, str(_leak[:8]))
+
+# ---- 底衬跟着高亮色走（veil / 字母条都懒读 ACCENT_RGB）----
+check("veil.accent_rgb() 取到当前高亮色",
+      __import__("veil").accent_rgb() == (0, 111, 238),
+      str(__import__("veil").accent_rgb()))
+check("letter_index._accent_rgb() 取到当前高亮色",
+      __import__("letter_index")._accent_rgb() == (0, 111, 238),
+      str(__import__("letter_index")._accent_rgb()))
+
+# =============== ㉘ v2.0.1：7 条真机反馈 ===============
+print("== ㉘ v2.0.1：滑块行高 / 上下箭头 / 选中对勾 / 性别流光 / 粉色 / 侧栏实色 / 直角面板 ==")
+import glyphs
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QSlider, QCheckBox, QLabel as _QL
+import ui_hero as uhero
+
+_q8 = mw.render_style({"accent": "#006fee"})
+
+# ---- ① 「窗口透明度」滑块：18px 圆球要整体露出来 ----
+_seg_sl = _q8.split("QSlider {", 1)[1].split("}", 1)[0]
+check("QSS 给 QSlider 加了 24px 高度下限（圆球 18 + 上下余量）",
+      "min-height: 24px" in _seg_sl, _seg_sl.strip().replace("\n", " "))
+_dlg4 = uis.SettingsDialog(None)
+_dlg4.resize(uis.SettingsDialog.DEF_W, uis.SettingsDialog.DEF_H)
+_dlg4.show()                       # 离屏也必须 show()，否则几何全是 0
+app.processEvents()
+_dlg4._show("外观")
+app.processEvents()
+check("「窗口透明度」滑块控件高 ≥ 24（默认 sizeHint 只有 15，会把圆球切平）",
+      _dlg4.op_slider.height() >= 24, _dlg4.op_slider.height())
+check("智能推荐「多样性」滑块同样 ≥ 24", _dlg4.sl_div.height() >= 24, _dlg4.sl_div.height())
+GAP_OP = _dlg4.op_slider.height() - 18
+check("滑块比圆球至少高 6px（上下各留 3px）", GAP_OP >= 6, GAP_OP)
+
+# ---- ② 数值框上下按钮里的箭头 / ③ 勾选框选中态的对勾 ----
+# QSS 画不了矢量图形：`::up-arrow` 的 color 无效、`::indicator:checked` 只能换底色。
+# 唯一的路是 image: url(...)，图片由 glyphs.py 在渲染样式表时现画成 PNG。
+_gl = glyphs.ensure(force=True)
+check("glyphs 生成 3 个小图标（箭头 ×2 + 对勾）",
+      set(_gl) == {"arrow_up", "arrow_down", "check"}, str(sorted(_gl)))
+check("三个 PNG 都真落盘且非空",
+      all(os.path.exists(p) and os.path.getsize(p) > 100 for p in _gl.values()),
+      str({k: os.path.getsize(p) for k, p in _gl.items() if os.path.exists(p)}))
+
+
+def _opaque_mask(path):
+    im = QImage(path)
+    m = []
+    for y in range(im.height()):
+        row = []
+        for x in range(im.width()):
+            row.append(im.pixelColor(x, y).alpha() > 40)
+        m.append(row)
+    return m
+
+
+_m_up = _opaque_mask(_gl["arrow_up"])
+_m_dn = _opaque_mask(_gl["arrow_down"])
+_m_ck = _opaque_mask(_gl["check"])
+
+
+def _first_y(mask, xs):
+    for y in range(len(mask)):
+        if any(mask[y][x] for x in xs):
+            return y
+    return -1
+
+
+def _bbox(mask):
+    ys = [y for y, row in enumerate(mask) if any(row)]
+    xs = [x for x in range(len(mask[0])) if any(row[x] for row in mask)]
+    return (min(xs), min(ys), max(xs), max(ys)) if ys else (0, 0, 0, 0)
+
+
+_bu, _bd, _bc = _bbox(_m_up), _bbox(_m_dn), _bbox(_m_ck)
+_wu, _hu = _bu[2] - _bu[0], _bu[3] - _bu[1]
+_wc, _hc = _bc[2] - _bc[0], _bc[3] - _bc[1]
+
+
+def _quad(mask, box):
+    """bbox 内四个象限各有几个不透明像素 —— 用来判「折线朝哪个方向」。"""
+    x0, y0, x1, y1 = box
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+    q = {"tl": 0, "tr": 0, "bl": 0, "br": 0}
+    for y in range(y0, y1 + 1):
+        for x in range(x0, x1 + 1):
+            if mask[y][x]:
+                q[("t" if y <= cy else "b") + ("l" if x <= cx else "r")] += 1
+    return q
+
+
+check("上箭头是「宽扁」的折线：宽 ≥ 6、且宽高比 > 1.4（不是三角形）",
+      _wu >= 6 and _hu > 0 and _wu / float(_hu) > 1.4, "%dx%d" % (_wu, _hu))
+check("上箭头尖端在顶端（中列最高点比靠近两端的列更高）",
+      _first_y(_m_up, [len(_m_up[0]) // 2]) < _first_y(_m_up, [2, len(_m_up[0]) - 3]),
+      "%d vs %d" % (_first_y(_m_up, [len(_m_up[0]) // 2]),
+                    _first_y(_m_up, [2, len(_m_up[0]) - 3])))
+check("下箭头是上箭头的上下镜像（尖端在中列最底）",
+      _first_y(list(reversed(_m_dn)), [len(_m_dn[0]) // 2])
+      < _first_y(list(reversed(_m_dn)), [2, len(_m_dn[0]) - 3]))
+_qc = _quad(_m_ck, _bc)
+check("对勾有两笔：左下 + 右上都有像素，左上（起笔侧）最空",
+      _qc["bl"] > 0 and _qc["tr"] > 0
+      and _qc["tl"] < _qc["tr"] and _qc["tl"] < _qc["bl"], str(_qc))
+check("对勾比箭头厚（勾的笔画 ≥ 8×7）", _wc >= 8 and _hc >= 7, "%dx%d" % (_wc, _hc))
+
+_seg_ua = _q8.split("QSpinBox::up-arrow", 1)[1].split("}", 1)[0]
+_seg_da = _q8.split("QSpinBox::down-arrow", 1)[1].split("}", 1)[0]
+check("QSS 的 up-arrow 走 image: url(\"...arrow_up...)",
+      "image: url(" in _seg_ua and "arrow_up" in _seg_ua,
+      _seg_ua.strip().replace("\n", " ")[:60])
+check("QSS 的 down-arrow 走 image: url(\"...arrow_down...)",
+      "image: url(" in _seg_da and "arrow_down" in _seg_da,
+      _seg_da.strip().replace("\n", " ")[:60])
+check("箭头不再靠 color 着色（QSS 的 color 对箭头无效，留着只会误导）",
+      "color:" not in _seg_ua.replace("border-color:", ""))
+for _sel in ("QCheckBox::indicator:checked", "QListWidget::indicator:checked",
+             "QTreeView::indicator:checked"):
+    _seg_ck = _q8.split(_sel, 1)[1].split("}", 1)[0]
+    check("%s 里带了 image: url(...check...)" % _sel,
+          "image: url(" in _seg_ck and "check_" in _seg_ck,
+          _seg_ck.strip().replace("\n", " ")[:60])
+check("单选按钮 checked **没有**加对勾（它该是实心圆点）",
+      "image:" not in _q8.split("QRadioButton::indicator:checked", 1)[1].split("}", 1)[0])
+
+# 真画一遍：勾选框选中态的方框里必须出现白像素（只换底色时一个白点都没有）
+_ck = QCheckBox("真机对勾")
+_ck.setChecked(True)
+_ck.setStyleSheet("background:#18181b;color:#ecedee;")
+_ck.resize(140, 24)
+_ck.show()
+app.processEvents()
+_grab = _ck.grab().toImage()
+_white = 0
+for _y in range(min(22, _grab.height())):
+    for _x in range(22):
+        _c = _grab.pixelColor(_x, _y)
+        if _c.red() > 200 and _c.green() > 200 and _c.blue() > 200:
+            _white += 1
+check("勾选框选中态真画出了白色对勾（≥12 个近白像素）", _white >= 12, _white)
+_ck.deleteLater()
+
+# ---- ④ 演职人员头像按性别加流光 ----
+_face = os.path.join(TMP, "face.png")
+# ⚠ 照片必须是**中性灰**：暖色（#c8b9a8 这类）本身 r>b+20，会被下面的「粉像素」统计
+# 当成流光一起数进去（第一版就是这么假红的）。
+_pm = __import__("PySide6.QtGui", fromlist=["QPixmap"]).QPixmap(80, 80)
+_pm.fill(__import__("PySide6.QtGui", fromlist=["QColor"]).QColor("#808080"))
+_pm.save(_face)
+
+
+def _halo_counts(av):
+    """数整张头像图里的「粉」与「蓝」像素 —— 流光就是这两类像素。"""
+    lab = [w for w in av.findChildren(_QL) if w.pixmap() is not None
+           and not w.pixmap().isNull()]
+    if not lab:
+        return 0, 0, None
+    pm = lab[0].pixmap()
+    img = pm.toImage()
+    pink = blue = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            c = img.pixelColor(x, y)
+            if c.alpha() < 30:
+                continue
+            if c.red() > c.blue() + 20 and c.red() > 120:
+                pink += 1
+            elif c.blue() > c.red() + 20 and c.blue() > 120:
+                blue += 1
+    return pink, blue, pm
+
+
+_av_f = uhero.CastAvatar({"name": "女", "gender": "female", "photo_path": _face}, None)
+_av_m = uhero.CastAvatar({"name": "男", "gender": "male", "photo_path": _face}, None)
+_av_u = uhero.CastAvatar({"name": "未知", "gender": "", "photo_path": _face}, None)
+for _a in (_av_f, _av_m, _av_u):
+    _a.show()
+app.processEvents()
+_pf, _bf, _sf = _halo_counts(_av_f)
+_pm2, _bm, _sm = _halo_counts(_av_m)
+_pu, _bu, _su = _halo_counts(_av_u)
+check("女性头像画布比海报大 2×6（96 → 108）", _sf.width() == 108, _sf.width())
+check("男性头像画布同样 108", _sm.width() == 108, _sm.width())
+check("未知性别头像**不外扩**（画布仍 96，不留空圈）", _su.width() == 96, _su.width())
+check("女性有粉色流光、没有蓝像素", _pf > 100 and _bf == 0, "pink=%d blue=%d" % (_pf, _bf))
+check("男性有蓝色流光、没有粉像素", _bm > 100 and _pm2 == 0, "pink=%d blue=%d" % (_pm2, _bm))
+check("未知性别一个流光像素都没有（干净）", _pu == 0 and _bu == 0,
+      "pink=%d blue=%d" % (_pu, _bu))
+check("流光宽度常量 GLOW_W == 6", uhero.GLOW_W == 6, uhero.GLOW_W)
+check("女性/男性能量级相当（不是只有一侧生效）",
+      abs(_pf - _bm) < max(_pf, _bm) * 0.25, "%d vs %d" % (_pf, _bm))
+for _a in (_av_f, _av_m, _av_u):
+    _a.deleteLater()
+
+# ---- ⑤ 色板：玫红后面补「粉色」 ----
+_hexes = [h for _n, h in cfg.ACCENT_COLORS]
+_names = {h: n for n, h in cfg.ACCENT_COLORS}
+check("色板 11 → 12 色", len(_hexes) == 12, len(_hexes))
+# v2.0.2（反馈 2）：用户把粉色从 #ff7fa1 换成 #e4587c → 本节断言跟着换色值。
+check("「粉色」#e4587c 已加入色板", "#e4587c" in _hexes, str(_hexes))
+check("粉色紧跟玫红（顺序 = 界面上的色卡顺序）",
+      _hexes.index("#e4587c") == _hexes.index("#f31260") + 1,
+      "%d / %d" % (_hexes.index("#f31260"), _hexes.index("#e4587c")))
+check("粉色名字叫「粉色」", _names.get("#e4587c") == "粉色", str(_names.get("#e4587c")))
+_sh8 = cfg.accent_shades("#e4587c")
+check("粉色能派生四档且亮度单调",
+      _lum(_sh8["dark"]) < _lum(_sh8["deep"]) < _lum(_sh8["base"]) < _lum(_sh8["light"]),
+      "%.1f/%.1f/%.1f/%.1f" % (_lum(_sh8["dark"]), _lum(_sh8["deep"]),
+                              _lum(_sh8["base"]), _lum(_sh8["light"])))
+check("粉色仍在色板里（换了它不会被归一闪打回默认）",
+      cfg.get_settings().appearance.get("accent") in _hexes)
+
+# ---- ⑥ 磨砂玻璃不作用到导航栏 ----
+_seg_sb = _q8.split("QFrame#Sidebar {", 1)[1].split("}", 1)[0]
+check("侧栏背景改成实色 #0f0f11（不再吃 __PANEL__ 的半透明）",
+      "background: #0f0f11" in _seg_sb, _seg_sb.strip().replace("\n", " ")[:70])
+check("侧栏背景里不再有 rgba(（有就说明还在跟着玻璃浓度走）",
+      "rgba(" not in _seg_sb.split("border-right")[0],
+      _seg_sb.strip().replace("\n", " ")[:70])
+_q8_glass = mw.render_style({"accent": "#006fee", "mode": "磨砂玻璃", "level": "低"})
+check("把浓度调到「低」时侧栏仍是同一个实色（与浓度档无关）",
+      "background: #0f0f11" in _q8_glass.split("QFrame#Sidebar {", 1)[1].split("}", 1)[0])
+
+# ---- ⑦ 首页 / 详情页面板上下圆角改直角 ----
+_seg_dh = _q8.split("QWidget#DetailHost {", 1)[1].split("}", 1)[0]
+check("DetailHost 圆角 14 → 0（上下都变直角）",
+      "border-radius: 0px" in _seg_dh and "14px" not in _seg_dh,
+      _seg_dh.strip().replace("\n", " ")[:70])
+check("DetailHost 仍保留强调色描边（只改圆角，不删边框）",
+      "border: 1px solid rgba(" in _seg_dh, _seg_dh.strip().replace("\n", " ")[:70])
+
+# =============== ㉙ v2.0.2 六条真机反馈（v2.0.3 补第 7 条） ===============
+print("== ㉙ v2.0.2：圆形等大按钮 / 粉色换值 / 微调箭头 / 标签搜索 / 标题跟色 / 两处白字 ==")
+print("   v2.0.3：收藏钮去掉圆底（用户：收藏外不需要圆形）")
+import inspect
+from PySide6.QtCore import QPoint as _QP9
+from PySide6.QtGui import QPixmap as _QPM9, QColor as _QC9, QLinearGradient as _QLG9
+from PySide6.QtGui import QPainter as _QPT9
+import ui_manualedit as uime
+
+_q9 = mw.render_style({"accent": "#e4587c"})       # 顺带把 ACCENT_RGB 刷成新粉
+_ACC9 = (228, 88, 124)
+
+
+def _lc9(c):
+    return 0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()
+
+
+# ---- ① 收藏 / 播放：圆、等大、有阴影 ----
+check("按钮控件边长 _CARD_BTN == 34（圆 28 + 阴影环 3×2）", mw._CARD_BTN == 34, mw._CARD_BTN)
+check("圆本体直径 _BTN_CIRCLE == 28", mw._BTN_CIRCLE == 28, mw._BTN_CIRCLE)
+check("收藏与播放共用同一套尺寸常量",
+      mw._PLAY_BTN == mw._STAR_BTN == mw._CARD_BTN,
+      "%s/%s/%s" % (mw._PLAY_BTN, mw._STAR_BTN, mw._CARD_BTN))
+check("两个按钮是同一个基类（不再一个走 QSS 一个裸画）",
+      issubclass(mw._PlayGlyphButton, mw._CardRoundButton)
+      and issubclass(mw._FavStarButton, mw._CardRoundButton))
+check("QSS 不再给 #CardPlay 写背景/圆角（自绘圆底，写两层会双描边）",
+      "QPushButton#CardPlay" not in _q9)
+
+_poster9 = os.path.join(TMP, "poster_bright.png")
+_pm9 = _QPM9(158, 236)
+_g9 = _QLG9(0, 0, 0, 236)
+_g9.setColorAt(0.0, _QC9("#f2e6d2"))
+_g9.setColorAt(1.0, _QC9("#d8c3a0"))
+_pt9 = _QPT9(_pm9)
+_pt9.fillRect(_pm9.rect(), _g9)
+_pt9.end()
+_pm9.save(_poster9)
+
+_media9 = {"id": 9001, "title": "TEST-001 测试片", "poster": _poster9,
+           "rating": 8.5, "year": 2025, "quality": "4K", "favorite": 0,
+           "file_path": "X:/t/t.mp4", "plot": "", "tags": ""}
+_card9 = mw.PosterCard(_media9, lambda *_a: None, on_play=lambda *_a: None,
+                       on_fav=lambda *_a: None)
+_card9.show()
+for _ in range(3):
+    app.processEvents()
+_pb9, _fb9 = _card9.play_btn, _card9.fav_btn
+check("播放 / 收藏两个按钮都建出来了", _pb9 is not None and _fb9 is not None)
+check("两个按钮尺寸完全一致（34×34）",
+      (_pb9.width(), _pb9.height()) == (_fb9.width(), _fb9.height()) == (34, 34),
+      "%dx%d / %dx%d" % (_pb9.width(), _pb9.height(), _fb9.width(), _fb9.height()))
+check("左右对称：两个按钮到海报左右边的距离相等",
+      (_fb9.x() - mw._CARD_PAD) == (mw._CARD_PAD + mw.POSTER_W - (_pb9.x() + _pb9.width())),
+      "%d / %d" % (_fb9.x() - mw._CARD_PAD,
+                   mw._CARD_PAD + mw.POSTER_W - (_pb9.x() + _pb9.width())))
+check("两者底边齐平", _pb9.y() == _fb9.y(), "%d / %d" % (_pb9.y(), _fb9.y()))
+
+_img9 = _card9.grab().toImage()
+check("卡片上两个按钮的可见区域互不重叠（左右对称摆放）",
+      _pb9.x() > _fb9.x() + _fb9.width() + 40,
+      "%d / %d" % (_fb9.x() + _fb9.width(), _pb9.x()))
+
+# ⚠ 量圆 / 量阴影必须**单独 grab 按钮本身**：卡片是不透明海报，在卡片图上取
+# 「角落像素」量到的是 poster（alpha 恒 255），第一版就是这么假红的。
+_pbi = _pb9.grab().toImage()
+_fbi = _fb9.grab().toImage()
+
+
+def _al(img, x, y):
+    return img.pixelColor(x, y).alpha()
+
+
+check("按钮自身画布 34×34（含 3px 阴影环）",
+      (_pbi.width(), _pbi.height()) == (34, 34), "%dx%d" % (_pbi.width(), _pbi.height()))
+check("圆本体外接框的角上是透明的（方形 → 角一定不透明）",
+      _al(_pbi, 4, 4) == 0 and _al(_fbi, 4, 4) == 0,
+      "%d / %d" % (_al(_pbi, 4, 4), _al(_fbi, 4, 4)))
+check("播放钮圆内 45°（8,8）是实心的",
+      _al(_pbi, 8, 8) > 200, _al(_pbi, 8, 8))
+
+
+def _disc_r9(img):
+    """沿水平中线从圆心往外扫，返回最后一个「基本不透明」像素的距离（≈14）。
+
+    ⚠ 上界必须 `< width // 2`：`pixelColor(34, 17)` 这种越界坐标返回的是**无效 QColor**，
+    它的 alpha() 是 255 —— 第一版就把「越界读到的 255」当成了半径 17。
+    """
+    far = 0
+    for d in range(1, img.width() // 2):
+        if _al(img, img.width() // 2 + d, img.height() // 2) > 150:
+            far = d
+    return far
+
+
+def _opaque9(img):
+    n = 0
+    for y in range(img.height()):
+        for x in range(img.width()):
+            if img.pixelColor(x, y).alpha() > 150:
+                n += 1
+    return n
+
+
+# ---- v2.0.3：收藏钮「外不需要圆形」 ----
+check("播放钮 HAS_CIRCLE 为 True（圆底保留）", mw._PlayGlyphButton.HAS_CIRCLE is True,
+      mw._PlayGlyphButton.HAS_CIRCLE)
+check("收藏钮 HAS_CIRCLE 为 False（v2.0.3 去掉圆底）",
+      mw._FavStarButton.HAS_CIRCLE is False, mw._FavStarButton.HAS_CIRCLE)
+_rp9 = _disc_r9(_pbi)
+check("播放钮圆半径 13~15（圆本体 28px）", 13 <= _rp9 <= 15, _rp9)
+_np9, _nf9 = _opaque9(_pbi), _opaque9(_fbi)
+check("收藏钮不再是实心圆底（不透明像素不到播放钮的 55%）",
+      _nf9 < _np9 * 0.55, "%d / %d" % (_nf9, _np9))
+check("收藏钮「圆内偏左」(6,17) 基本透明（有圆底时这里必然实心 >150）",
+      _al(_fbi, 6, 17) <= 40, _al(_fbi, 6, 17))
+check("收藏钮「圆内偏右」(28,17) 透明", _al(_fbi, 28, 17) <= 40, _al(_fbi, 28, 17))
+check("收藏钮「圆内偏下」(17,28) 透明", _al(_fbi, 17, 28) <= 40, _al(_fbi, 17, 28))
+check("收藏钮仍然画得出星形本体（不透明像素 ≥ 60）", _nf9 >= 60, _nf9)
+_sf9 = 0
+for _y in range(_fbi.height()):
+    for _x in range(_fbi.width()):
+        if 25 <= _fbi.pixelColor(_x, _y).alpha() <= 140:
+            _sf9 += 1
+check("收藏钮沿星形轮廓有柔影（25<alpha<140 的像素 ≥ 30，亮剧照上白星才压得住）",
+      _sf9 >= 30, _sf9)
+# 播放钮的投影：圆本体外（半径 15 处）要有半透明黑影
+_sh9 = _al(_pbi, 17, 33)
+check("播放钮圆下方有半透明投影（alpha > 40）", _sh9 > 40, _sh9)
+_shc9 = _pbi.pixelColor(17, 33)
+check("投影是黑色系（不是描边漏出来的白）", _shc9.red() < 90 and _shc9.blue() < 90,
+      "%d,%d,%d a=%d" % (_shc9.red(), _shc9.green(), _shc9.blue(), _shc9.alpha()))
+
+# 悬停：播放钮圆底换高亮色；收藏钮只把星形描边染成高亮色、**不许冒出圆底**。
+# ⚠ 别取圆心 —— 播放三角/星都盖在圆心，量到的是白的。
+_pb9.setAttribute(Qt.WA_UnderMouse, True)
+_pb9.update()
+for _ in range(3):
+    app.processEvents()
+_hc9 = _pb9.grab().toImage().pixelColor(5, 17)
+check("播放钮悬停时圆底换成当前高亮色（#e4587c）",
+      abs(_hc9.red() - _ACC9[0]) < 45 and abs(_hc9.green() - _ACC9[1]) < 45
+      and abs(_hc9.blue() - _ACC9[2]) < 45,
+      "%d,%d,%d" % (_hc9.red(), _hc9.green(), _hc9.blue()))
+_pb9.setAttribute(Qt.WA_UnderMouse, False)
+_pb9.update()
+_fb9.setAttribute(Qt.WA_UnderMouse, True)
+_fb9.update()
+for _ in range(3):
+    app.processEvents()
+_fbi2 = _fb9.grab().toImage()
+_hp9 = 0
+for _y in range(_fbi2.height()):
+    for _x in range(_fbi2.width()):
+        _c2 = _fbi2.pixelColor(_x, _y)
+        if _c2.alpha() > 150 and abs(_c2.red() - _ACC9[0]) < 60 \
+                and abs(_c2.green() - _ACC9[1]) < 60 and abs(_c2.blue() - _ACC9[2]) < 60:
+            _hp9 += 1
+check("收藏钮悬停：星形描边染成高亮色（≥20 个粉像素）", _hp9 >= 20, _hp9)
+check("收藏钮悬停时 (6,17) 依然基本透明（没有冒出圆底）",
+      _fbi2.pixelColor(6, 17).alpha() <= 40, _fbi2.pixelColor(6, 17).alpha())
+_fb9.setAttribute(Qt.WA_UnderMouse, False)
+_fb9.update()
+
+# 已收藏 = 金色实心星（在深色圆底上仍要看得清）
+_fb9.set_on(True)
+_fb9.update()
+for _ in range(3):
+    app.processEvents()
+_img9c = _card9.grab().toImage()
+_gold9 = 0
+for _y in range(_fb9.y(), _fb9.y() + _fb9.height()):
+    for _x in range(_fb9.x(), _fb9.x() + _fb9.width()):
+        _cc = _img9c.pixelColor(_x, _y)
+        if _cc.red() > 200 and 130 < _cc.green() < 205 and _cc.blue() < 100:
+            _gold9 += 1
+check("已收藏态仍是金色实心星（≥20 个金色像素）", _gold9 >= 20, _gold9)
+_card9.deleteLater()
+
+# ---- ② 粉色 #ff7fa1 → #e4587c ----
+check("色板里已无旧粉 #ff7fa1", "#ff7fa1" not in _hexes, str(_hexes))
+check("迁移表把旧粉映射到新粉（否则 v2.0.1 选过粉色的用户升级会掉回默认蓝）",
+      cfg.LEGACY_ACCENT_MAP.get("#ff7fa1") == "#e4587c",
+      str(cfg.LEGACY_ACCENT_MAP.get("#ff7fa1")))
+check("女性流光颜色同步换成新粉", uhero.GLOW_FEMALE.lower() == "#e4587c", uhero.GLOW_FEMALE)
+_cfg9 = cfg.config_path()
+_keep9 = getattr(cfg, "_SETTINGS", None)
+try:
+    with open(_cfg9, "w", encoding="utf-8") as _f:
+        _json.dump({"appearance": {"accent": "#ff7fa1"}}, _f)
+    cfg._SETTINGS = None
+    check("老配置 accent=#ff7fa1 载入后迁成 #e4587c",
+          cfg.get_settings().appearance.get("accent") == "#e4587c",
+          str(cfg.get_settings().appearance.get("accent")))
+finally:
+    cfg._SETTINGS = _keep9
+
+# ---- ③ 「我的评分」上下微调按钮（与其它数值框同一套样式）----
+_rd9 = uhero.RateDialog(None, 10.0)
+_rd9.show()
+for _ in range(3):
+    app.processEvents()
+check("数值框恢复 UpDownArrows",
+      _rd9.spin.buttonSymbols() == QAbstractSpinBox.UpDownArrows,
+      _rd9.spin.buttonSymbols())
+check("最小宽度 = cfg.SPIN_MIN_W（「10.0 分」不再被压成省略号）",
+      _rd9.spin.minimumWidth() == cfg.SPIN_MIN_W, _rd9.spin.minimumWidth())
+_ri9 = _rd9.grab().toImage()
+_org9 = _rd9.spin.mapTo(_rd9, _QP9(0, 0))
+_x09 = _org9.x() + _rd9.spin.width() - 18
+_y09, _y19 = _org9.y() + 2, _org9.y() + _rd9.spin.height() - 3
+_up9 = _dn9 = 0
+for _y in range(max(0, _y09), min(_ri9.height(), _y19)):
+    for _x in range(max(0, _x09), min(_ri9.width(), _x09 + 17)):
+        _cc = _ri9.pixelColor(_x, _y)
+        if _cc.red() > 120 and _cc.green() > 120 and _cc.blue() > 120:
+            if _y < (_y09 + _y19) // 2:
+                _up9 += 1
+            else:
+                _dn9 += 1
+check("上 / 下两个箭头都真画出来了（各 ≥ 8 个亮像素）", _up9 >= 8 and _dn9 >= 8,
+      "up=%d dn=%d" % (_up9, _dn9))
+_rd9.deleteLater()
+
+# ---- ④ 顶栏搜索：关键词也搜「标签」----
+_cn9 = db.get_conn()
+_cn9.execute("INSERT INTO media (kind,title,file_path,library,tags) VALUES "
+             "('movie','无关标题甲','X:/tags/t1.mp4','测试库','标签戊,标签己')")
+_cn9.execute("INSERT INTO media (kind,title,file_path,library,plot) VALUES "
+             "('movie','无关标题乙','X:/tags/t2.mp4','测试库','简介唯一词丁戊')")
+_cn9.commit()
+check("按标签能搜到", len(db.search_media("标签戊")) >= 1, len(db.search_media("标签戊")))
+check("count_media 与 search_media 口径一致（共用 _media_where）",
+      db.count_media("标签戊") == len(db.search_media("标签戊")),
+      "%d / %d" % (db.count_media("标签戊"), len(db.search_media("标签戊"))))
+check("标题搜索没被改坏", len(db.search_media("无关标题甲")) >= 1)
+check("简介搜索没被改坏", len(db.search_media("简介唯一词丁戊")) >= 1)
+check("不存在的词仍然是 0 条", len(db.search_media("绝不存在的词zzz")) == 0,
+      len(db.search_media("绝不存在的词zzz")))
+check("keyword 子句三个 OR（title / plot / tags）",
+      "m.title LIKE ? OR m.plot LIKE ? OR IFNULL(m.tags,'') LIKE ?" in
+      inspect.getsource(db._media_where))
+
+# ---- ⑤ 页面 / 面板标题跟着高亮色走 ----
+_seg_pt9 = _q9.split("QLabel#PageTitle {", 1)[1].split("}", 1)[0]
+check("#PageTitle 用当前高亮色渲染（#e4587c）", "color: #e4587c" in _seg_pt9,
+      _seg_pt9.strip().replace("\n", " "))
+_q9b = mw.render_style({"accent": "#17c964"})
+check("换成翡翠后同一选择器就是新色（走令牌，不是写死）",
+      "color: #17c964" in _q9b.split("QLabel#PageTitle {", 1)[1].split("}", 1)[0])
+check("#PanelTitle 同样走高亮色",
+      "color: #17c964" in _q9b.split("QLabel#PanelTitle {", 1)[1].split("}", 1)[0])
+check("#PanelTitleSm 同样走高亮色",
+      "color: #17c964" in _q9b.split("QLabel#PanelTitleSm {", 1)[1].split("}", 1)[0])
+_h9 = mw.MainWindow._h1(None, "最近播放 / 最近添加")
+check("_h1 返回 #PageTitle（不再内联写死颜色）",
+      _h9.objectName() == "PageTitle" and "color" not in _h9.styleSheet(),
+      "%s / %r" % (_h9.objectName(), _h9.styleSheet()))
+check("_h1 里没有写死的 #66a9ff 声明（注释里提到旧值不算）",
+      "color:#66a9ff" not in inspect.getsource(mw.MainWindow._h1)
+      and "color: #66a9ff" not in inspect.getsource(mw.MainWindow._h1))
+check("_mktitle 返回 #PanelTitle",
+      uime.ManualEditPage._mktitle("X").objectName() == "PanelTitle")
+check("工具窗画像的列标题也走 PanelTitleSm",
+      "66a9ff" not in inspect.getsource(uis.SettingsDialog._page_insight)
+      if hasattr(uis.SettingsDialog, "_page_insight") else True)
+
+# ---- ⑥ 两处用户点名要白色的字 ----
+check("#PlainValue 是白色 #fafafa",
+      "color: #fafafa" in _q9.split("QLabel#PlainValue {", 1)[1].split("}", 1)[0])
+check("#PlainTitle 是白色 #fafafa",
+      "color: #fafafa" in _q9.split("QLabel#PlainTitle {", 1)[1].split("}", 1)[0])
+check("窗口透明度读数 objectName == PlainValue",
+      _dlg4.op_val.objectName() == "PlainValue", _dlg4.op_val.objectName())
+check("窗口透明度读数不再写死 #66a9ff",
+      "66a9ff" not in _dlg4.op_val.styleSheet(), _dlg4.op_val.styleSheet())
+check("「检索并选择影片」标记成 PlainTitle",
+      'setObjectName("PlainTitle")' in inspect.getsource(uime.ManualEditPage._build_shell))
+check("「检索并选择影片」不再写死颜色（注释里提到旧值不算）",
+      "color:#66a9ff" not in inspect.getsource(uime.ManualEditPage._build_shell)
+      and "color: #66a9ff" not in inspect.getsource(uime.ManualEditPage._build_shell))
+
+# ---- 顶栏搜索提示语：19 个语言都补上了「标签」----
+_ph9 = "搜索 (Ctrl+K)   片名 / 类型 / 演员 / 标签  （用 @ 指定演员）"
+check("i18n 键已带「标签」", _ph9 in i18n.COMMON["zh_CN"],
+      "" if _ph9 in i18n.COMMON["zh_CN"] else "缺失")
+check("英 / 日 / 韩 / 德 四个语言的提示语都提到 Tag",
+      all("Tag" in i18n.COMMON[k][_ph9] or "タグ" in i18n.COMMON[k][_ph9]
+          or "태그" in i18n.COMMON[k][_ph9] or "Tag" in i18n.COMMON[k][_ph9]
+          for k in ("en", "ja", "ko", "de")),
+      str([i18n.COMMON[k].get(_ph9, "")[:40] for k in ("en", "ja", "ko", "de")]))
+check("19 个语言块都填了这一条",
+      sum(1 for k in i18n.COMMON if _ph9 in i18n.COMMON[k]) == len(i18n.COMMON),
+      "%d / %d" % (sum(1 for k in i18n.COMMON if _ph9 in i18n.COMMON[k]),
+                   len(i18n.COMMON)))
+
+# ---- v2.0.3（反馈 8）：演职员名字按身份着色 ----
+# 女演员粉 / 男演员蓝 / 导演黄 / 未知白；卡片小字与详情页演职人员共用
+# `ui_hero.crew_name_color` 这一处真源（两边永远同色）。
+print("   --- 反馈 8：演职员名字配色 ---")
+check("女演员 → 粉 #e4587c", uhero.crew_name_color("female") == "#e4587c",
+      uhero.crew_name_color("female"))
+check("男演员 → 蓝 #338ef7", uhero.crew_name_color("male") == "#338ef7",
+      uhero.crew_name_color("male"))
+check("未知 → 白 #fafafa", uhero.crew_name_color("") == "#fafafa",
+      uhero.crew_name_color(""))
+check("导演 → 黄 #f5a524（优先于性别）",
+      uhero.crew_name_color("male", True) == uhero.crew_name_color("female", True) == "#f5a524",
+      "%s / %s" % (uhero.crew_name_color("male", True),
+                   uhero.crew_name_color("female", True)))
+check("性别大小写 / 空格都能认（FEMALE / ' male '）",
+      uhero.crew_name_color("FEMALE") == "#e4587c"
+      and uhero.crew_name_color(" male ") == "#338ef7")
+check("角色串认得出 Director / 导演",
+      uhero.is_director_role("Director") and uhero.is_director_role("导演")
+      and not uhero.is_director_role("Actor"))
+
+# v2.0.4（反馈 9）：默认灰 / 收藏才高亮 / 置顶加粗 —— 三档语义互不重叠
+_DIM9 = mw._CREW_NAME_DIM
+check("卡片小字默认色是弱化灰 #a1a1aa（与「演员：」标签同色）",
+      _DIM9 == "#a1a1aa", _DIM9)
+# 卡片上「演员：/导演：」标签本身是在 PosterCard 里内联写死的灰，
+# 两个色值必须一致，否则「标签灰 + 名字另一种灰」会看出来。
+check("PosterCard 的 #CardCrew 内联色与 _CREW_NAME_DIM 一致",
+      ("color:%s" % _DIM9) in inspect.getsource(mw.PosterCard), _DIM9)
+
+_h8n = mw._crew_names_html([("女A", 0, 0, "female"), ("男B", 0, 0, "male"),
+                            ("未C", 0, 0, "")], "", "actor")
+check("未收藏：三个名字全是灰的（不再按性别铺色）",
+      _h8n.count(_DIM9) == 3 and "#e4587c" not in _h8n
+      and "#338ef7" not in _h8n and "#fafafa" not in _h8n, _h8n[:90])
+check("未收藏：也没有加粗", "font-weight:bold" not in _h8n)
+
+_h8 = mw._crew_names_html([("女A", 1, 0, "female"), ("男B", 1, 0, "male"),
+                           ("未C", 1, 0, "")], "", "actor")
+check("收藏后：三个名字分别高亮成 粉 / 蓝 / 白", 
+      "#e4587c" in _h8 and "#338ef7" in _h8 and "#fafafa" in _h8, _h8[:90])
+check("收藏后：灰色一个都不剩", _DIM9 not in _h8)
+_h8d = mw._crew_names_html([("某导演", 1, 0, "male")], "", "director")
+check("收藏的导演：名字是黄色（哪怕性别是男）",
+      "#f5a524" in _h8d and "#338ef7" not in _h8d, _h8d)
+check("未收藏的导演：名字仍是灰的（不预先上色）",
+      _DIM9 in mw._crew_names_html([("某导演", 0, 0, "male")], "", "director"))
+_h8old = mw._crew_names_html([("老三元组", 1, 0)], "", "actor")
+check("旧三元组（没有 gender）收藏后落成白色",
+      "#fafafa" in _h8old, _h8old)
+_h8p = mw._crew_names_html([("置顶的", 0, 1, "female")], "", "actor")
+check("置顶（未收藏）：只是加粗，颜色还是灰",
+      "font-weight:bold" in _h8p and _DIM9 in _h8p and "#e4587c" not in _h8p, _h8p)
+_h8fp = mw._crew_names_html([("收藏又置顶", 1, 1, "female")], "", "actor")
+check("收藏 + 置顶：高亮色 + 加粗",
+      "#e4587c" in _h8fp and "font-weight:bold" in _h8fp, _h8fp)
+check("卡片小字里不再有下划线（v2.0.3 那版发明过，用户没要）",
+      "underline" not in _h8fp and "underline" not in _h8p)
+check("旧的金色 #66a9ff 不再出现在卡片小字里",
+      "#66a9ff" not in _h8 and "#66a9ff" not in _h8p)
+
+import inspect as _insp8
+_src8 = _insp8.getsource(db.cast_crew_map_ex)
+check("cast_crew_map_ex 查了 gender 字段", "p.gender" in _src8)
+check("cast_crew_map_ex 元组带上性别（4 项）",
+      'r["gender"]' in _src8 or "r.get(\"gender\")" in _src8)
+check("cast_crew_map 不再写死三元组解包（会 ValueError）",
+      "t[0] for t in" in _insp8.getsource(db.cast_crew_map))
+
+# 详情页演职人员：真建 CastAvatar，看名字 QLabel 的实际颜色
+# ⚠ 必须把控件本身**留住引用**：CastAvatar 没有 parent，函数一返回就被 GC，
+#   它里面的 QLabel 在 C++ 侧一起析构 → 再读 styleSheet()/font() 会
+#   `RuntimeError: Internal C++ object already deleted`（第一版就这么崩的）。
+_CA8 = []
+
+
+def _castlabel(person):
+    w = uhero.CastAvatar(person, None, size=88)
+    _CA8.append(w)
+    for _l in w.findChildren(QLabel):
+        if _l.text() == person["name"]:
+            return _l
+    return None
+
+
+# v2.0.5（反馈 10）：详情页沿用卡片的三档规则 —— 默认灰 / 收藏才上身份色 / 置顶加粗
+for _nm, _g, _role in (("女演员", "female", "Actor"),
+                       ("男演员", "male", "Actor"),
+                       ("未知人", "", "Actor"),
+                       ("某导演", "male", "导演")):
+    _lb = _castlabel({"name": _nm, "gender": _g, "char_role": _role,
+                      "role_type": "Director" if _role == "导演" else "Actor"})
+    check("详情页「%s」未收藏时名字是默认灰" % _nm,
+          _lb is not None and mw._CREW_NAME_DIM in _lb.styleSheet(),
+          _lb.styleSheet() if _lb is not None else "没找到名字 QLabel")
+
+for _nm, _g, _role, _want in (("收藏的女演员", "female", "Actor", "#e4587c"),
+                              ("收藏的男演员", "male", "Actor", "#338ef7"),
+                              ("收藏的未知人", "", "Actor", "#fafafa"),
+                              ("收藏的导演", "male", "导演", "#f5a524")):
+    _lb = _castlabel({"name": _nm, "gender": _g, "char_role": _role,
+                      "role_type": "Director" if _role == "导演" else "Actor",
+                      "favorite": 1})
+    check("详情页「%s」收藏后名字是 %s" % (_nm, _want),
+          _lb is not None and _want in _lb.styleSheet(),
+          _lb.styleSheet() if _lb is not None else "没找到名字 QLabel")
+_lbf = _castlabel({"name": "收藏的人", "gender": "female", "char_role": "Actor",
+                   "favorite": 1})
+check("详情页：收藏但未置顶 → 不上粗、更不画下划线",
+      _lbf is not None and "bold" not in _lbf.styleSheet()
+      and not _lbf.font().underline(),
+      _lbf.styleSheet() if _lbf is not None else "?")
+_lbp = _castlabel({"name": "置顶的人", "gender": "male", "char_role": "Actor", "pinned": 1})
+check("详情页：只置顶 → 加粗 + 仍是默认灰",
+      _lbp is not None and "bold" in _lbp.styleSheet()
+      and mw._CREW_NAME_DIM in _lbp.styleSheet(), 
+      _lbp.styleSheet() if _lbp is not None else "?")
+_lbfp = _castlabel({"name": "既收藏又置顶", "gender": "female", "char_role": "Actor",
+                    "favorite": 1, "pinned": 1})
+check("详情页：收藏 + 置顶 → 身份色 + 加粗",
+      _lbfp is not None and "#e4587c" in _lbfp.styleSheet()
+      and "bold" in _lbfp.styleSheet(),
+      _lbfp.styleSheet() if _lbfp is not None else "?")
+check("详情页角色小字（Actor / 导演）与默认灰同色",
+      uhero.CREW_NAME_DIM == mw._CREW_NAME_DIM == "#a1a1aa",
+      uhero.CREW_NAME_DIM)
+check("默认灰只有一个真源（main_window 里的常量就是 ui_hero 那份）",
+      mw._CREW_NAME_DIM is uhero.CREW_NAME_DIM,
+      "%r / %r" % (mw._CREW_NAME_DIM, uhero.CREW_NAME_DIM))
+
 print("通过 %d/%d" % (TOTAL[0] - len(FAILS), TOTAL[0]))
 if FAILS:
     print("失败项:", FAILS)

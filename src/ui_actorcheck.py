@@ -358,7 +358,7 @@ class ActorCheckPage(QWidget):
             "⚠ 判定依据不足的（同罗马音但生日 / 三围互相打架 —— 典型是**同名不同人**）"
             "只会列进「存疑」，需要你自己在下方手动核对。"))
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         gv.addWidget(hint)
 
         row = QWidget()
@@ -400,7 +400,7 @@ class ActorCheckPage(QWidget):
         self.ai_state = QLabel("点「AI 算法」或上面的按钮会检测本机 Ollama 是否可用；"
                                "用哪个模型跟「智能推荐」页共用同一项设置。")
         self.ai_state.setWordWrap(True)
-        self.ai_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.ai_state.setStyleSheet("color:#71717a;font-size:11px;")
         gv.addWidget(self.ai_state)
 
         act = QWidget()
@@ -434,7 +434,7 @@ class ActorCheckPage(QWidget):
         self.imp_btn.clicked.connect(self._import_result)
         ah.addWidget(self.imp_btn)
         self.status_lbl = QLabel("尚未检测")
-        self.status_lbl.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.status_lbl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         ah.addWidget(self.status_lbl)
         ah.addStretch(1)
         gv.addWidget(act)
@@ -523,7 +523,7 @@ class ActorCheckPage(QWidget):
         bhl.addWidget(self.batch_merge_btn)
         bhl.addStretch(1)
         self.batch_hint = QLabel("勾选或选中（Shift / Ctrl 多选）左侧的「建议合并」簇，可批量确认关联")
-        self.batch_hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.batch_hint.setStyleSheet("color:#71717a;font-size:11px;")
         bhl.addWidget(self.batch_hint)
         v.addWidget(batch)
         self._show_detail_placeholder("点「开始检测」，左侧会列出「建议合并」的簇和「存疑」的对。")
@@ -561,7 +561,7 @@ class ActorCheckPage(QWidget):
         self.plist.itemSelectionChanged.connect(self._on_pick_person)
         lv.addWidget(self.plist, 1)
         self.pcount = QLabel("")
-        self.pcount.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.pcount.setStyleSheet("color:#71717a;font-size:11px;")
         lv.addWidget(self.pcount)
         left.setMinimumWidth(230)
         left.setMaximumWidth(320)
@@ -591,14 +591,14 @@ class ActorCheckPage(QWidget):
         if person is None:
             lab = QLabel("← 在左边检索并选一位演员，这里会列出可编辑的资料。")
             lab.setWordWrap(True)
-            lab.setStyleSheet("color:#8c8071;font-size:12px;")
+            lab.setStyleSheet("color:#71717a;font-size:12px;")
             self.edit.addWidget(lab)
             self.edit.addStretch(1)
             return
 
         prov = ack.parse_meta(person.get("meta"))
         head = QLabel("%s　（#%s）" % (person.get("name") or "", person.get("id") or ""))
-        head.setStyleSheet("font-size:14px;font-weight:700;color:#e8ddc8;")
+        head.setStyleSheet("font-size:14px;font-weight:700;color:#ecedee;")
         head.setWordWrap(True)
         self.edit.addWidget(head)
 
@@ -609,7 +609,7 @@ class ActorCheckPage(QWidget):
         self.avatar = QLabel()
         self.avatar.setFixedSize(EDIT_AVATAR_W, EDIT_AVATAR_H)
         self.avatar.setAlignment(Qt.AlignCenter)
-        self.avatar.setStyleSheet("background:#1b1613;border:1px solid #3a3129;color:#8c8071;")
+        self.avatar.setStyleSheet("background:#18181b;border:1px solid #3f3f46;color:#71717a;")
         av_box.addWidget(self.avatar)
         ab = QHBoxLayout()
         ab.setSpacing(6)
@@ -627,7 +627,7 @@ class ActorCheckPage(QWidget):
         self.avatar_path_lbl = QLabel("")
         self.avatar_path_lbl.setWordWrap(True)
         self.avatar_path_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.avatar_path_lbl.setStyleSheet("color:#8c8071;font-size:10px;")
+        self.avatar_path_lbl.setStyleSheet("color:#71717a;font-size:10px;")
         self.avatar_path_lbl.setMaximumWidth(EDIT_AVATAR_W + 90)
         av_box.addWidget(self.avatar_path_lbl)
         top.addLayout(av_box)
@@ -705,7 +705,7 @@ class ActorCheckPage(QWidget):
         foot.addWidget(opend)
         foot.addStretch(1)
         self.save_lbl = QLabel("")
-        self.save_lbl.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.save_lbl.setStyleSheet("color:#71717a;font-size:11px;")
         foot.addWidget(self.save_lbl)
         self.edit.addLayout(foot)
         self.edit.addStretch(1)
@@ -747,7 +747,7 @@ class ActorCheckPage(QWidget):
             ok, note = False, "探测失败：%s" % e
         self.ai_state.setText(("✅ " if ok else "⚠ ") + note)
         self.ai_state.setStyleSheet(
-            "color:%s;font-size:11px;" % ("#7fdca0" if ok else "#e8b76a"))
+            "color:%s;font-size:11px;" % ("#45d483" if ok else "#f5a524"))
         if not ok and self.rb_ai.isChecked():
             self.ai_state.setText("⚠ " + note + "（本次会按普通算法给出结果）")
 
@@ -903,8 +903,8 @@ class ActorCheckPage(QWidget):
     ROLE_KIND = Qt.UserRole + 1
     ROLE_INDEX = Qt.UserRole + 2
 
-    _TIER_COLOR = {"铁证": "#7fdca0", "很高": "#9fd6b0", "高": "#e8d27a",
-                   "存疑": "#e8b76a"}
+    _TIER_COLOR = {"铁证": "#45d483", "很高": "#17c964", "高": "#8fc0ff",
+                   "存疑": "#f5a524"}
 
     def _fill_tree(self):
         self.tree.setUpdatesEnabled(False)
@@ -920,7 +920,7 @@ class ActorCheckPage(QWidget):
                 f = r.font(0)
                 f.setBold(True)
                 r.setFont(0, f)
-                r.setForeground(0, QColor("#d4af37"))
+                r.setForeground(0, QColor("#66a9ff"))
                 self.tree.addTopLevelItem(r)
                 # v1.39.5（反馈 3）：两个根节点的标题很长（「建议合并（5 簇，共可减少
                 # 5 条演员记录）」约 200px），而它们只写在**列 0**（76px）→ 真机上被裁成
@@ -945,9 +945,9 @@ class ActorCheckPage(QWidget):
                 it.setCheckState(0, Qt.Unchecked)
                 it.setToolTip(1, " / ".join(names))
                 it.setToolTip(4, "\n".join(c.get("reasons") or []))
-                it.setForeground(3, QColor(self._TIER_COLOR.get(c["tier"], "#c9bda7")))
+                it.setForeground(3, QColor(self._TIER_COLOR.get(c["tier"], "#d4d4d8")))
                 if not c.get("profile_consistent", True):
-                    it.setForeground(1, QColor("#e8b76a"))
+                    it.setForeground(1, QColor("#f5a524"))
                     it.setToolTip(1, " / ".join(names) + "\n⚠ 簇内刮削资料有互相矛盾的地方")
                 root_m.addChild(it)
 
@@ -958,7 +958,7 @@ class ActorCheckPage(QWidget):
                 it.setData(0, self.ROLE_KIND, "suspect")
                 it.setData(0, self.ROLE_INDEX, i)
                 it.setToolTip(4, "\n".join(s.get("reasons") or []))
-                it.setForeground(3, QColor(self._TIER_COLOR.get("存疑", "#e8b76a")))
+                it.setForeground(3, QColor(self._TIER_COLOR.get("存疑", "#f5a524")))
                 root_s.addChild(it)
             if not self._clusters:
                 root_m.addChild(QTreeWidgetItem(["", "（没有达到自动关联标准的候选）", "", "", ""]))
@@ -995,7 +995,7 @@ class ActorCheckPage(QWidget):
         self._clear_layout(self.detail)
         lab = QLabel(text)
         lab.setWordWrap(True)
-        lab.setStyleSheet("color:#8c8071;font-size:12px;")
+        lab.setStyleSheet("color:#71717a;font-size:12px;")
         self.detail.addWidget(lab)
         self.detail.addStretch(1)
 
@@ -1021,7 +1021,7 @@ class ActorCheckPage(QWidget):
         pic = QLabel()
         pic.setFixedSize(AVATAR_W, AVATAR_H)
         pic.setAlignment(Qt.AlignCenter)
-        pic.setStyleSheet("background:#1b1613;border:1px solid #3a3129;color:#8c8071;"
+        pic.setStyleSheet("background:#18181b;border:1px solid #3f3f46;color:#71717a;"
                           "font-size:10px;")
         path = m.get("photo") or ""
         if path and os.path.exists(path):
@@ -1038,11 +1038,11 @@ class ActorCheckPage(QWidget):
         col.setSpacing(2)
         nm = QLabel(_rich("%s　**%d** 部" % (_esc(m["name"]), m["works"])))
         nm.setTextFormat(Qt.RichText)
-        nm.setStyleSheet("color:#e8ddc8;font-size:12px;")
+        nm.setStyleSheet("color:#ecedee;font-size:12px;")
         nm.setWordWrap(True)
         col.addWidget(nm)
         rom = QLabel("罗马音：%s" % (_esc(m["romaji"]) or "—"))
-        rom.setStyleSheet("color:#a2967f;font-size:11px;")
+        rom.setStyleSheet("color:#a1a1aa;font-size:11px;")
         rom.setWordWrap(True)
         col.addWidget(rom)
         pf = []
@@ -1050,17 +1050,17 @@ class ActorCheckPage(QWidget):
             if m["prof"].get(k):
                 pf.append("%s %s" % (k, m["prof"][k]))
         pl = QLabel("　·　".join(pf) or "刮削资料：—")
-        pl.setStyleSheet("color:#a2967f;font-size:11px;")
+        pl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         pl.setWordWrap(True)
         col.addWidget(pl)
         if m.get("alias_raw"):
             al = QLabel("别名：" + _esc(m["alias_raw"]))
-            al.setStyleSheet("color:#8c8071;font-size:11px;")
+            al.setStyleSheet("color:#71717a;font-size:11px;")
             al.setWordWrap(True)
             col.addWidget(al)
         if extra:
             ex = QLabel(extra)
-            ex.setStyleSheet("color:#7fdca0;font-size:11px;")
+            ex.setStyleSheet("color:#45d483;font-size:11px;")
             ex.setWordWrap(True)
             col.addWidget(ex)
         h.addLayout(col, 1)
@@ -1068,14 +1068,14 @@ class ActorCheckPage(QWidget):
 
     def _detail_cluster(self, c, idx):
         head = QLabel("建议合并：%d 人（共 %d 部作品）" % (len(c["ids"]), c["total_works"]))
-        head.setStyleSheet("color:#e8ddc8;font-size:13px;font-weight:700;")
+        head.setStyleSheet("color:#ecedee;font-size:13px;font-weight:700;")
         head.setWordWrap(True)
         self.detail.addWidget(head)
 
         badge = QLabel("匹配度 %d · %s" % (c["score"], c["tier"]))
         badge.setStyleSheet(
             "color:%s;font-size:11px;font-weight:700;"
-            % self._TIER_COLOR.get(c["tier"], "#c9bda7"))
+            % self._TIER_COLOR.get(c["tier"], "#d4d4d8"))
         self.detail.addWidget(badge)
 
         ai = c.get("ai")
@@ -1090,9 +1090,9 @@ class ActorCheckPage(QWidget):
             box = QLabel(_rich(raw))
             box.setTextFormat(Qt.RichText)
             box.setWordWrap(True)
-            box.setStyleSheet("color:%s;font-size:11px;background:#1b1613;"
-                              "border:1px solid #3a3129;padding:6px;"
-                              % ("#7fdca0" if same else "#e8b76a"))
+            box.setStyleSheet("color:%s;font-size:11px;background:#18181b;"
+                              "border:1px solid #3f3f46;padding:6px;"
+                              % ("#45d483" if same else "#f5a524"))
             self.detail.addWidget(box)
 
         # v1.31.0：动作行提到最前面 —— 详情区是个滚动区，3 人以上的簇光成员块就有 270px+，
@@ -1139,18 +1139,18 @@ class ActorCheckPage(QWidget):
         if c.get("conflicts"):
             wl = QLabel("⚠ 簇内存在矛盾：%s" % "；".join(c["conflicts"][:4]))
             wl.setWordWrap(True)
-            wl.setStyleSheet("color:#e8b76a;font-size:11px;")
+            wl.setStyleSheet("color:#f5a524;font-size:11px;")
             self.detail.addWidget(wl)
 
         rl = QLabel("判定依据：\n· " + "\n· ".join(_esc(r) for r in (c.get("reasons") or ["—"])))
         rl.setWordWrap(True)
-        rl.setStyleSheet("color:#a2967f;font-size:11px;")
+        rl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.detail.addWidget(rl)
 
         if c.get("alias_union"):
             au = QLabel("合并后别名会写成：%s" % _esc(c["alias_union"]))
             au.setWordWrap(True)
-            au.setStyleSheet("color:#8c8071;font-size:11px;")
+            au.setStyleSheet("color:#71717a;font-size:11px;")
             self.detail.addWidget(au)
 
         note = QLabel()
@@ -1160,17 +1160,17 @@ class ActorCheckPage(QWidget):
             "合并会把其余人的作品关联搬到保留者名下（「%s」会被写成保留者的别名），"
             "并删除多余记录。**不会动任何视频 / nfo 文件**。"
             % _esc(c.get("alias_union") or "")))
-        note.setStyleSheet("color:#8c8071;font-size:11px;")
+        note.setStyleSheet("color:#71717a;font-size:11px;")
         self.detail.addWidget(note)
         self.detail.addStretch(1)
 
     def _detail_suspect(self, s, idx):
         head = QLabel("存疑：可能同名不同人，未给出合并建议")
-        head.setStyleSheet("color:#e8b76a;font-size:13px;font-weight:700;")
+        head.setStyleSheet("color:#f5a524;font-size:13px;font-weight:700;")
         head.setWordWrap(True)
         self.detail.addWidget(head)
         badge = QLabel("匹配度 %d（未达自动关联标准）" % s["score"])
-        badge.setStyleSheet("color:#e8b76a;font-size:11px;")
+        badge.setStyleSheet("color:#f5a524;font-size:11px;")
         self.detail.addWidget(badge)
         ai = s.get("ai")
         if ai:
@@ -1182,13 +1182,13 @@ class ActorCheckPage(QWidget):
                                   _esc(ai.get("reason") or ""))))
             box.setTextFormat(Qt.RichText)
             box.setWordWrap(True)
-            box.setStyleSheet("color:#c9bda7;font-size:11px;")
+            box.setStyleSheet("color:#d4d4d8;font-size:11px;")
             self.detail.addWidget(box)
         self.detail.addWidget(self._member_block(s["a"]))
         self.detail.addWidget(self._member_block(s["b"]))
         rl = QLabel("判定依据：\n· " + "\n· ".join(_esc(r) for r in (s.get("reasons") or ["—"])))
         rl.setWordWrap(True)
-        rl.setStyleSheet("color:#a2967f;font-size:11px;")
+        rl.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.detail.addWidget(rl)
         hint = QLabel()
         hint.setTextFormat(Qt.RichText)
@@ -1197,7 +1197,7 @@ class ActorCheckPage(QWidget):
             "这类只做提示，**不提供自动合并**。如果确认是同一个人，请到下方"
             "「演员信息手动编辑」把资料改成一致（或把其中一个的姓名改成另一个），"
             "再重新检测 —— 资料一致后就会进「建议合并」。"))
-        hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        hint.setStyleSheet("color:#71717a;font-size:11px;")
         self.detail.addWidget(hint)
         pick = QPushButton("在下方编辑其中一位")
         pick.setObjectName("Ghost")

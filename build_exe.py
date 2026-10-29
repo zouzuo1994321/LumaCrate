@@ -128,6 +128,7 @@ def main():
         "--hidden-import", "nfo_parser",     # v1.25.0：标签优化要读/写 nfo
         "--hidden-import", "sysmon",         # v1.27.0：侧栏实时状态（采集线程 + 自绘横条）
         "--hidden-import", "guide_translate",  # v1.36.0：引导向量「中文 → 日文」候选词表
+        "--hidden-import", "glyphs",         # v2.0.1：QSS image: url() 用的 PNG 小图标（箭头/对勾）
         # v1.39.0（需求 1）：minnano-av.com 的 Cloudflare 指纹墙降级依赖。
         # curl_cffi 带原生二进制（libcurl / BoringSSL 的 pyd 与 dll），用
         # --collect-all 把二进制、requests 子模块一起收进来；运行时 import

@@ -37,7 +37,9 @@ import guide_translate as gt_mod    # v1.36.0：引导向量「中文 → 日文
 import sysmon                    # v1.27.0：侧栏「实时状态」面板（叶子模块，无循环导入）
 from scan_ring import ScanRing   # v1.39.0（需求 3）：抽出到独立模块，工具窗导航复用
 import i18n                      # v1.32.0：界面语言（叶子模块，无循环导入；查不到原样返回中文）
+import glyphs                    # v2.0.1：QSS 用的 PNG 小图标（箭头 / 对勾），启动时现生成
 from ui_hero import HeroView, circle_pixmap, cover_pixmap, placeholder_pixmap, compact_button
+import ui_hero as uhero            # v2.0.3（反馈 8）：卡片小字的身份配色与详情页共用真源
 from ui_home import HomeListView
 from ui_settings import SettingsDialog, LibraryEditDialog
 
@@ -45,7 +47,7 @@ STYLE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "style.qss
 # v1.25.0（反馈 5）：当前「高亮色」的 RGB。由 render_style() 在每次重载样式表时刷新，
 # 自绘控件（PosterCard / ActorCard 的选中描边、选中卡的外发光）读它取色 ——
 # QSS 那边走令牌替换，两边拿到的必须是同一个值，否则描边和光晕会串色。
-ACCENT_RGB = (192, 57, 43)
+ACCENT_RGB = (0, 111, 238)
 
 # v1.34.1 修复：QSpinBox / QDoubleSpinBox 的**最小可用宽度**见 `cfg.SPIN_MIN_W`。
 # 此前引导行写 setFixedWidth(72)，比 Qt 实测 minimumSizeHint(131) 少 59px，
@@ -63,8 +65,19 @@ _TITLE_H = 40        # 标题最多 2 行（#CardTitle 13px，行距约 19px）
 _SUB_H = 16          # 评分 / 年份 / 画质
 _LINE_H = 16         # 小字单行高（演员 / 导演 各一行）
 _CREW_H = _LINE_H * 2
-_PLAY_BTN = 26       # v1.17.0：卡片右下角圆形播放按钮直径
-_STAR_BTN = 26       # v1.21.0：卡片左下角收藏星标按钮（与播放按钮左右对称）
+# v2.0.2（反馈 1）：卡片左下「收藏」与右下「播放」统一成**同一尺寸的正圆**。
+# 旧实现是两种形状：播放 = QSS 圆角方块（26px 的框里给 border-radius:14px，Qt 裁出来
+# 就是「方角 + 小圆角」）、收藏 = **完全没有底**的裸星星 —— 并排放着一个像方块一个像图标，
+# 视觉尺寸也对不上。现在圆本体 28px，外面再留 3px 画阴影环，控件边长 34。
+# v2.0.3（用户真机反馈「收藏外不需要圆形」）：**圆底只留给播放钮**。收藏钮去掉圆底与
+# 圆阴影，只画星形本体（放大到 r*0.80）+ 沿轮廓的柔影；控件尺寸与位置常量不变，
+# 所以「两个按钮一样大、底边齐平、左右对称」这几条几何不变式依旧成立。
+_CARD_BTN = 34         # 控件边长（= 圆本体 28 + 阴影环 3×2）
+_BTN_CIRCLE = 28       # 圆本体直径（收藏钮不画圆，但仍按它折算星形大小）
+_BTN_RING = 3          # 阴影环宽（控件边缘到圆本体）
+_BTN_INSET = 2         # 控件到海报边的距离（+ 环宽 3 = 圆离海报边 5px，与旧版观感一致）
+_PLAY_BTN = _CARD_BTN  # 兼容旧断言 / 旧脚本里的名字
+_STAR_BTN = _CARD_BTN
 POSTER_CARD_W = POSTER_W + _CARD_PAD * 2
 
 
@@ -157,60 +170,35 @@ def _star_path(cx, cy, r_out, r_in=None):
     return path
 
 
-class _PlayGlyphButton(QPushButton):
-    """卡片右下角圆形播放按钮：圆底 / 描边走 QSS(#CardPlay)，三角形**几何绘制**。
+class _CardRoundButton(QPushButton):
+    """卡片上「收藏 / 播放」两个浮动按钮的公共基类（v2.0.2 反馈 1）。
 
-    v1.21.0（反馈 2）：原先用字符「▶」当图标，字形的左右 side bearing 不对称，
-    26px 圆圈里永远偏左，怎么调 padding 都对不准圆心。
-    改为画多边形，并把三角形的**重心**对齐圆心（重心 = 外接矩形中心向右偏 1/3 半宽，
-    这是播放键通行的光学居中做法，纯几何外接框居中的话视觉上会偏左）。
+    用户反馈：「播放按钮改成圆形，保证收藏和播放按钮大小一致，然后再两个按钮增加阴影」。
+    旧实现是两套完全不同的画法（见上面常量处的注释），所以既不同形也不同大。
+
+    现在两者共用这一层画法 —— **全自绘，不调用 `super().paintEvent()`**，因此
+    QSS 里**不能**再给 `#CardPlay` 写背景/圆角（会与自绘的圆叠一层，边缘出现双描边）：
+      · 阴影：由外向内 alpha 递增的黑色同心圆，整体下沉 1px（同 avatar 柔光那套做法）。
+        **刻意不用 QGraphicsDropShadowEffect** —— 每张卡两个 effect，滚动时每帧多两次
+        离屏合成（一屏 40+ 卡 = 80+ 个 effect），实测掉帧。
+      · 底色：半透明深色实心圆 + 1.3px 亮描边 —— 亮剧照上压得住、暗剧照上不糊。
+      · 悬停：底色换高亮色，**懒读模块级 `ACCENT_RGB`**（render_style 每次都刷新它），
+        所以换主题色不需要重建卡片。
+
+    v2.0.3（用户真机反馈「收藏外不需要圆形」）：加类属性 `HAS_CIRCLE`，
+    **播放钮保持上一版的圆底**，收藏钮置 False —— 只画星形本体 + 沿轮廓的柔影，
+    不再套深色圆。两者控件仍是 34×34、共用同一套位置常量，所以视觉尺寸与基线依旧对齐。
     """
+
+    HAS_CIRCLE = True       # 子类可关掉「圆底 + 圆阴影 + 圆描边」
 
     def __init__(self, parent=None):
         super().__init__("", parent)
-        self.setObjectName("CardPlay")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(_PLAY_BTN, _PLAY_BTN)
-
-    def paintEvent(self, e):
-        super().paintEvent(e)                      # 先让 QSS 画圆底 + 描边
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        cx, cy = self.width() / 2.0, self.height() / 2.0
-        sw, sh = 4.0, 4.7                          # 三角形半宽 / 半高
-        dx = sw / 3.0                              # 让重心落在圆心
-        tri = QPolygonF([
-            QPointF(cx - sw + dx, cy - sh),
-            QPointF(cx - sw + dx, cy + sh),
-            QPointF(cx + sw + dx, cy),
-        ])
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(243, 240, 234))
-        p.drawPolygon(tri)
-        p.end()
-
-
-class _FavStarButton(QPushButton):
-    """卡片左下角收藏星标：**全自绘**（不画 QSS 背景，保持星形内部透明）。
-
-    未收藏：深色光晕 + 白色描边，内部透明（能透出海报，和反馈原话一致）；
-    已收藏：金色实心五角星 + 细暗描边（亮底剧照上也压得住）。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__("", parent)
-        self.setObjectName("CardStar")
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(_STAR_BTN, _STAR_BTN)
+        self.setFixedSize(_CARD_BTN, _CARD_BTN)
         self.setAttribute(Qt.WA_StyledBackground, False)
+        # 兜底：即使某天全局 QSS 给 QPushButton 加了背景，也别让 Qt 再画一层底
         self.setStyleSheet("background:transparent;border:none;")
-        self._on = False
-
-    def set_on(self, on):
-        on = bool(on)
-        if on != self._on:
-            self._on = on
-            self.update()
 
     def enterEvent(self, e):
         self.update()
@@ -224,23 +212,111 @@ class _FavStarButton(QPushButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         cx, cy = self.width() / 2.0, self.height() / 2.0
-        r = min(self.width(), self.height()) / 2.0 - 1.6
-        if self.underMouse():
-            r += 0.6
-        path = _star_path(cx, cy, r)
+        r = _BTN_CIRCLE / 2.0
+        if self.HAS_CIRCLE:
+            # ① 外阴影：外圈淡、内圈浓
+            p.setPen(Qt.NoPen)
+            for i in range(_BTN_RING, 0, -1):
+                a = int(round(120 * (1.0 - (i - 1) / float(_BTN_RING)) ** 2))
+                if a <= 3:
+                    continue
+                p.setBrush(QColor(0, 0, 0, a))
+                p.drawEllipse(QPointF(cx, cy + 1.0), r + i, r + i)
+            # ② 圆本体
+            if self.underMouse():
+                ar, ag, ab = ACCENT_RGB
+                p.setBrush(QColor(ar, ag, ab, 235))
+            else:
+                p.setBrush(QColor(12, 12, 14, 176))
+            p.drawEllipse(QPointF(cx, cy), r, r)
+            # ③ 亮描边（压在圆内侧，避免被裁）
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 175), 1.3))
+            p.drawEllipse(QPointF(cx, cy), r - 0.7, r - 0.7)
+        # HAS_CIRCLE=False 时这里什么都不画：阴影由子类沿着**自己的轮廓**画，
+        # 画成圆影等于又给了一个圆底（用户要的正是「外面不要圆」）。
+        self.paint_glyph(p, cx, cy, r)
+        p.end()
+
+    def paint_glyph(self, p, cx, cy, r):
+        """子类实现：在半径 r 的圆里画图标（画笔 / 画刷由子类自己设）。"""
+        raise NotImplementedError
+
+
+class _PlayGlyphButton(_CardRoundButton):
+    """卡片右下角播放按钮：圆底 + **几何绘制**的三角形。
+
+    v1.21.0（反馈 2）：原先用字符「▶」当图标，字形的左右 side bearing 不对称，
+    圆圈里永远偏左，怎么调 padding 都对不准圆心。
+    改为画多边形，并把三角形的**重心**对齐圆心（重心 = 外接矩形中心向右偏 1/3 半宽，
+    这是播放键通行的光学居中做法，纯几何外接框居中的话视觉上会偏左）。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("CardPlay")
+
+    def paint_glyph(self, p, cx, cy, r):
+        sw, sh = r * 0.35, r * 0.42          # 三角形半宽 / 半高（随圆半径缩放）
+        dx = sw / 3.0                        # 让重心落在圆心
+        tri = QPolygonF([
+            QPointF(cx - sw + dx, cy - sh),
+            QPointF(cx - sw + dx, cy + sh),
+            QPointF(cx + sw + dx, cy),
+        ])
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(250, 250, 250))
+        p.drawPolygon(tri)
+
+
+class _FavStarButton(_CardRoundButton):
+    """卡片左下角收藏星标（v2.0.3 起**没有圆底**，只有星形本体 + 沿轮廓的柔影）。
+
+    v2.0.2 曾与播放钮同款「深色圆底 + 阴影」，用户看真机后反馈「收藏外不需要圆形」：
+    星形本身就是识别符号，外面再套一个圆既显重、又挡住剧照左下那块画面。
+    现在：
+      · 没有圆底 → 星可以比 v2.0.2 大一圈（`r*0.80` ≈ 22px 见方，原来是内接 16px）；
+      · 阴影不走同心圆，改成**沿星形轮廓描粗黑边**（两层递减 alpha）—— 亮剧照上
+        白描边才不会糊掉，而轮廓影不会读出「一个圆」；
+      · 悬停：未收藏的星由白变成当前高亮色（`ACCENT_RGB`，懒读），已收藏的星提亮一档。
+    控件仍是 34×34、位置常量与播放钮共用，所以两个按钮的视觉尺寸与基线完全对齐。
+    """
+
+    HAS_CIRCLE = False      # v2.0.3：外面不要圆
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("CardStar")
+        self._on = False
+
+    def set_on(self, on):
+        on = bool(on)
+        if on != self._on:
+            self._on = on
+            self.update()
+
+    def paint_glyph(self, p, cx, cy, r):
+        rad = r * 0.80
+        path = _star_path(cx, cy, rad)
+        p.setBrush(Qt.NoBrush)
         if self._on:
-            p.setBrush(QColor(247, 201, 72))
-            p.setPen(QPen(QColor(74, 52, 6, 210), 1.0))
+            # 已收藏：金色实心 + 细暗描边；阴影用「整颗星下沉」的实心黑影两层
+            for dy, a in ((1.7, 105), (1.0, 80)):
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(0, 0, 0, a))
+                p.drawPath(_star_path(cx, cy + dy, rad))
+            p.setBrush(QColor(255, 197, 66) if self.underMouse() else QColor(245, 165, 36))
+            p.setPen(QPen(QColor(0, 0, 0, 150), 1.0))
             p.drawPath(path)
         else:
+            # 未收藏：只有白描边（悬停换成高亮色）+ 沿轮廓的黑柔影
+            for wid, a in ((5.2, 120), (3.4, 90)):
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(QColor(0, 0, 0, a), wid))
+                p.drawPath(path)
             p.setBrush(Qt.NoBrush)
-            # 先描一圈半透明黑影当光晕，白描边在明亮剧照上才不会「消失」
-            p.setPen(QPen(QColor(0, 0, 0, 150), 3.6))
+            p.setPen(QPen(QColor(*ACCENT_RGB) if self.underMouse() else QColor(255, 255, 255), 1.9))
             p.drawPath(path)
-            p.setPen(QPen(QColor(255, 255, 255) if self.underMouse()
-                          else QColor(246, 243, 238), 1.7))
-            p.drawPath(path)
-        p.end()
 
 # 扫描模式 -> 菜单文案（文件夹右键 / 媒体库右键共用）
 SCAN_MODE_CN = {"new": "扫描新添加和修改的",
@@ -260,27 +336,41 @@ def _esc_html(s):
     return html.escape(s or "", quote=True)
 
 
-def _crew_names_html(crew, fallback_text):
-    """把一组 (name, fav, pin) 渲染成「 / 」分隔的富文本片段（v1.37.0 反馈 2）。
+#: v2.0.4（反馈 9）：卡片演职员名字的**默认**颜色 —— 与「演员：」/「导演：」标签同色，
+#: 未收藏时一律用这个弱化灰，只有收藏了才换成身份色。改 QSS 里 `#CardCrew` 的
+#: `color:#a1a1aa` 时这里要一起改（两处必须一致，冒烟有断言）。
+#: v2.0.5：真源挪到 `ui_hero.CREW_NAME_DIM`（详情页也要用同一份），这里只留别名 ——
+#: 冒烟与旧脚本都还在读 `mw._CREW_NAME_DIM`。
+_CREW_NAME_DIM = uhero.CREW_NAME_DIM
 
-    收藏(fav) → 金色(#d4af37)；置顶(pin) → 加粗；二者兼有 → 金色加粗。
-    无结构化数据(crew 为空)时退回纯文本兜底（冒烟 / 旧调用路径）。
+
+def _crew_names_html(crew, fallback_text, role="actor"):
+    """把一组 (name, fav, pin[, gender]) 渲染成「 / 」分隔的富文本片段。
+
+    v2.0.3（反馈 8）：名字颜色改由**身份**决定 —— 女演员粉 / 男演员蓝 / 导演黄 /
+    未知白（`ui_hero.crew_name_color`，与详情页演职人员同一处真源）。
+    v2.0.4（反馈 9，用户澄清「卡片的颜色逻辑不太对」）：**默认是灰的**（与「演员：」
+    这行标签同色 `#a1a1aa`），**只有收藏了才高亮成身份色**；置顶只加粗、不换颜色。
+    三档语义因此互不重叠：灰 = 普通、彩色 = 收藏、粗体 = 置顶（收藏 + 置顶 = 彩 + 粗）。
+    元组长度兼容 3 项（旧调用 / 冒烟）与 4 项（v2.0.3 起的 db.cast_crew_map_ex）。
+    无结构化数据(crew 为空)时退回纯文本兜底。
     """
+    is_dir = uhero.is_director_role(role)
     chunks = []
     if crew:
-        for nm, fav, pin in crew:
+        for t in crew:
+            nm, fav, pin = t[0], t[1], t[2]
+            gender = t[3] if len(t) > 3 else ""
             cn = _clip_text(nm)
             if not cn:
                 continue
             esc = _esc_html(cn)
-            if fav and pin:
-                chunks.append('<span style="color:#d4af37;font-weight:bold;">%s</span>' % esc)
-            elif fav:
-                chunks.append('<span style="color:#d4af37;">%s</span>' % esc)
-            elif pin:
-                chunks.append('<b>%s</b>' % esc)
-            else:
-                chunks.append(esc)
+            # 收藏 = 高亮成身份色；没收藏一律用弱化灰（不再按性别铺满整行颜色）
+            style = "color:%s;" % (uhero.crew_name_color(gender, is_dir) if fav
+                                   else _CREW_NAME_DIM)
+            if pin:
+                style += "font-weight:bold;"
+            chunks.append('<span style="%s">%s</span>' % (style, esc))
     if chunks:
         return " / ".join(chunks)
     return _esc_html(_clip_text(fallback_text) or "—")
@@ -291,9 +381,9 @@ def _build_crew_lines(show_actors, show_directors, actor_crew, director_crew,
     """按内容卡片开关，生成卡片小字的两行富文本（演员 / 导演）。"""
     lines = []
     if show_actors:
-        lines.append("演员：" + _crew_names_html(actor_crew, actor_text))
+        lines.append("演员：" + _crew_names_html(actor_crew, actor_text, "actor"))
     if show_directors:
-        lines.append("导演：" + _crew_names_html(director_crew, director_text))
+        lines.append("导演：" + _crew_names_html(director_crew, director_text, "director"))
     return lines
 
 
@@ -461,6 +551,17 @@ def render_style(appearance: dict = None) -> str:
         #    必须换十六进制 —— 塞 "224, 82, 67" 进去不是合法 CSS，Qt 会把整条声明丢掉，
         #    表现为「换了高亮色但某些描边/选中底没变」，且不报错。
         qss = qss.replace(token, f"#{r:02x}{g:02x}{b:02x}")
+    # v2.0.1（反馈 2/3）：数值框上下箭头 + 勾选框对勾。QSS 画不出矢量图形，只能
+    # `image: url(...)`，而 url 又只能指向**文件**（不认内存 QPixmap、单文件 exe 也
+    # 没有 .qrc）→ 由 glyphs.py 启动时把小图标画成 PNG，这里换成实际路径。
+    # 生成失败时 url() 返回 "none"，声明仍合法（界面只是少一个小图形）。
+    for token, key in (("__GLYPH_UP__", "arrow_up"),
+                       ("__GLYPH_DOWN__", "arrow_down"),
+                       ("__GLYPH_CHECK__", "check")):
+        try:
+            qss = qss.replace(token, glyphs.url(key))
+        except Exception:
+            qss = qss.replace(token, "none")
     return qss
 
 
@@ -484,7 +585,7 @@ class DeleteLibraryDialog(QDialog):
         v.setContentsMargins(18, 16, 18, 14)
         v.setSpacing(10)
         icon = QLabel("将删除媒体库")
-        icon.setStyleSheet("font-size:16px;font-weight:700;color:#e7c86a;")
+        icon.setStyleSheet("font-size:16px;font-weight:700;color:#d4d4d8;")
         v.addWidget(icon)
         info = QLabel(f"「{lib['name']}」　（已索引 {stat['count']} 项 · "
                       f"{mm.human_size(stat['size'])}）")
@@ -492,13 +593,13 @@ class DeleteLibraryDialog(QDialog):
         v.addWidget(info)
         if lib.get("paths"):
             pl = QLabel("关联媒体文件夹：\n" + "\n".join(lib["paths"][:5]))
-            pl.setStyleSheet("color:#a2967f;font-size:11px;")
+            pl.setStyleSheet("color:#a1a1aa;font-size:11px;")
             pl.setWordWrap(True)
             v.addWidget(pl)
 
         # QLabel 不认 Markdown（写 `**` 会原样显示成星号）→ 直接用 <b> 走富文本
         warn = QLabel("⚠ 该操作不可撤销；<b>不会删除磁盘上的任何文件</b>。")
-        warn.setStyleSheet("color:#e07a6a;font-size:12px;")
+        warn.setStyleSheet("color:#f87171;font-size:12px;")
         warn.setWordWrap(True)
         v.addWidget(warn)
 
@@ -645,7 +746,7 @@ class FilterSortBar(QWidget):
 
         for key, label, options in self._specs:
             lbl = QLabel(label + "：")
-            lbl.setStyleSheet("color:#9b8e7a;font-size:11px;")
+            lbl.setStyleSheet("color:#a1a1aa;font-size:11px;")
             h.addWidget(lbl)
             cb = QComboBox()
             cb.setMinimumWidth(96)
@@ -891,7 +992,7 @@ class FacetBar(QWidget):
             row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
             lbl = QLabel(label)
             lbl.setFixedWidth(44)
-            lbl.setStyleSheet("color:#9b8e7a;font-size:11px;")
+            lbl.setStyleSheet("color:#a1a1aa;font-size:11px;")
             row.addWidget(lbl)
             host = QWidget()
             flow = FlowLayout(host, margin=0, spacing=4)
@@ -1036,11 +1137,13 @@ class LazyGrid(QWidget):
     refresh_requested = Signal()      # v1.16.0：随机排序下点「刷新一下」
 
     def __init__(self, fetch, make_card, total, kind="media", batch=60, unit="部",
-                 refreshable=False, parent=None, virtual=False):
+                 refreshable=False, parent=None, virtual=False, count_fn=None):
         super().__init__(parent)
         self._fetch = fetch                 # (offset, limit) -> list
         self._make = make_card              # item -> QWidget
         self._total = max(0, int(total))
+        # v1.46.13（反馈 2）：扫描中就地刷新时用它重新取总数（拿不到就沿用旧值）
+        self._count_fn = count_fn
         self._loaded = 0
         self.batch = max(1, int(batch))
         self.unit = unit
@@ -1085,7 +1188,7 @@ class LazyGrid(QWidget):
         hl.setContentsMargins(0, 0, 0, 0)
         hl.setSpacing(10)
         self.count_lbl = QLabel()
-        self.count_lbl.setStyleSheet("color:#c8b892;font-size:12px;")
+        self.count_lbl.setStyleSheet("color:#a1a1aa;font-size:12px;")
         hl.addWidget(self.count_lbl)
         self.bar = QProgressBar()
         self.bar.setTextVisible(False)
@@ -1139,6 +1242,80 @@ class LazyGrid(QWidget):
             QTimer.singleShot(0, self._render if self._virtual else self._pump)
 
     # ------ 对外 ------
+    @property
+    def total(self):
+        """当前总数（扫描中会变，见 live_reload）。"""
+        return self._total
+
+    def _upgrade_virtual(self, total):
+        """空库时建的页 `_virtual=False`；扫描中新片涌进来 → 就地转成窗口化渲染。
+
+        为什么必须转：`_virtual = virtual and self._total > 0` —— 建页时库是空的
+        （「新建媒体库 → 立刻扫描」正是最常见的情形），所以这页天生是**非窗口化**的。
+        不转的话，`live_reload()` 第一行 `if not self._virtual: return` 就把自己挡死了，
+        用户看到的还是「扫完才出现」。转的时候顺手把滚动条按虚拟模式重挂一次
+        （`_page()` 挂的时候 `_virtual` 还是 False，`_viewport` 没记录）。
+        """
+        self._total = max(0, int(total))
+        self._virtual = True
+        sb = self._scrollbar
+        if sb is not None and _qt_alive(self, sb):
+            vp = None
+            try:
+                p = sb.parentWidget()
+                while p is not None:
+                    if isinstance(p, QScrollArea):
+                        vp = p.viewport()
+                        break
+                    p = p.parentWidget()
+            except RuntimeError:
+                vp = None
+            self.attach_scroll(sb, vp)
+        self._loaded = self._total
+        self._cards = {}
+        self._win_key = None
+        self._update_head()
+        try:
+            self._render()
+        except Exception:
+            pass
+
+    def live_reload(self, total=None):
+        """v1.46.13（反馈 2）：扫描进行中**就地**刷新可视区的卡片。
+
+        为什么不是重建整页：`_replace_current()` 会换掉整个 stack 页 → 滚动位置归零、
+        用户正在看的那屏被顶走。这里只重取「当前窗口」那几十行、原地换卡：
+          · 不碰滚动条 → 位置不变；
+          · 不复用旧卡（旧卡里装的是**按旧顺序**查到的行，头部插入新片后就会张冠李戴）。
+        返回新的总数，取不到时返回 None。
+        """
+        if total is None and self._count_fn is not None:
+            try:
+                total = int(self._count_fn())
+            except Exception:
+                total = None
+        if not self._virtual:
+            if not total:
+                return None            # 还是空的，没什么可刷
+            self._upgrade_virtual(total)
+            return self._total
+        if total is not None and total != self._total:
+            self._total = max(0, total)
+            self._update_head()
+        for w in list(getattr(self, "_cards", {}).values()):
+            try:
+                w.hide()
+                w.deleteLater()
+            except RuntimeError:
+                pass
+        self._cards = {}
+        self._win_key = None          # 拆掉判重键 → 下次 _render 必重建
+        try:
+            self._render()
+        except Exception:
+            pass
+        return self._total
+
     def attach_scroll(self, scrollbar, viewport=None):
         """挂上外层滚动条：滚到接近底部时自动继续加载（虚拟模式下改为换窗口）。"""
         if scrollbar is None:
@@ -1638,28 +1815,56 @@ class LazyGrid(QWidget):
 
 
 class ScanWorker(QThread):
+    """扫描媒体库（v1.46.13 重写进度口径）。
+
+    三条反馈都落在这个类上：
+      ① 「扫描新添加和修改的」要**按媒体库「路径」列表自上而下逐条扫** —— `run()` 就是
+         `for i, p in enumerate(roots, 1)`，一条扫完才轮到下一条，顺序与「编辑媒体库」里
+         的 ↑↓ 完全一致，不快排、不并发；每条开始都上报「路径 i/n」，让用户看得见顺序。
+      ② 新片要**边扫边出现**（不等某一路径扫完、更不等全部扫完）—— 每索引一个新条目就把
+         `live` 的「待刷新」标脏，节流 1.2s 发一次；没有任何新片时不发，免得白刷整页。
+      ③ 底部要显示扫描情况 + 进度 —— `tick(已完成, 预估总数, 文案)` 每 0.25s 发一次
+         （旧版是按「进度消息条数」算，而消息只在**新增**时才发 → 百分比几乎永远 0%，
+         用户看到的就是「环形一直空着」）。现在分子来自 scanner 的 `on_item`，**每个
+         处理过的文件都算**，与分母（视频文件总数）同口径。
+    """
+
     progress = Signal(str)
     done = Signal(dict)
     live = Signal()      # v1.22.0（反馈 4）：扫描进行中就地刷新首页 / 侧栏计数
     # v1.24.0（反馈 11）：结构化进度 (已完成条目数, 预估总条目数, 当前消息)
-    # —— 侧边栏媒体库名旁的圆形进度环用它显示「正在刷新 + 百分比」。
+    # —— 侧边栏媒体库名旁的圆形进度环用它显示「正在刷新 + 百分比」；
+    # v1.46.13 起底部状态栏的「扫描情况」文字 + 进度条也吃这个信号（total=0 表示不定长）。
     tick = Signal(int, int, str)
 
     def __init__(self, paths, library_name=None, mode="overwrite",
-                 total_hint=None, precount=True):
+                 total_hint=None, precount=True, quiet=False):
         super().__init__()
         self.paths = list(paths) if isinstance(paths, (list, tuple)) else [paths]
         self.library_name = library_name
         self.mode = mode
         self._last_live = 0.0
-        self._n = 0
+        self._last_tick = 0.0
+        self._done = 0            # 累计已处理条目数（新增 + 已存在）
+        self._new = 0             # 本次真正新增的条目数
+        self._new_since_live = 0  # 上次 live 之后又新索引了多少（0 就不用刷界面）
+        self._i_path = 0
+        self._n_paths = 0
+        self._root = ""
+        # quiet：后台定时扫描用 —— 它没有界面，别为它算百分比 / 发信号
+        self._quiet = bool(quiet)
         # total_hint：调用方已经数过了（如 FolderScanDialog）→ 别再走一遍磁盘
         self._total = int(total_hint or 0)
         self._precount = bool(precount) and not self._total
 
     def _count_files(self):
-        """预估总量：数一遍视频文件（只走目录、不读文件内容，几万文件约 1~3 秒）。"""
+        """预估总量：数一遍视频文件（只走目录、不读文件内容，几万文件约 1~3 秒）。
+
+        v1.46.13：统计过程本身也要上报 —— 4.8 万片 + 网络盘时这一步可能要几十秒，
+        期间界面一动不动，用户会以为「点了没反应」。
+        """
         n = 0
+        last = 0.0
         try:
             for root in self.paths:
                 if root and os.path.isdir(root):
@@ -1667,6 +1872,10 @@ class ScanWorker(QThread):
                         for f in fns:
                             if f.lower().endswith(scanner_mod.VIDEO_EXTS):
                                 n += 1
+                        now = time.monotonic()
+                        if (not self._quiet) and now - last >= 0.4:
+                            last = now
+                            self.tick.emit(0, 0, f"正在统计文件数… 已找到 {n} 个")
         except Exception:
             return 0
         return n
@@ -1677,29 +1886,70 @@ class ScanWorker(QThread):
             self._precount = False
         try:
             counts = {"movie": 0, "tvshow": 0, "episode": 0}
-            for p in self.paths:
-                if p and os.path.isdir(p):
-                    c = scanner_mod.scan_library(
-                        p, lambda m: self._on_progress(m),
-                        library_name=self.library_name, mode=self.mode)
-                    for k in counts:
-                        counts[k] += c.get(k, 0)
-            self.live.emit()          # 扫完再刷一次，确保首页反映最终结果
+            # 只扫真实存在的目录，且**保持配置里的先后顺序**（顺序即扫描优先级）
+            roots = [p for p in self.paths if p and os.path.isdir(p)]
+            self._n_paths = len(roots)
+            for i, p in enumerate(roots, 1):
+                self._i_path = i
+                self._root = p
+                self._tick(force=True)
+                c = scanner_mod.scan_library(
+                    p, lambda m: self._on_progress(m),
+                    library_name=self.library_name, mode=self.mode,
+                    on_item=self._on_item, path_index=i, path_total=len(roots))
+                for k in counts:
+                    counts[k] += c.get(k, 0)
+            self._tick(force=True)
+            self.live.emit()          # 扫完再刷一次，确保界面反映最终结果
             self.done.emit(counts)
         except Exception as e:
             self.done.emit({"error": str(e)})
 
-    def _on_progress(self, m):
-        self.progress.emit(m)
-        # 每来一条进度消息算「处理了 1 个条目」。扫描器基本是「一个文件/一个分集一条消息」，
-        # 所以 已完成/预估文件数 是个足够准的百分比（不做精确对齐，进度环只求直观）。
-        self._n += 1
-        if self._n % 3 == 0 or self._n <= 3:
-            self.tick.emit(self._n, self._total, m)
+    # ---------- 进度上报 ----------
+    def _msg(self):
+        """底部状态栏那一行文案（尽量短，状态栏右侧空间有限）。"""
+        parts = []
+        if self.library_name:
+            parts.append(f"扫描 {self.library_name}")
+        if self._i_path and self._n_paths:
+            parts.append(f"路径 {self._i_path}/{self._n_paths}")
+        if self._root:
+            base = os.path.basename(str(self._root).rstrip("\\/")) or str(self._root)
+            parts.append(base)
+        if self._total:
+            parts.append(f"{self._done}/{self._total}")
+        elif self._done:
+            parts.append(f"已处理 {self._done}")
+        if self._new:
+            parts.append(f"新增 {self._new}")
+        return " · ".join(parts)
+
+    def _tick(self, now=None, force=False):
+        if self._quiet:
+            return
+        now = now if now is not None else time.monotonic()
+        if not force and now - self._last_tick < 0.25:
+            return
+        self._last_tick = now
+        self.tick.emit(self._done, self._total, self._msg())
+
+    def _on_item(self, info):
+        """scanner 每处理完一个条目回调一次（在扫描线程里）。"""
+        self._done += 1
+        if info.get("new"):
+            self._new += 1
+            self._new_since_live += 1
         now = time.monotonic()
-        if now - self._last_live >= 1.2:
+        # 有新片才值得刷界面（一次整页重载不便宜），且节流 1.2s
+        if self._new_since_live and now - self._last_live >= 1.2:
             self._last_live = now
+            self._new_since_live = 0
             self.live.emit()
+        self._tick(now)
+
+    def _on_progress(self, m):
+        # 逐条文字只往日志 / 对话框转发；底部状态栏由 tick 承载（否则几千条消息刷屏）
+        self.progress.emit(m)
 
 
 class CountWorker(QThread):
@@ -1808,13 +2058,13 @@ class FolderScanDialog(QDialog):
         v.setSpacing(10)
 
         title = QLabel(f"扫描媒体库「{lib['name']}」")
-        title.setStyleSheet("font-size:16px;font-weight:700;color:#e7c86a;")
+        title.setStyleSheet("font-size:16px;font-weight:700;color:#d4d4d8;")
         v.addWidget(title)
 
         info = QLabel("模式：" + SCAN_MODE_CN.get(mode, mode) + "\n媒体文件夹：\n"
                       + "\n".join(lib.get("paths", [])[:6]))
         info.setWordWrap(True)
-        info.setStyleSheet("color:#a2967f;font-size:11px;")
+        info.setStyleSheet("color:#a1a1aa;font-size:11px;")
         v.addWidget(info)
 
         self.count_lbl = QLabel("正在统计要扫描的文件数量…")
@@ -1825,7 +2075,7 @@ class FolderScanDialog(QDialog):
         v.addWidget(self.bar)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color:#a2967f;font-size:11px;")
+        self.status.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.status.setWordWrap(True)
         v.addWidget(self.status)
         v.addStretch(1)
@@ -1992,7 +2242,7 @@ class PosterCard(QFrame):
             crew = QLabel("<br>".join(crew_lines))
             crew.setObjectName("CardCrew")
             crew.setTextFormat(Qt.RichText)
-            crew.setStyleSheet("font-size:10px;color:#9b8e7a;line-height:1.4;")
+            crew.setStyleSheet("font-size:10px;color:#a1a1aa;line-height:1.4;")
             crew.setAlignment(Qt.AlignTop | Qt.AlignLeft)
             crew.setWordWrap(False)
             crew.setFixedHeight(_LINE_H * len(crew_lines))
@@ -2007,7 +2257,7 @@ class PosterCard(QFrame):
             badge = QLabel(f"选集 {self._parts_count}")
             badge.setObjectName("PartsBadge")
             badge.setStyleSheet(
-                "background:#d4af37;color:#14110f;font-size:10px;font-weight:bold;"
+                "background:#66a9ff;color:#0a0a0b;font-size:10px;font-weight:bold;"
                 "border-radius:3px;padding:1px 5px;")
             badge.setFixedSize(54, 16)
             badge.move(POSTER_CARD_W - 54 - 6, 6)
@@ -2024,8 +2274,8 @@ class PosterCard(QFrame):
             b = _PlayGlyphButton(self)
             b.setToolTip("直接播放（不进详情页）")
             b.clicked.connect(lambda: self._on_play(self.media))
-            b.move(_CARD_PAD + POSTER_W - _PLAY_BTN - 5,
-                   _CARD_PAD + POSTER_H - _PLAY_BTN - 5)
+            b.move(_CARD_PAD + POSTER_W - _CARD_BTN - _BTN_INSET,
+                   _CARD_PAD + POSTER_H - _CARD_BTN - _BTN_INSET)
             b.raise_()
             self.play_btn = b
 
@@ -2038,7 +2288,7 @@ class PosterCard(QFrame):
             fb.set_on(fav_on)
             fb.setToolTip("取消收藏" if fav_on else "加入收藏")
             fb.clicked.connect(self._fav_clicked)
-            fb.move(_CARD_PAD + 5, _CARD_PAD + POSTER_H - _STAR_BTN - 5)
+            fb.move(_CARD_PAD + _BTN_INSET, _CARD_PAD + POSTER_H - _CARD_BTN - _BTN_INSET)
             fb.raise_()
             self.fav_btn = fb
 
@@ -2164,7 +2414,7 @@ def folder_cover_pixmap(posters, w, h):
     clip = QPainterPath()
     clip.addRoundedRect(QRectF(0, 0, w, h), 7, 7)
     p.setClipPath(clip)
-    p.fillRect(0, 0, w, h, QColor("#1d1813"))
+    p.fillRect(0, 0, w, h, QColor("#18181b"))
     paths = [x for x in (posters or []) if x][:2]
     if not paths:
         p.drawPixmap(0, 0, placeholder_pixmap(w, h, text="夹"))
@@ -2209,12 +2459,12 @@ class FolderCard(QFrame):
         img.setFixedSize(FOLDER_COVER_W, FOLDER_COVER_H)
         v.addWidget(img, alignment=Qt.AlignCenter)
         title = QLabel(name)
-        title.setStyleSheet("color:#e2685a;font-size:12px;font-weight:600;")
+        title.setStyleSheet("color:#f87171;font-size:12px;font-weight:600;")
         title.setAlignment(Qt.AlignCenter)
         title.setFixedHeight(18)
         v.addWidget(title)
         sub = QLabel(f"共 {count} 部")
-        sub.setStyleSheet("color:#a2967f;font-size:11px;")
+        sub.setStyleSheet("color:#a1a1aa;font-size:11px;")
         sub.setAlignment(Qt.AlignCenter)
         sub.setFixedHeight(16)
         v.addWidget(sub)
@@ -2233,7 +2483,7 @@ class FolderCard(QFrame):
 
         if self._missing:
             warn = QLabel("!", self)
-            warn.setStyleSheet("background:#a32a20;color:#ffffff;font-size:11px;"
+            warn.setStyleSheet("background:#b91c1c;color:#ffffff;font-size:11px;"
                                "font-weight:700;border-radius:8px;")
             warn.setAlignment(Qt.AlignCenter)
             warn.setFixedSize(16, 16)
@@ -2281,7 +2531,7 @@ class FolderCard(QFrame):
         p.setBrush(QColor(255, 255, 255, 24 if self._hover else 14))
         p.drawRoundedRect(r, 10, 10)
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(192, 57, 43, 205) if self._hover else QColor(255, 255, 255, 46),
+        p.setPen(QPen(QColor(*ACCENT_RGB, 205) if self._hover else QColor(255, 255, 255, 46),
                       1.4 if self._hover else 1.0))
         p.drawRoundedRect(r, 10, 10)
         p.end()
@@ -2398,13 +2648,13 @@ class ActorCard(QFrame):
         col.setSpacing(3)
         col.setContentsMargins(0, 2, _ACTOR_BTN * 2 + 10, 0)   # 右侧留给右上角浮动按钮
         self._name = QLabel(self.person.get("name", ""))
-        self._name.setStyleSheet("font-size:15px;font-weight:700;color:#f3e8d6;")
+        self._name.setStyleSheet("font-size:15px;font-weight:700;color:#ecedee;")
         self._name.setWordWrap(True)
         # v1.45.4（需求 2）：姓名前加性别符号 —— ♂ 蓝 / ♀ 粉；未知不显示，保持卡片干净
         _g = (str(self.person.get("gender") or "")).strip().lower()
         _show_g = bool(cfg.get_settings().appearance.get("show_gender", True))
-        _sym, _gc = (("♂", "#5aa9e6") if _g == "male"
-                     else ("♀", "#e6739f") if _g == "female" else ("", ""))
+        _sym, _gc = (("♂", "#338ef7") if _g == "male"
+                     else ("♀", "#f31260") if _g == "female" else ("", ""))
         if not _show_g:
             _sym = ""
         if _sym:
@@ -2508,11 +2758,11 @@ class ActorCard(QFrame):
         if key == "三围":
             m = self._CUP_LEAD_RE.match(val)
             if m:
-                inner = ('<b><span style="color:#e8d7ab;">%s</span></b>&nbsp;%s'
+                inner = ('<b><span style="color:#ecedee;">%s</span></b>&nbsp;%s'
                          % (html.escape(m.group(1)), html.escape(m.group(2))))
         self._fact_cells[key].setText(
-            '<span style="color:#7b7160;">%s</span>'
-            '&nbsp;<span style="color:#c9bda7;">%s</span>'
+            '<span style="color:#71717a;">%s</span>'
+            '&nbsp;<span style="color:#d4d4d8;">%s</span>'
             % (key, inner))
 
     def _update_texts(self):
@@ -2520,22 +2770,22 @@ class ActorCard(QFrame):
         status = _person_status(p)
         if status == "现役":
             self._status_badge.setText("● 现役")
-            self._status_badge.setStyleSheet("color:#7fdca0;font-size:11px;font-weight:700;")
+            self._status_badge.setStyleSheet("color:#45d483;font-size:11px;font-weight:700;")
         elif status == "退役":
             self._status_badge.setText("● 退役")
-            self._status_badge.setStyleSheet("color:#e8d27a;font-size:11px;font-weight:700;")
+            self._status_badge.setStyleSheet("color:#8fc0ff;font-size:11px;font-weight:700;")
         else:
             self._status_badge.setText("● 未知")
-            self._status_badge.setStyleSheet("color:#9b8e7a;font-size:11px;")
+            self._status_badge.setStyleSheet("color:#a1a1aa;font-size:11px;")
         # padding:0 是关键：全局 QPushButton 有 `padding:7px 14px`，会把 26×26
         # 按钮的内容区压成负数 → 字形被完全裁掉（v1.10.0 ☆/▲ 看不见的根因）
         base = "padding:0;min-width:0;border:none;background:transparent;"
         self._star.setText("★" if p.get("favorite") else "☆")
         self._star.setStyleSheet(base + "font-size:15px;color:%s;"
-                                 % ("#f3d9a0" if p.get("favorite") else "#9b8e7a"))
+                                 % ("#f5a524" if p.get("favorite") else "#a1a1aa"))
         self._pin.setText("▲" if p.get("pinned") else "△")
         self._pin.setStyleSheet(base + "font-size:13px;color:%s;"
-                                % ("#f3d9a0" if p.get("pinned") else "#9b8e7a"))
+                                % ("#f5a524" if p.get("pinned") else "#a1a1aa"))
         facts = self._fact_values()
         summ = _TextSummary()
         for key, _r, _c, _span in self.FACTS:
@@ -2643,9 +2893,11 @@ class ActorCard(QFrame):
         status = _person_status(self.person)
         # 底色/描边给足对比度，让「现役绿 / 退役黄」在小卡上一眼可辨
         if status == "现役":
-            base, border = QColor(46, 122, 74, 92), QColor(116, 220, 140, 205)
+            # v2.0.0：HeroUI 语义色（翡翠 #17c964）；底色收到 46 通透一点，小卡才不闷
+            base, border = QColor(23, 201, 100, 46), QColor(23, 201, 100, 200)
         elif status == "退役":
-            base, border = QColor(148, 120, 38, 86), QColor(236, 202, 96, 210)
+            # 琥珀 #f5a524
+            base, border = QColor(245, 165, 36, 46), QColor(245, 165, 36, 200)
         else:
             base, border = QColor(255, 255, 255, 14), QColor(255, 255, 255, 70)
         p.setBrush(base)
@@ -2731,10 +2983,10 @@ class AboutDialog(QDialog):
         v.setSpacing(8)
 
         head = QLabel("%s　%s" % (ver.APP_NAME, ver.VERSION))
-        head.setStyleSheet("font-size:19px;font-weight:700;color:#f7e3b4;")
+        head.setStyleSheet("font-size:19px;font-weight:700;color:#fafafa;")
         v.addWidget(head)
         sub = QLabel("%s / %s" % (ver.APP_NAME_EN, ver.FULL_VERSION))
-        sub.setStyleSheet("color:#a2967f;font-size:12px;")
+        sub.setStyleSheet("color:#a1a1aa;font-size:12px;")
         v.addWidget(sub)
 
         # Slogan 走 QLabel#Slogan 的鎏金样式（启动画面共用同一句）
@@ -2746,8 +2998,8 @@ class AboutDialog(QDialog):
         tb = QTextBrowser()
         tb.setOpenExternalLinks(True)
         tb.setMarkdown(self._body())
-        tb.setStyleSheet("background:#1c1714;color:#e8e0d4;"
-                         "border:1px solid #2a221c;border-radius:6px;")
+        tb.setStyleSheet("background:#18181b;color:#ecedee;"
+                         "border:1px solid #27272a;border-radius:6px;")
         tb.setMinimumHeight(380)
         v.addWidget(tb, 1)
 
@@ -2973,7 +3225,7 @@ class AboutDialog(QDialog):
         return pm
 
     @classmethod
-    def _contact_icon(cls, kind, size=22, tint="#e8e0d4"):
+    def _contact_icon(cls, kind, size=22, tint="#ecedee"):
         """按 `version.CONTACTS` 的 key 生成联系图标（QIcon）。
 
         - github / bilibili / weibo：用户提供的官方 logo 剪影（内联 base64）着色后出图；
@@ -3001,7 +3253,7 @@ class AboutDialog(QDialog):
             p.setPen(Qt.NoPen); p.setBrush(col)
             p.drawRoundedRect(QRectF(s * 0.08, s * 0.22, s * 0.84, s * 0.58),
                               s * 0.08, s * 0.08)
-            pen = QPen(QColor("#1c1714")); pen.setWidthF(max(1.4, s * 0.075))
+            pen = QPen(QColor("#18181b")); pen.setWidthF(max(1.4, s * 0.075))
             pen.setJoinStyle(Qt.RoundJoin); p.setPen(pen); p.setBrush(Qt.NoBrush)
             p.drawPolyline(QPolygonF([QPointF(s * 0.14, s * 0.30), QPointF(s * 0.50, s * 0.56),
                                       QPointF(s * 0.86, s * 0.30)]))
@@ -3015,7 +3267,7 @@ class AboutDialog(QDialog):
         h.setContentsMargins(0, 2, 0, 0)
         h.setSpacing(10)
         lbl = QLabel("联系作者：")
-        lbl.setStyleSheet("color:#a2967f;font-size:12px;")
+        lbl.setStyleSheet("color:#a1a1aa;font-size:12px;")
         h.addWidget(lbl)
         for kind, name, url in ver.CONTACTS:
             b = QPushButton()
@@ -3029,7 +3281,7 @@ class AboutDialog(QDialog):
             b.setToolTip("%s\n%s" % (name, shown))
             b.clicked.connect(lambda _c, u=url: self._open_contact(u))
             h.addWidget(b)
-        mail = QLabel("<a href='mailto:%s' style='color:#d4af37;text-decoration:none;'>%s</a>"
+        mail = QLabel("<a href='mailto:%s' style='color:#66a9ff;text-decoration:none;'>%s</a>"
                       % (ver.CONTACT_MAIL, ver.CONTACT_MAIL))
         mail.setOpenExternalLinks(True)
         mail.setStyleSheet("font-size:12px;")
@@ -3381,6 +3633,17 @@ class MainWindow(QMainWindow):
         self._toast_lbl.setVisible(False)
         sb.addPermanentWidget(self._toast_lbl, 0)      # 固定在右下
 
+        # ★ v1.46.13（反馈 3）：底部「扫描情况」的文字行，平时隐藏。
+        #   进度条**不再另起一条** —— 用户截图标红的就是右边那条 BusyBar，要求「在进度条
+        #   显示扫描进度」。所以扫描期间由扫描**独占**这条条子（见 _scan_own_busy）：
+        #   否则影片墙的「载入中 / 缓存中」会和扫描百分比互相覆盖、数字来回跳。
+        self._scan_lbl = QLabel("")
+        self._scan_lbl.setObjectName("ScanNote")
+        self._scan_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._scan_lbl.setVisible(False)
+        self._scan_lbl.setToolTip("扫描进度")
+        sb.addPermanentWidget(self._scan_lbl, 0)
+
         # v1.46.4（反馈 1）：信息栏右侧**常驻**灰色进度条；有载入/缓存时高亮
         self._busy_bar = QProgressBar()
         self._busy_bar.setObjectName("BusyBar")
@@ -3392,6 +3655,7 @@ class MainWindow(QMainWindow):
         self._busy_bar.setToolTip("载入 / 缓存进度（空闲时为空槽）")
         sb.addPermanentWidget(self._busy_bar, 0)
         BUSY.changed.connect(self._on_busy)
+        self._busy_bus_on = True   # 与上一行成对；扫描期间会临时断开，见 _scan_own_busy
         # v1.46.8：记录「高亮点亮时刻」，用于最短可见时长（否则一闪而过看不见）
         self._busy_on_at = 0.0
         self._busy_idle_timer = QTimer(self)
@@ -3465,6 +3729,98 @@ class MainWindow(QMainWindow):
 
     def busy(self, progress=None, text=""):
         set_busy(progress, text)
+
+    # ---------- 底部「扫描情况」（v1.46.13 反馈 3）----------
+    # 状态栏右起：扫描文字 | 载入/缓存条（扫描时改由扫描驱动）
+    SCAN_TEXT_MAX_W = 520        # 文字的像素上限 —— 超了从中间省略（别把左侧版权挤走）
+
+    def _scan_own_busy(self, on):
+        """扫描期间让扫描**独占**底部那条进度条（BusyBus 的其他上报一律不接）。
+
+        不独占会怎样：扫描每 0.25s 报一次百分比，而影片墙每约 2.5s 就地刷新一窗卡时会
+        `set_busy(-1,"缓存中")` → 条子在「43%」和「循环块」之间来回跳，看着像坏了。
+        """
+        on = bool(on)
+        if on == getattr(self, "_scan_busy_owned", False):
+            return
+        self._scan_busy_owned = on
+        connected = getattr(self, "_busy_bus_on", False)
+        try:
+            if on and connected:
+                BUSY.changed.disconnect(self._on_busy)
+                self._busy_bus_on = False
+            elif (not on) and not connected:
+                BUSY.changed.connect(self._on_busy)
+                self._busy_bus_on = True
+        except (RuntimeError, TypeError):
+            pass
+
+    def _scan_begin(self, name, n_paths=0, mode_text=""):
+        """扫描开始：点亮底部文字 + 把进度条交给扫描（先不定长，等总数回来再转定量）。"""
+        lbl = getattr(self, "_scan_lbl", None)
+        if lbl is None:
+            return
+        self._scan_name = name or ""
+        self._scan_mode_text = mode_text or ""
+        tip = f"扫描「{name}」" if name else "扫描"
+        if mode_text:
+            tip += f" · {mode_text}"
+        if n_paths:
+            tip += f" · 共 {n_paths} 个路径"
+        self._set_scan_text(tip)
+        lbl.setToolTip(tip)
+        lbl.setVisible(True)
+        self._scan_own_busy(True)
+        self._on_busy(-1, "扫描中")
+
+    def _set_scan_text(self, text):
+        lbl = getattr(self, "_scan_lbl", None)
+        if lbl is None:
+            return
+        text = str(text or "")
+        try:
+            text = lbl.fontMetrics().elidedText(text, Qt.ElideMiddle, self.SCAN_TEXT_MAX_W)
+        except Exception:
+            pass
+        lbl.setText(text)
+
+    def _on_scan_tick(self, name, done, total, msg):
+        """扫描进度 → 侧栏库名圆环的百分比 + 底部状态栏（文字 + 进度条）。"""
+        done, total = int(done or 0), int(total or 0)
+        pct = max(0, min(100, int(100 * done / total))) if total > 0 else 0
+        if name:
+            self._lib_ring(name, True, pct, msg or f"正在扫描「{name}」…")
+        lbl = getattr(self, "_scan_lbl", None)
+        if lbl is None:
+            return
+        if total > 0:
+            self._on_busy(pct, "扫描")
+        else:
+            self._on_busy(-1, "扫描中")     # 还没有分母（统计文件数阶段）→ 循环块
+        if msg:
+            self._set_scan_text(msg)
+        mode = getattr(self, "_scan_mode_text", "")
+        head = (f"扫描「{name}」" if name else "扫描") + (f" · {mode}" if mode else "")
+        lbl.setToolTip(head + (f"\n{pct}%（{done:,}/{total:,}）" if total > 0 else ""))
+        lbl.setVisible(True)
+
+    def _scan_end(self):
+        """扫描结束（含出错 / 用户中途关窗）：收回文字，进度条还给 BusyBus。"""
+        lbl = getattr(self, "_scan_lbl", None)
+        if lbl is not None:
+            try:
+                lbl.setVisible(False)
+            except RuntimeError:
+                lbl = None
+        if getattr(self, "_scan_busy_owned", False):
+            self._scan_own_busy(False)
+            self._on_busy(None, "")
+
+    def _on_scan_msg(self, m):
+        """扫描器的逐条文字消息：正常条目已由底部状态栏承载，这里只弹「异常 / 回退」提示。"""
+        m = str(m or "")
+        if m.startswith("["):
+            self._toast(m)
 
 
     # ---------- 底部临时消息（v1.44.0）----------
@@ -3785,7 +4141,7 @@ class MainWindow(QMainWindow):
         # v1.32.0（反馈 3）：搜索框提示语走词典（`COMMON` 里有整句译文），
         # 提示语属于「会引导操作」的文案，值得翻译；业务细节不译。
         self.search.setPlaceholderText(
-            i18n.tr("搜索 (Ctrl+K)   片名 / 类型 / 演员  （用 @ 指定演员）"))
+            i18n.tr("搜索 (Ctrl+K)   片名 / 类型 / 演员 / 标签  （用 @ 指定演员）"))
         self.search.returnPressed.connect(self._do_search)
         h.addWidget(self.search, 1)
 
@@ -3859,7 +4215,10 @@ class MainWindow(QMainWindow):
         host = QWidget()
         v = QVBoxLayout(host); v.setContentsMargins(20, 16, 20, 20); v.setSpacing(12)
         if title:
-            v.addWidget(self._h1(title))
+            ttl = self._h1(title)
+            # v1.46.13（反馈 2）：扫描中就地刷新时，标题里的「（N 部）」要跟着变
+            scroll.title_lbl = ttl
+            v.addWidget(ttl)
         v.addWidget(body_widget)
         v.addStretch(1)
         scroll.setWidget(host)
@@ -3895,8 +4254,16 @@ class MainWindow(QMainWindow):
             target.attach_scroll(scroll.verticalScrollBar(), scroll.viewport())
         return scroll
 
+    # v2.0.2（反馈 5）：标题颜色**跟着高亮色走**。
+    # 原来这里内联写死了一个固定蓝（v2.0.0 迁移时把 v1 的强调金统一成了它），
+    # 于是换任何主题色这些大标题都不变色 —— 用户截图里的「最近播放 / 最近添加」。
+    # 改成 objectName + QSS 令牌：`render_style()` 重载样式表时它会立刻跟着换，
+    # 不需要重建页面（内联 hex 只有重新导航到这一页才会变）。
+    # ⚠ 说明「旧值是什么」的注释放**函数外面**：冒烟用 inspect.getsource 断言
+    #   函数体里不再出现那个内联声明，写在函数里会被自己的注释判红。
     def _h1(self, text):
-        l = QLabel(text); l.setStyleSheet("font-size:20px;font-weight:bold;color:#d4af37;")
+        l = QLabel(text)
+        l.setObjectName("PageTitle")
         return l
 
     def _crewed(self, rows):
@@ -3964,8 +4331,10 @@ class MainWindow(QMainWindow):
 
         total = db.count_media(top_only=True, **filt)
         # v1.46.0：影片墙走窗口化渲染（10 万条也只建可视区 ±2 行）
+        # v1.46.13（反馈 2）：count_fn 供扫描中「就地刷新」重新取总数（新片一进来 N 就变）
         grid = LazyGrid(fetch, self._poster_card, total, kind="media", unit=unit,
-                        refreshable=random_mode, virtual=True)
+                        refreshable=random_mode, virtual=True,
+                        count_fn=lambda: db.count_media(top_only=True, **filt))
 
         if random_mode:
             def reshuffle():
@@ -4004,9 +4373,11 @@ class MainWindow(QMainWindow):
                "滚动到底部或点「加载更多」继续读取。")
         if random_mode:
             tip += "　随机排序下点「刷新一下」可重新洗牌。"
-        hint = QLabel(tip); hint.setStyleSheet("color:#8c8071;font-size:11px;"); hint.setWordWrap(True)
+        hint = QLabel(tip); hint.setStyleSheet("color:#71717a;font-size:11px;"); hint.setWordWrap(True)
         v.addWidget(hint)
-        return self._page(f"{title}（{total} {unit}）", w)
+        page = self._page(f"{title}（{total} {unit}）", w)
+        page.title_tpl = (title, unit)     # v1.46.13：扫描中就地更新「（N 部）」用
+        return page
 
     def _view_home(self):
         self.set_backdrop(None)
@@ -4014,12 +4385,225 @@ class MainWindow(QMainWindow):
                             on_hover_media=self._backdrop_from_media,
                             on_changed=self._refresh_stats,
                             on_open_actors=lambda: self.go(self._view_actors),
-                            on_person_replaced=lambda old, new: self._after_person_replaced(old, new))
+                            on_person_replaced=lambda old, new: self._after_person_replaced(old, new),
+                            on_bulk_action=self._home_bulk)
 
     def _backdrop_from_media(self, m):
         """鼠标选到哪部作品，磨砂底衬就用它的剧照。"""
         if isinstance(m, dict):
             self.set_backdrop(m.get("fanart") or m.get("poster"))
+
+    # ---------- 首页列表右键批量操作（v1.46.11 反馈 1） ----------
+    def _home_bulk(self, action, medias):
+        """首页「最近添加」列表右键菜单的落地：播放 / 打开文件夹 / 刷新 / 删索引 / 删文件。
+
+        单选与多选走**同一条链路** —— 菜单那边已经把选中行收成 medias 列表，
+        这里只按数量决定文案与确认强度。
+        """
+        medias = [m for m in (medias or []) if isinstance(m, dict)]
+        if not medias:
+            return
+        n = len(medias)
+        page = self.stack.currentWidget()
+        if not hasattr(page, "drop_ids"):
+            page = None
+
+        if action == "play":
+            ok, played, first_err = 0, [], ""
+            for m in medias:
+                res = player_mod.launch(m.get("file_path") or "")
+                if res.get("ok"):
+                    ok += 1
+                    played.append(m.get("id"))
+                    if m.get("id") is not None:
+                        try:
+                            db.mark_played(m["id"])        # 与卡片播放按钮同口径
+                        except Exception:
+                            pass
+                        m["play_count"] = (m.get("play_count") or 0) + 1
+                elif not first_err:
+                    first_err = res.get("msg", "")
+            if ok:
+                self._toast("已开始播放" if ok == 1 else f"已开始播放 {ok} 部")
+                if page is not None:
+                    page.refresh_ids(played)             # 观看次数列就地刷新
+            else:
+                QMessageBox.warning(self, "播放失败", first_err or "无法打开播放器")
+            return
+
+        if action == "folder":
+            dirs, seen = [], set()
+            for m in medias:
+                d = os.path.dirname(m.get("file_path") or "")
+                if d and d not in seen:
+                    seen.add(d)
+                    dirs.append(d)
+            if not dirs:
+                QMessageBox.information(self, "打开视频文件夹", "选中的条目没有可用的文件路径。")
+                return
+            if len(dirs) > 3 and not self._confirm_bulk(
+                    medias, "打开视频文件夹",
+                    f"选中项分布在 {len(dirs)} 个不同目录，会在资源管理器里打开 {len(dirs)} 个窗口。"):
+                return
+            bad = 0
+            for d in dirs:
+                if not os.path.isdir(d) or not QDesktopServices.openUrl(QUrl.fromLocalFile(d)):
+                    bad += 1
+            if bad:
+                QMessageBox.warning(self, "打开视频文件夹",
+                                    f"有 {bad} 个目录打不开（可能已被移动或删除）。")
+            elif len(dirs) == 1:
+                self._toast("已在资源管理器中打开")
+            return
+
+        if action == "refresh":
+            hit = page.refresh_ids([m.get("id") for m in medias]) if page is not None else 0
+            self._refresh_stats()
+            if hit:
+                self._toast("已刷新" if hit == 1 else f"已刷新 {hit} 项")
+            else:
+                self._toast("这些条目已不在索引里，列表未变")
+            return
+
+        if action == "delete_index":
+            if not self._confirm_bulk(
+                    medias, "删除数据",
+                    "只从**索引库**里移除这些条目，磁盘上的视频文件不会被删除。\n"
+                    "以后重新扫描还会把它们加回来。"):
+                return
+            ids = []
+            for m in medias:
+                mid = m.get("id")
+                if mid is None:
+                    continue
+                try:
+                    db.delete_media(mid)
+                    ids.append(mid)
+                except Exception:
+                    applog.log(f"删除索引失败 id={mid}", "error")
+            if page is not None:
+                page.drop_ids(ids)
+            self._refresh_stats()
+            self._toast(f"已删除 {len(ids)} 条索引" if ids else "没有删除任何条目")
+            return
+
+        if action == "delete_files":
+            # 危险操作：先把要删的文件逐条列出来，默认按钮停在「取消」。
+            targets = [m for m in medias if (m.get("file_path") or "")]
+            missing = [m for m in medias if not (m.get("file_path") or "")]
+            if not targets:
+                QMessageBox.information(self, "删除源文件", "选中的条目没有可用的文件路径。")
+                return
+            names = "\n".join("· " + os.path.basename(m.get("file_path") or "")
+                              for m in targets[:8])
+            more = "" if len(targets) <= 8 else f"\n… 另外 {len(targets) - 8} 个文件"
+            if not self._confirm_bulk(
+                    medias, "删除源文件",
+                    "⚠️ 会把下列视频文件**移到回收站**（仍可从回收站还原），"
+                    "并把它们从索引里移除。\n同目录的 nfo / 图片不会动。\n\n"
+                    + names + more):
+                return
+            ok_paths, failed = self._recycle_paths([m.get("file_path") for m in targets])
+            ok_set = set(ok_paths)
+            ids = []
+            for m in targets:
+                fp = m.get("file_path") or ""
+                if fp in ok_set or not os.path.exists(fp):
+                    mid = m.get("id")
+                    if mid is None:
+                        continue
+                    try:
+                        db.delete_media(mid)
+                        ids.append(mid)
+                    except Exception:
+                        applog.log(f"删除索引失败 id={mid}", "error")
+            for m in missing:                       # 本来就没有路径，只清索引
+                mid = m.get("id")
+                if mid is not None:
+                    try:
+                        db.delete_media(mid)
+                        ids.append(mid)
+                    except Exception:
+                        pass
+            if page is not None:
+                page.drop_ids(ids)
+            self._refresh_stats()
+            if failed:
+                QMessageBox.warning(
+                    self, "删除源文件",
+                    "以下文件没能移入回收站（可能不在 NTFS 盘、是网络路径，"
+                    "或正被其他程序占用），**没有删除**：\n\n"
+                    + "\n".join("· " + os.path.basename(p) for p in failed[:10])
+                    + ("" if len(failed) <= 10 else f"\n… 另外 {len(failed) - 10} 个"))
+            else:
+                self._toast(f"已移入回收站 {len(ok_paths)} 个文件" if ok_paths else "没有文件需要删除")
+
+    def _confirm_bulk(self, medias, title, text):
+        """批量操作确认框：列出受影响条目，**默认按钮固定在「取消」**（防手滑）。"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(title)
+        box.setText(text)
+        n = len(medias or [])
+        if n > 1:
+            box.setInformativeText(f"共 {n} 项。")
+        yes = box.addButton("确定", QMessageBox.DestructiveRole)
+        no = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(no)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def _recycle_paths(self, paths):
+        """把文件**移到回收站**（不是永久删除）。返回 (成功路径, 失败路径)。
+
+        用 SHFileOperationW + FOF_ALLOWUNDO：删错了还能从回收站捞回来。
+        网络盘 / FAT 盘没有回收站，调用会返回非 0 → 记进 failed，绝不改成硬删。
+        """
+        import ctypes
+        from ctypes import wintypes as wt
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [("hwnd", wt.HWND),
+                        ("wFunc", wt.UINT),
+                        ("pFrom", ctypes.c_wchar_p),
+                        ("pTo", ctypes.c_wchar_p),
+                        ("fFlags", ctypes.c_uint16),
+                        ("fAnyOperationsAborted", wt.BOOL),
+                        ("hNameMappings", ctypes.c_void_p),
+                        ("lpszProgressTitle", ctypes.c_wchar_p)]
+
+        FO_DELETE = 3
+        FOF_SILENT = 0x0004
+        FOF_NOCONFIRMATION = 0x0010
+        FOF_ALLOWUNDO = 0x0040
+        FOF_NOERRORUI = 0x0400
+
+        ok, failed = [], []
+        for p in (paths or []):
+            if not p:
+                continue
+            if not os.path.exists(p):
+                ok.append(p)            # 文件本来就不在了 → 索引可以清
+                continue
+            # pFrom 必须是**双 null 结尾**：create_unicode_buffer 自带一个结尾 null，
+            # 内容里再补一个 → "路径\0\0"。直接把 str 赋给 c_wchar_p 会在第一个 \0 截断。
+            keep = ctypes.create_unicode_buffer(p + "\x00")
+            op = SHFILEOPSTRUCTW()
+            op.hwnd = None
+            op.wFunc = FO_DELETE
+            op.pFrom = ctypes.cast(keep, ctypes.c_wchar_p)
+            op.pTo = None
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
+            try:
+                rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+            except Exception:
+                rc = -1
+            if rc == 0 and not op.fAnyOperationsAborted:
+                ok.append(p)
+            else:
+                applog.log(f"删除源文件失败 rc={rc}：{p}", "error")
+                failed.append(p)
+        return ok, failed
 
     def _view_recent(self):
         return self._page("最近播放 / 最近添加", self._grid(db.recent(60)))
@@ -4091,7 +4675,7 @@ class MainWindow(QMainWindow):
         hint = QLabel("提示：点卡片进入该目录的影片墙；在卡片上点右键，可「扫描新添加和修改的 / "
                       "扫描全部补充缺失 / 扫描全部并覆盖 / 扫描并删除失效的」，扫描前会先统计数量"
                       "供你确认，并显示进度。目录不存在的卡片会在封面右上角标红「!」。")
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         hint.setWordWrap(True)
         v.addWidget(hint)
         return self._page(f"文件夹（{len(entries)}）", w)
@@ -4180,7 +4764,7 @@ class MainWindow(QMainWindow):
         hint = QLabel("提示：每个合集一张卡片，封面由该合集前 2 部作品的海报拼贴而成；"
                       "点卡片进入该合集的影片墙（与「我的收藏」同一套分页 / 筛选 / 排序）。"
                       "合集较多时按批加载，滚动到接近底部自动继续。")
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         hint.setWordWrap(True)
         v.addWidget(hint)
         return self._page(f"合集（{len(cols)}）", w)
@@ -4226,7 +4810,7 @@ class MainWindow(QMainWindow):
         v.addWidget(grid)
         hint = QLabel("头像+作品数/别名卡片 · 不显示生日/出身地/身高/胸围/三围/简介（导演资料里本就没有） · "
                       "☆收藏 · 右上角▲置顶 · 双击查看作品")
-        hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        hint.setStyleSheet("color:#71717a;font-size:11px;")
         v.addWidget(hint)
         # v1.24.1（反馈 3）：记住「当前人物页」是导演库，收藏 / 置顶后原地重建这一页
         self._people_builder = self._view_directors
@@ -4245,7 +4829,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         v = QVBoxLayout(page); v.setSpacing(10)
         self._smart_tip = QLabel("正在按「我的收藏」的标签与「演员库」里收藏的演员生成推荐…")
-        self._smart_tip.setStyleSheet("color:#c9bda7;font-size:12px;")
+        self._smart_tip.setStyleSheet("color:#d4d4d8;font-size:12px;")
         self._smart_tip.setWordWrap(True)
         v.addWidget(self._smart_tip)
         self._smart_bar = QProgressBar()
@@ -4361,7 +4945,7 @@ class MainWindow(QMainWindow):
         兜底（见 `_smart_wall`），窄屏下 info 允许省略、输入框优先。
         """
         lb = QLabel("引导向量")
-        lb.setStyleSheet("color:#c9bda7;font-size:12px;")
+        lb.setStyleSheet("color:#d4d4d8;font-size:12px;")
         row.addWidget(lb)
 
         self.guide_edit = QLineEdit()
@@ -4439,7 +5023,7 @@ class MainWindow(QMainWindow):
 
         self.guide_state = QLabel("—")
         self.guide_state.setObjectName("guide_state")
-        self.guide_state.setStyleSheet("color:#8c8071;font-size:11px;")
+        self.guide_state.setStyleSheet("color:#71717a;font-size:11px;")
         self.guide_state.setToolTip("引导向量的当前状态")
         self.guide_state.setWordWrap(True)
         rv.addWidget(self.guide_state)
@@ -4487,7 +5071,7 @@ class MainWindow(QMainWindow):
             hl.setSpacing(6)
             dim_cn = rec_mod.dim_cn(g.get("dim") or "")
             lb = QLabel(f"{dim_cn}「{g.get('key') or ''}」× {float(g.get('weight') or 0):g}")
-            lb.setStyleSheet("color:#e8d27a;font-size:11px;")
+            lb.setStyleSheet("color:#8fc0ff;font-size:11px;")
             hl.addWidget(lb)
             x = compact_button("×", 20, 18, "移除这条引导")
             x.clicked.connect(lambda _c=False, t=tok: self._remove_guide(t))
@@ -4652,7 +5236,7 @@ class MainWindow(QMainWindow):
             f"<b>{algo_cn}</b> · 依据 {meta.get('favorites', 0)} 部收藏影片"
             f"（{meta.get('liked', 0)} 部高分） + {meta.get('fav_people_n', 0)} 位收藏的演员/导演"
             f" · 候选 {res.get('pool', 0):,} 部")
-        info.setStyleSheet("color:#c9bda7;font-size:12px;")
+        info.setStyleSheet("color:#d4d4d8;font-size:12px;")
         # v1.35.1：摘要 info **独占一行**（原先在工具行里）。
         # 根因：`QLabel.minimumSizeHint()` 恒等于整段文本宽度、不肯缩；而
         # `setMinimumWidth(0)` 在 Qt 里**等于没设**（0 是默认值，函数无法区分
@@ -4690,7 +5274,7 @@ class MainWindow(QMainWindow):
         else:
             tip = res.get("empty") or "暂时没有推荐结果。"
             lb = QLabel(tip); lb.setWordWrap(True)
-            lb.setStyleSheet("color:#e8d27a;font-size:12px;")
+            lb.setStyleSheet("color:#8fc0ff;font-size:12px;")
             v.addWidget(lb)
 
         top = res.get("profile_top") or []
@@ -4699,13 +5283,13 @@ class MainWindow(QMainWindow):
             bits = [f"{dims.get(t[0], '?')}「{t[2:]}」" for t, _w in top[:14]]
             basis = QLabel("当前偏好向量权重最高的项：" + "、".join(bits))
             basis.setWordWrap(True)
-            basis.setStyleSheet("color:#8c8071;font-size:11px;")
+            basis.setStyleSheet("color:#71717a;font-size:11px;")
             v.addWidget(basis)
         hint = QLabel("鼠标悬停在卡片上可以看到「为什么推荐它」。"
                       "想让推荐更准：给更多片子点 ☆，或在「演员库 / 导演库」里收藏你喜欢的演员与导演；"
                       "也可以到「工具 → 智能推荐」切换普通 / AI 算法，或用「向量编辑」手动加权重。")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        hint.setStyleSheet("color:#71717a;font-size:11px;")
         v.addWidget(hint)
         return self._page(f"智能推荐（{len(picks)} 部）", w)
 
@@ -4745,7 +5329,7 @@ class MainWindow(QMainWindow):
         v.addWidget(bar)
         v.addWidget(grid)
         hint = QLabel("头像+信息卡片 · 现役绿/退役黄 · ☆收藏 · 右上角▲置顶 · 单击选中 / 双击查看")
-        hint.setStyleSheet("color:#8c8071;font-size:11px;")
+        hint.setStyleSheet("color:#71717a;font-size:11px;")
         v.addWidget(hint)
         # v1.24.1（反馈 3）：进入演员库 → 收藏/置顶后就重建演员库（别重建到导演库去）
         self._people_builder = self._view_actors
@@ -4868,7 +5452,7 @@ class MainWindow(QMainWindow):
         info.addLayout(name_row)
         if p.get("alias"):
             al = QLabel("别名：" + str(p["alias"]))
-            al.setWordWrap(True); al.setStyleSheet("color:#d4af37;")
+            al.setWordWrap(True); al.setStyleSheet("color:#66a9ff;")
             info.addWidget(al)
         # 状态（现役 / 退役 / 未知）手动切换；未手动设置的按「作品年份」推断
         st = (p.get("status") or "").strip()
@@ -4876,7 +5460,7 @@ class MainWindow(QMainWindow):
         stat_row = QHBoxLayout()
         stat_row.setSpacing(6)
         stat_lbl = QLabel("状态：")
-        stat_lbl.setStyleSheet("color:#a2967f;")
+        stat_lbl.setStyleSheet("color:#a1a1aa;")
         stat_row.addWidget(stat_lbl)
         for val, txt in (("现役", "现役"), ("退役", "退役"), ("", "未知")):
             # v1.23.0（反馈 1）：改用 compact_button。全局 QPushButton{padding:7px 14px} 会把
@@ -4887,7 +5471,7 @@ class MainWindow(QMainWindow):
             stat_row.addWidget(b)
         hint = QLabel("当前判定：%s%s" % (shown or "未知",
                                     "（手动）" if st else "（按作品年份推断）"))
-        hint.setStyleSheet("color:#a2967f;font-size:11px;")
+        hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         stat_row.addWidget(hint)
         stat_row.addStretch(1)
         info.addLayout(stat_row)
@@ -4925,13 +5509,13 @@ class MainWindow(QMainWindow):
             b = QLabel(str(p["bio"])); b.setWordWrap(True); info.addWidget(b)
         if p.get("source"):
             src = QLabel(f"资料补全：{p.get('source')}　{p.get('scraped_at') or ''}")
-            src.setStyleSheet("color:#a2967f;font-size:11px;")
+            src.setStyleSheet("color:#a1a1aa;font-size:11px;")
             src.setWordWrap(True)
             info.addWidget(src)
         info.addItem(QSpacerItem(10, 10, QSizePolicy.Minimum, QSizePolicy.Expanding))
         head.addLayout(info)
         v.addWidget(hw)
-        t = QLabel("全部作品"); t.setStyleSheet("font-size:16px;font-weight:bold;color:#f3d9a0;")
+        t = QLabel("全部作品"); t.setStyleSheet("font-size:16px;font-weight:bold;color:#ecedee;")
         v.addWidget(t)
         v.addWidget(self._grid(works))
         return self._page(None, w)
@@ -5014,18 +5598,19 @@ class MainWindow(QMainWindow):
         root = QFileDialog.getExistingDirectory(self, "选择媒体库根目录")
         if not root:
             return
-        self._toast(f"正在扫描: {root}")
         # 顶栏的「扫描媒体库」不指定库名 → 反查这个目录属于哪个媒体库，好把进度环挂到它旁边
         name = self._lib_for_path(root)
         if name:
             self._lib_ring(name, True, 0, f"正在扫描：{root}")
+        self._scan_begin(name or os.path.basename(root.rstrip("\\/")), 1)
         self._worker = ScanWorker([root], library_name=name)
-        self._worker.progress.connect(lambda m: self._toast(m))
+        self._worker.progress.connect(self._on_scan_msg)
         self._worker.tick.connect(
-            lambda d, t, m, N=name: N and self._lib_ring(N, True, (100 * d / t) if t else 0, m))
+            lambda d, t, m, N=name: self._on_scan_tick(N, d, t, m))
         self._worker.live.connect(self._on_scan_live)
         self._worker.done.connect(
-            lambda c, N=name: (N and self._lib_ring(N, False), self._on_scan_done(c)))
+            lambda c, N=name: (N and self._lib_ring(N, False), self._scan_end(),
+                               self._on_scan_done(c)))
         self._worker.start()
 
     def _lib_for_path(self, path):
@@ -5051,20 +5636,28 @@ class MainWindow(QMainWindow):
                 self, "提示",
                 f"媒体库「{lib['name']}」尚未设置媒体文件夹，请先右键「编辑」添加。")
             return
-        self._toast(
-            f"正在扫描：{lib['name']}（{self._MODE_CN.get(mode, mode)}）")
+        # v1.46.13：不再弹「正在扫描：…」的 toast —— 底部状态栏那条常驻文字已经
+        # 把库名 + 模式 + 路径数都写上了，两处并排会显得重复，而且 toast 4s 后消失
+        # 会让旁边那行文字左右跳一下。
         applog.log(f"扫描：{lib['name']} mode={mode} paths={paths}")
         name = lib["name"]
         self._lib_ring(name, True, 0, f"正在扫描「{name}」…")
+        # v1.46.13（反馈 1/2/3）：paths 保持媒体库配置里的原顺序（=「编辑媒体库」里的
+        # 「顺序即扫描优先级，自上而下依次扫描」），ScanWorker 逐条串行、一条扫完才下一条。
+        self._scan_begin(name, len(paths), self._MODE_CN.get(mode, mode))
         self._worker = ScanWorker(paths, library_name=name, mode=mode)
-        self._worker.progress.connect(lambda m: self._toast(m))
+        # 逐条文字只弹异常/回退（正常条目由底部状态栏显示，不再每秒刷 toast）
+        self._worker.progress.connect(self._on_scan_msg)
         # v1.24.0（反馈 11）：进度环跟着扫描走 —— 库名旁边转圈 + 显示百分比
+        # v1.46.13：同一个信号顺便驱动底部「扫描情况」文字 + 进度条
         self._worker.tick.connect(
-            lambda d, t, m: self._lib_ring(name, True, (100 * d / t) if t else 0, m))
+            lambda d, t, m, N=name: self._on_scan_tick(N, d, t, m))
         # v1.38.0 修复反馈：依次扫描过程中也要实时刷新首页数量（侧栏库名（N）/统计/首页列表）
+        # v1.46.13（反馈 2）：并且要**边扫边把新片显示出来**，不等某一路径 / 全部扫完
         self._worker.live.connect(self._on_scan_live)
         self._worker.done.connect(
-            lambda c, n=name: (self._lib_ring(n, False), self._on_cat_scan_done(c, n)))
+            lambda c, n=name: (self._lib_ring(n, False), self._scan_end(),
+                               self._on_cat_scan_done(c, n)))
         self._worker.start()
 
     def _on_cat_scan_done(self, counts, name):
@@ -5153,14 +5746,49 @@ class MainWindow(QMainWindow):
         dlg.activateWindow()
 
     def _on_scan_live(self):
-        """扫描进行中：就地刷新侧栏计数，若首页正在显示则同步刷新（v1.22.0 反馈 4）。
+        """扫描进行中：就地刷新侧栏计数 + 当前页（首页列表 / 影片墙）。
 
-        新索引的影片会立刻出现在首页，不必等整个扫描跑完。
+        v1.22.0（反馈 4）起只刷首页；v1.46.13（反馈 2）补上**影片墙** —— 原来站在媒体库
+        页面看扫描，卡片一张都不会动，必须等整条路径扫完（甚至全部扫完）切页才出现。
         """
         self._refresh_stats()          # 左侧媒体库「（N）」实时更新
         cur = self.stack.currentWidget()
         if isinstance(cur, HomeListView):
             cur.live_refresh()
+            return
+        grid = None
+        try:
+            inner = cur.widget() if isinstance(cur, QScrollArea) else cur
+            grid = getattr(inner, "lazy_grid", None) if inner is not None else None
+            # ⚠ 影片墙的网格**不在** scroll.widget() 上：`_page()` 把 body（w，
+            # w.lazy_grid = grid）再套进一层 host 放进滚动区 → 从 inner 上取恒为 None
+            # （`_apply_settings` 里那段同款判断其实一直是空转）。这里补一条 findChildren，
+            # 与 `_page()` 自己挂滚动条用的是同一条找法。
+            if grid is None and inner is not None:
+                found = inner.findChildren(LazyGrid)
+                grid = found[0] if found else None
+        except Exception:
+            grid = None
+        if grid is None or not hasattr(grid, "live_reload"):
+            return
+        # 影片墙重建一窗卡要查一次库（count + 一屏 54 行 + 建卡），节流到 2.0s ——
+        # scanner 的 live 是 1.2s 一次，两者错开成「约每 2.4s 换一窗」，够实时又不抢 CPU
+        now = time.monotonic()
+        if now - getattr(self, "_wall_live_at", 0.0) < 2.0:
+            return
+        self._wall_live_at = now
+        try:
+            grid.live_reload()
+        except Exception:
+            return
+        # 标题里的「（N 部）」跟着走 —— 侧栏计数已经刷了，标题不刷会与它矛盾
+        try:
+            lbl = getattr(cur, "title_lbl", None)
+            tpl = getattr(cur, "title_tpl", None)
+            if lbl is not None and tpl:
+                lbl.setText(f"{tpl[0]}（{grid.total} {tpl[1]}）")
+        except Exception:
+            pass
 
     def _on_scan_done(self, counts):
         if counts.get("error"):
@@ -5241,7 +5869,9 @@ class MainWindow(QMainWindow):
             self._refresh_stats()
             return
         lib = self._bg_queue.pop(0)
-        w = ScanWorker(lib.get("paths", []), library_name=lib["name"], mode="new")
+        # v1.46.13：后台定时扫描没有界面 → quiet=True，不算百分比、不发 tick（省掉空转）
+        w = ScanWorker(lib.get("paths", []), library_name=lib["name"], mode="new",
+                       quiet=True)
         w.done.connect(lambda c: self._bg_scan_next())
         # v1.38.0 修复反馈：后台定时扫描也要实时刷新首页数量
         w.live.connect(self._on_scan_live)
@@ -5281,7 +5911,7 @@ class MainWindow(QMainWindow):
         """
         try:
             _p = QPainter(self)
-            _p.fillRect(self.rect(), QColor(13, 11, 10))
+            _p.fillRect(self.rect(), QColor(10, 10, 11))
             _p.end()
         except Exception:
             pass

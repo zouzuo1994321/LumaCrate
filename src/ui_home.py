@@ -9,6 +9,7 @@
 底部状态栏：已选 N 项 · 总大小。
 """
 import os
+import time
 
 from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtGui import QCursor, QGuiApplication
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QPushButton,
     QDialog, QScrollArea, QListWidget, QListWidgetItem, QFrame,
-    QAbstractItemView, QApplication,
+    QAbstractItemView, QApplication, QMenu,
 )
 
 import database as db
@@ -109,7 +110,7 @@ class HoverPreview(QFrame):
         self.img = QLabel()
         self.img.setFixedSize(self.CARD_W - 18, self.IMG_H)
         self.img.setAlignment(Qt.AlignCenter)
-        self.img.setStyleSheet("background:#0d0b0a;border-radius:6px;")
+        self.img.setStyleSheet("background:#0a0a0b;border-radius:6px;")
         v.addWidget(self.img, alignment=Qt.AlignHCenter)
 
         self.title = QLabel()
@@ -187,7 +188,8 @@ class HoverPreview(QFrame):
 
 class HomeListView(QWidget):
     def __init__(self, on_open_actor=None, on_open_media=None, on_hover_media=None,
-                 on_changed=None, on_person_replaced=None, on_open_actors=None):
+                 on_changed=None, on_person_replaced=None, on_open_actors=None,
+                 on_bulk_action=None):
         super().__init__()
         self.on_open_actor = on_open_actor
         self.on_open_media = on_open_media
@@ -197,6 +199,10 @@ class HomeListView(QWidget):
         # v1.43.1（反馈 4）：「更多 → 查看演员库」。**首页右侧详情也是 HeroView**，
         # v1.43.0 只给详情页那处传了回调，首页这处漏了 → 用户点菜单仍然没反应。
         self.on_open_actors = on_open_actors
+        # v1.46.11（反馈 1）：列表右键批量操作。真正的动作（播放 / 打开文件夹 /
+        # 刷新 / 删索引 / 删文件）都在主窗口里做 —— 那里有 _toast、统计刷新与
+        # 确认框，页面本身只管「哪几行被选中」与「把菜单画出来」。
+        self.on_bulk_action = on_bulk_action
         self._detail_mid = None                  # 当前详情面板展示的作品 id（v1.21.1 反馈 4）
         self._media = []
         self._view = []
@@ -271,6 +277,9 @@ class HomeListView(QWidget):
         self.table.itemSelectionChanged.connect(self._on_select)
         self.table.itemDoubleClicked.connect(self._on_open)
         self.table.cellEntered.connect(self._on_cell_entered)
+        # v1.46.11（反馈 1）：列表右键菜单（单选 / 多选都走同一个构建器）
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.viewport().installEventFilter(self)
         self.table.verticalScrollBar().valueChanged.connect(self._hide_preview)
         self.table.horizontalScrollBar().valueChanged.connect(self._hide_preview)
@@ -435,14 +444,25 @@ class HomeListView(QWidget):
         """扫描进行中就地刷新：重新拉取列表数据，让新索引的影片立刻出现在首页（v1.22.0 反馈 4）。
 
         由 MainWindow._on_scan_live 在扫描进度信号触发时调用（已做节流）。
+
+        v1.46.13（反馈 2）：**按实测耗时自适应节流**。`_load()` 是同步读全库
+        （`search_media(limit=100000)`，4.8 万片实测 1~2 秒），如果固定 1.2s 就触发，
+        GUI 线程会被这条重载一直占满 —— 用户看到的反而是「扫描期间界面卡着不动」。
+        现在记下这次耗时，下次至少等 `max(1.2, 耗时×3)` 秒（上限 8s）才允许再刷。
         """
         if getattr(self, "_live_loading", False):
+            return
+        now = time.monotonic()
+        if now < getattr(self, "_live_next_at", 0.0):
             return
         self._live_loading = True
         try:
             sb = self.table.verticalScrollBar()
             pos = sb.value() if sb is not None else 0
+            t0 = time.monotonic()
             self._load()
+            cost = time.monotonic() - t0
+            self._live_next_at = time.monotonic() + max(1.2, min(8.0, cost * 3.0))
             # 填表是分批异步的，稍后把滚动位置还原，尽量不打断用户视线
             QTimer.singleShot(60, lambda: (self.table.verticalScrollBar().setValue(pos)
                                            if self.table.verticalScrollBar() is not None else None))
@@ -562,7 +582,12 @@ class HomeListView(QWidget):
         for c, key in enumerate(self._cols):
             item = QTableWidgetItem(self._col_value(m, key))
             item.setData(Qt.UserRole, m)          # 每列都挂上，列换位后仍可取到
-            item.setToolTip(self._col_value(m, key))
+            # v1.46.11（反馈 2）：这里**故意不再 setToolTip**。
+            # 原来看每个单元格都挂了 tooltip，鼠标在一行上停够 ~1s 后系统 tooltip
+            # 就会弹出来 —— 它和下面的自定义悬停卡**同时存在、互相压着**
+            # （用户截图里的「叠加显示」就是这两层：一行标题的 tooltip + 整张信息卡）。
+            # 悬停卡已经给了标题 / 评分年份时长 / 演员 / 类型 / 制片 / 上映，
+            # 其余字段在右侧详情里都有，所以直接去掉，只留一张卡。
             self.table.setItem(i, c, item)
 
     # ---------- 悬停缩略图 ----------
@@ -801,6 +826,134 @@ class HomeListView(QWidget):
         if m and self.on_open_media:
             self.on_open_media(m)
 
+    # ---------- 右键批量操作（v1.46.11 反馈 1） ----------
+    #: (动作键, 菜单文字)。None 表示分隔线。菜单顺序就是这里的顺序。
+    BULK_ITEMS = (
+        ("play",         "播放选中视频"),
+        ("folder",       "打开视频文件夹"),
+        None,
+        ("refresh",      "刷新数据"),
+        None,
+        ("delete_index", "删除数据"),
+        ("delete_files", "删除源文件"),
+    )
+
+    def selected_medias(self):
+        """当前选中的作品（按行号顺序、按 id 去重）。单选 / Ctrl 多选 / Shift 全选都走这里。"""
+        try:
+            rows = sorted(r.row() for r in self.table.selectionModel().selectedRows())
+        except (RuntimeError, AttributeError):
+            return []
+        out, seen = [], set()
+        for r in rows:
+            m = row_media(self.table, r)
+            if not m:
+                continue
+            mid = m.get("id")
+            if mid in seen:
+                continue
+            seen.add(mid)
+            out.append(m)
+        return out
+
+    def _on_context_menu(self, pos):
+        idx = self.table.indexAt(pos)
+        if not idx.isValid():
+            return
+        # 右键落在「已选中的行」上 → 保留整片选择（多选批量操作）；
+        # 落在别处 → 先把选择切到这一行（跟资源管理器一致）。
+        sel_rows = {r.row() for r in self.table.selectionModel().selectedRows()}
+        if idx.row() not in sel_rows:
+            self.table.clearSelection()
+            self.table.selectRow(idx.row())
+        medias = self.selected_medias()
+        if not medias:
+            return
+        self._hide_preview()        # 菜单和悬停卡别叠在一起
+        menu = self._build_context_menu(medias)
+        try:
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
+
+    def _build_context_menu(self, medias):
+        """按选中数量构建菜单。**独立成方法**，离屏冒烟可直接断言条目与文案。"""
+        n = len(medias or [])
+        suffix = "" if n <= 1 else f"（{n} 项）"
+        menu = QMenu(self)
+        menu.setObjectName("BulkMenu")
+        actions = {}
+        for spec in self.BULK_ITEMS:
+            if spec is None:
+                menu.addSeparator()
+                continue
+            key, label = spec
+            act = menu.addAction(label + suffix)
+            if key == "delete_files":
+                act.setObjectName("DangerAction")
+            actions[key] = act
+        menu._actions_by_key = actions        # 便于测试/自动化取用
+        for key, act in actions.items():
+            # 默认参数固定住 key，否则闭包在循环结束后全指向最后一个
+            act.triggered.connect(lambda _c=False, k=key, ms=medias: self._run_bulk(k, ms))
+        return menu
+
+    def _run_bulk(self, action, medias):
+        if not self.on_bulk_action:
+            return
+        try:
+            self.on_bulk_action(action, list(medias or []))
+        except Exception:
+            import traceback
+            import applog
+            applog.log("列表批量操作失败：%s\n%s" % (action, traceback.format_exc()), "error")
+
+    # ---------- 批量结果回写（供主窗口调用） ----------
+    def drop_ids(self, ids):
+        """从列表里移除若干作品（删除索引 / 删除源文件之后调用）。
+
+        只删这几行 + 同步 `_media` / `_view` 两个缓存，**不整表重建** ——
+        4.8 万行重建一次要好几秒，删 3 项却卡半天不值。
+        """
+        ids = {i for i in (ids or []) if i is not None}
+        if not ids:
+            return
+        self._media = [m for m in self._media if m.get("id") not in ids]
+        self._view = [m for m in self._view if m.get("id") not in ids]
+        self.table.setUpdatesEnabled(False)
+        try:
+            for r in range(self.table.rowCount() - 1, -1, -1):
+                m = row_media(self.table, r)
+                if m and m.get("id") in ids:
+                    self.table.removeRow(r)
+        finally:
+            self.table.setUpdatesEnabled(True)
+        if self._detail_mid in ids:
+            self._detail_mid = None
+            self._show_detail(None)
+        else:
+            self._on_select()
+
+    def refresh_ids(self, ids):
+        """重新从库里读回这几行并就地重画（右键「刷新数据」）。返回真正刷到的条数。"""
+        ids = {i for i in (ids or []) if i is not None}
+        if not ids:
+            return 0
+        hit = 0
+        for i, m in enumerate(self._view):
+            if m.get("id") not in ids:
+                continue
+            try:
+                full = db.get_media(m["id"])
+            except Exception:
+                full = None
+            if full:
+                m.update(full)          # dict 是共享的 → _media 里那份也一起更新
+                self._set_row(i, m)
+                hit += 1
+        self._on_select()
+        return hit
+
     # ---------- 列设置 ----------
     def _open_col_settings(self):
         self._hide_preview()
@@ -835,7 +988,7 @@ class ColumnSettingsDialog(QDialog):
         v.setSpacing(8)
         v.addWidget(QLabel("勾选需要在首页表格中显示的列（「标题」始终显示）。"))
         hint = QLabel("按住鼠标左键拖动条目即可调整列的排列顺序，确定后立即生效。")
-        hint.setStyleSheet("color:#9b8a72;")
+        hint.setStyleSheet("color:#a1a1aa;")
         hint.setWordWrap(True)
         v.addWidget(hint)
 

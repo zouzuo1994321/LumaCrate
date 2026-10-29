@@ -124,6 +124,22 @@ def _genre_list(root: ET.Element):
     return out
 
 
+def _tag_list(root: ET.Element):
+    """`<tag>` 多值节点 → 去重保序列表（v1.46.9 反馈 3）。
+
+    Kodi / Emby / tinyMediaManager 都把「标签」存成多个 `<tag>xxx</tag>`；
+    与 `<genre>`（类型）是两回事 —— 详情页的标签行增删的就是这一组节点。
+    """
+    out, seen = [], set()
+    for el in root.findall("tag"):
+        t = (el.text or "").strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
 def _premiere(root: ET.Element):
     """上映日期：<premiered> / <release> 归一化为 YYYY-MM-DD。"""
     p = _text(root, "premiered") or _text(root, "release")
@@ -205,6 +221,7 @@ def parse_movie(nfo_path: str) -> dict:
         "poster": _local_image(d, _text(root, "thumb")) or _local_image(d, "poster.jpg"),
         "fanart": _local_image(d, _text(root, "fanart")) or _local_image(d, "fanart.jpg"),
         "genres": ",".join(_genre_list(root)),
+        "tags": ",".join(_tag_list(root)),
         "actors": _parse_actors(root, d),
         "directors": _parse_directors(root),
         "nfo_path": nfo_path,
@@ -236,6 +253,7 @@ def parse_tvshow(nfo_path: str) -> dict:
         "poster": _local_image(d, _text(root, "thumb")) or _local_image(d, "poster.jpg"),
         "fanart": _local_image(d, _text(root, "fanart")) or _local_image(d, "fanart.jpg"),
         "genres": ",".join(_genre_list(root)),
+        "tags": ",".join(_tag_list(root)),
         "actors": _parse_actors(root, d),
         "directors": _parse_directors(root),
         "nfo_path": nfo_path,
@@ -365,20 +383,46 @@ def write_genres(nfo_path: str, genres) -> bool:
     这样文件其它部分（演员 / 评分 / 图片引用 / 简介 / uniqueid…）连缩进都不受影响。
     传空列表即清空标签（节点全部移除，不留空 `<genre/>`）。返回是否写入成功。
     """
+    return _write_multi_nodes(nfo_path, "genre", genres)
+
+
+def read_tags(nfo_path: str):
+    """读出 nfo 里全部 `<tag>`（v1.46.9 反馈 3，详情页标签行用）。"""
+    if not nfo_path or not os.path.exists(nfo_path):
+        return []
+    try:
+        root = _strip_root(ET.parse(nfo_path).getroot())
+    except Exception:
+        return []
+    return _tag_list(root)
+
+
+def write_tags(nfo_path: str, tags) -> bool:
+    """把「标签」写回 nfo 的 `<tag>` 节点（与 `write_genres` 同一套原地改法）。
+
+    只动 `<tag>`，其余节点（含 `<genre>`/演员/简介/缩进）保持原样；
+    传空列表即清空。文件不存在或解析失败返回 False（调用方据此提示，
+    但数据库那侧仍会照常更新 —— 索引与界面先一致，别让用户以为没生效）。
+    """
+    return _write_multi_nodes(nfo_path, "tag", tags)
+
+
+def _write_multi_nodes(nfo_path: str, tag: str, values) -> bool:
+    """把多值节点 `<tag>` 整体替换掉，插回**原来第一个**的位置（保持文件结构）。"""
     if not nfo_path or not os.path.exists(nfo_path):
         return False
-    items = [str(g).strip() for g in (genres or []) if str(g).strip()]
+    items = [str(g).strip() for g in (values or []) if str(g).strip()]
     try:
         tree = ET.parse(nfo_path)
         root = tree.getroot()
         kids = list(root)
-        first = next((i for i, el in enumerate(kids) if _strip_ns(el.tag) == "genre"), None)
+        first = next((i for i, el in enumerate(kids) if _strip_ns(el.tag) == tag), None)
         for el in kids:
-            if _strip_ns(el.tag) == "genre":
+            if _strip_ns(el.tag) == tag:
                 root.remove(el)
         pos = len(list(root)) if first is None else min(first, len(list(root)))
         for off, g in enumerate(items):
-            el = ET.Element("genre")
+            el = ET.Element(tag)
             el.text = g
             root.insert(pos + off, el)
         try:
