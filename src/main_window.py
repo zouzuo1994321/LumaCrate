@@ -1815,18 +1815,21 @@ class LazyGrid(QWidget):
 
 
 class ScanWorker(QThread):
-    """扫描媒体库（v1.46.13 重写进度口径）。
+    """扫描媒体库（v2.0.5 重写进度口径：**按路径逐条「统计 → 扫描」**）。
 
-    三条反馈都落在这个类上：
-      ① 「扫描新添加和修改的」要**按媒体库「路径」列表自上而下逐条扫** —— `run()` 就是
+    四条反馈都落在这个类上：
+      ① （v1.46.13）**按媒体库「路径」列表自上而下逐条扫** —— `run()` 就是
          `for i, p in enumerate(roots, 1)`，一条扫完才轮到下一条，顺序与「编辑媒体库」里
-         的 ↑↓ 完全一致，不快排、不并发；每条开始都上报「路径 i/n」，让用户看得见顺序。
-      ② 新片要**边扫边出现**（不等某一路径扫完、更不等全部扫完）—— 每索引一个新条目就把
-         `live` 的「待刷新」标脏，节流 1.2s 发一次；没有任何新片时不发，免得白刷整页。
-      ③ 底部要显示扫描情况 + 进度 —— `tick(已完成, 预估总数, 文案)` 每 0.25s 发一次
-         （旧版是按「进度消息条数」算，而消息只在**新增**时才发 → 百分比几乎永远 0%，
-         用户看到的就是「环形一直空着」）。现在分子来自 scanner 的 `on_item`，**每个
-         处理过的文件都算**，与分母（视频文件总数）同口径。
+         的 ↑↓ 完全一致，不快排、不并发。
+      ② （v2.0.5）**统计也跟着路径走** —— 旧版一进 `run()` 就先把**全部路径**数一遍
+         （4.8 万片要几十秒），于是分母恒是全局总数：扫到第 5 条路径时底部写着
+         `13769/48313`，既看不出这条路径还剩多少，还得在第一条路径开始前先干等一遍。
+         现在每条路径先数自己、再扫自己，扫完这条才数下一条。
+      ③ 新片 / 变更要**边扫边出现** —— 每个条目落库后按 state 判脏，节流 1.2s 发一次
+         `live`；**每条路径扫完再强制发一次**。旧版只认「新增」，于是「全部并覆盖」
+         改了标题 / 海报 / 评分也不刷新首页，用户以为没生效。
+      ④ 底部要显示扫描情况 + 进度 —— `tick(本条已处理, 本条总数, 文案)` 每 0.25s 一次；
+         分子来自 scanner 的 `on_item`（每个处理过的文件都算），与分母同口径。
     """
 
     progress = Signal(str)
@@ -1835,6 +1838,7 @@ class ScanWorker(QThread):
     # v1.24.0（反馈 11）：结构化进度 (已完成条目数, 预估总条目数, 当前消息)
     # —— 侧边栏媒体库名旁的圆形进度环用它显示「正在刷新 + 百分比」；
     # v1.46.13 起底部状态栏的「扫描情况」文字 + 进度条也吃这个信号（total=0 表示不定长）。
+    # v2.0.5：分子分母都改成**当前这条路径**的，换路径时从 0 重新起算。
     tick = Signal(int, int, str)
 
     def __init__(self, paths, library_name=None, mode="overwrite",
@@ -1845,45 +1849,79 @@ class ScanWorker(QThread):
         self.mode = mode
         self._last_live = 0.0
         self._last_tick = 0.0
-        self._done = 0            # 累计已处理条目数（新增 + 已存在）
-        self._new = 0             # 本次真正新增的条目数
-        self._new_since_live = 0  # 上次 live 之后又新索引了多少（0 就不用刷界面）
+        self._done = 0            # 整个任务累计已处理条目数（新增 + 变更 + 未变）
+        self._new = 0             # 累计新增
+        self._changed = 0         # 累计内容有变（含「全部并覆盖」改写的）
+        self._gone = 0            # 累计减少（索引里有、这一遍在磁盘上没见到）
+        self._dirty = False       # 上次 live 之后有没有值得重画的变化
+        self._path_done = 0       # 本条路径已处理
+        self._path_total = 0      # 本条路径的视频文件总数（分母，只数这一条）
+        self._path_unreadable = False   # 本条路径整条读不了（盘没插 / 权限不足）
+        self._touched = set()     # 本条路径这一遍实际见到的文件（算「减少」用）
         self._i_path = 0
         self._n_paths = 0
         self._root = ""
         # quiet：后台定时扫描用 —— 它没有界面，别为它算百分比 / 发信号
         self._quiet = bool(quiet)
-        # total_hint：调用方已经数过了（如 FolderScanDialog）→ 别再走一遍磁盘
-        self._total = int(total_hint or 0)
-        self._precount = bool(precount) and not self._total
+        # total_hint / precount：v2.0.5 起**不再参与进度计算**（统计已改为逐路径进行），
+        # 形参只为兼容既有调用点保留，函数体里不再保存它们，免得又有人拿它当分母。
+        _ = (total_hint, precount)
 
-    def _count_files(self):
-        """预估总量：数一遍视频文件（只走目录、不读文件内容，几万文件约 1~3 秒）。
+    def _count_path(self, root):
+        """只数**这一条**路径下的视频文件（走目录元数据，不读文件内容）。
 
-        v1.46.13：统计过程本身也要上报 —— 4.8 万片 + 网络盘时这一步可能要几十秒，
-        期间界面一动不动，用户会以为「点了没反应」。
+        v2.0.5：这是「先扫全部路径的总数」那一步的替代品。数 4.8 万片要几十秒，
+        期间界面一动不动 —— 现在拆成 N 段，每段只等一条路径，且分母是这条路径的真数。
+
+        返回**视频文件数**；路径本身读不了（盘没插 / 权限不足 / 网络盘掉线）时返回 -1，
+        让调用方别再拿它当分母、也别把整库误报成「减少」。
         """
+        try:
+            with os.scandir(root):
+                pass
+        except OSError:
+            return -1
         n = 0
         last = 0.0
         try:
-            for root in self.paths:
-                if root and os.path.isdir(root):
-                    for _dp, _dn, fns in os.walk(root):
-                        for f in fns:
-                            if f.lower().endswith(scanner_mod.VIDEO_EXTS):
-                                n += 1
-                        now = time.monotonic()
-                        if (not self._quiet) and now - last >= 0.4:
-                            last = now
-                            self.tick.emit(0, 0, f"正在统计文件数… 已找到 {n} 个")
+            for _dp, _dn, fns in os.walk(root):
+                for f in fns:
+                    if f.lower().endswith(scanner_mod.VIDEO_EXTS):
+                        n += 1
+                now = time.monotonic()
+                if (not self._quiet) and now - last >= 0.4:
+                    last = now
+                    self.tick.emit(0, 0, "正在统计路径 %d/%d 的文件数… 已找到 %d 个"
+                                   % (self._i_path, self._n_paths, n))
+        except Exception:
+            return n
+        return n
+
+    def _count_gone(self, root):
+        """本条路径「索引里有、这一遍却在磁盘上没见到」的条数 → 就是「减少」。
+
+        只对**没被这一遍碰到**的那几个候选做一次 `exists()`，不整库遍历，代价极小。
+        路径整条读不了时**不统计**（返回 0）—— 否则盘没插 / 网络盘掉线会把整库
+        误报成「减少」，那才是最吓人的假数。
+        """
+        if self._path_unreadable:
+            return 0
+        try:
+            indexed = db.media_paths_under(root)
         except Exception:
             return 0
+        n = 0
+        for fp in indexed:
+            if not fp or fp in self._touched:
+                continue
+            try:
+                if not os.path.exists(fp):
+                    n += 1
+            except OSError:
+                continue
         return n
 
     def run(self):
-        if self._precount:
-            self._total = self._count_files()
-            self._precount = False
         try:
             counts = {"movie": 0, "tvshow": 0, "episode": 0}
             # 只扫真实存在的目录，且**保持配置里的先后顺序**（顺序即扫描优先级）
@@ -1892,13 +1930,27 @@ class ScanWorker(QThread):
             for i, p in enumerate(roots, 1):
                 self._i_path = i
                 self._root = p
+                self._touched = set()
+                self._path_done = 0
+                # ① 先数这一条（不定长状态：进度环转圈）
+                _n = self._count_path(p)
+                self._path_unreadable = (_n < 0)
+                self._path_total = max(0, _n)
                 self._tick(force=True)
+                # ② 再扫这一条，扫完才轮到下一条
                 c = scanner_mod.scan_library(
                     p, lambda m: self._on_progress(m),
                     library_name=self.library_name, mode=self.mode,
                     on_item=self._on_item, path_index=i, path_total=len(roots))
                 for k in counts:
                     counts[k] += c.get(k, 0)
+                # ③ 这一条扫完：算出「减少」并**立刻刷一次界面**，不等下一条
+                self._gone += self._count_gone(p)
+                self._tick(force=True)
+                self.live.emit()
+            counts["new"] = self._new
+            counts["changed"] = self._changed
+            counts["removed"] = self._gone
             self._tick(force=True)
             self.live.emit()          # 扫完再刷一次，确保界面反映最终结果
             self.done.emit(counts)
@@ -1916,12 +1968,16 @@ class ScanWorker(QThread):
         if self._root:
             base = os.path.basename(str(self._root).rstrip("\\/")) or str(self._root)
             parts.append(base)
-        if self._total:
-            parts.append(f"{self._done}/{self._total}")
-        elif self._done:
-            parts.append(f"已处理 {self._done}")
+        if self._path_total:
+            parts.append(f"{self._path_done}/{self._path_total}")
+        elif self._path_done:
+            parts.append(f"已处理 {self._path_done}")
         if self._new:
             parts.append(f"新增 {self._new}")
+        if self._changed:
+            parts.append(f"变更 {self._changed}")
+        if self._gone:
+            parts.append(f"减少 {self._gone}")
         return " · ".join(parts)
 
     def _tick(self, now=None, force=False):
@@ -1931,19 +1987,28 @@ class ScanWorker(QThread):
         if not force and now - self._last_tick < 0.25:
             return
         self._last_tick = now
-        self.tick.emit(self._done, self._total, self._msg())
+        self.tick.emit(self._path_done, self._path_total, self._msg())
 
     def _on_item(self, info):
         """scanner 每处理完一个条目回调一次（在扫描线程里）。"""
         self._done += 1
-        if info.get("new"):
+        self._path_done += 1
+        st = info.get("state") or ("new" if info.get("new") else "same")
+        if st == "new":
             self._new += 1
-            self._new_since_live += 1
+        elif st == "changed":
+            self._changed += 1
+        if st != "same":
+            self._dirty = True
+        # 记下这一遍在磁盘上真见到的路径 —— 「减少」= 索引里有、这里没见到
+        p = info.get("path")
+        if p:
+            self._touched.add(p)
         now = time.monotonic()
-        # 有新片才值得刷界面（一次整页重载不便宜），且节流 1.2s
-        if self._new_since_live and now - self._last_live >= 1.2:
+        # 真变了才值得刷界面（一次整页重载不便宜），且节流 1.2s
+        if self._dirty and now - self._last_live >= 1.2:
             self._last_live = now
-            self._new_since_live = 0
+            self._dirty = False
             self.live.emit()
         self._tick(now)
 
@@ -2034,6 +2099,22 @@ class SmartWorker(QThread):
         self.done.emit(res)
 
 
+def scan_result_text(c):
+    """扫描完成后的结果文案（三处完成对话框共用，v2.0.5）。
+
+    分成两行：第一行是「新增多少（按影片类型拆开）」，第二行是「变更 / 减少」。
+    `counts["movie"]` 记的本来就是**本次新增**的电影数（不是库总量），
+    所以「新增 N」与括号里的三项是同一件事的两种口径，不会打架。
+    """
+    c = c or {}
+    n_new = c.get("new")
+    if n_new is None:                     # 老调用点没带 new → 用三项之和兜底
+        n_new = (c.get("movie") or 0) + (c.get("tvshow") or 0) + (c.get("episode") or 0)
+    return ("新增 %d（电影 %d / 剧集 %d / 分集 %d）\n变更 %d · 减少 %d"
+            % (n_new, c.get("movie") or 0, c.get("tvshow") or 0, c.get("episode") or 0,
+               c.get("changed") or 0, c.get("removed") or 0))
+
+
 class FolderScanDialog(QDialog):
     """文件夹（媒体库）扫描：先统计数量 → 用户确认 → 扫描并显示进度。
 
@@ -2116,9 +2197,11 @@ class FolderScanDialog(QDialog):
         self.cancel.setText("停止")
         self.bar.setRange(0, 0)
         applog.log(f"扫描：{self.lib['name']} mode={self.mode} paths={self.lib.get('paths')}")
+        # v2.0.5：进度分母改成「当前这条路径」的片数（ScanWorker 自己逐条数），
+        # 上面 CountWorker 数出来的 `self._vids` 只是**给用户确认用**的，不再当分母 ——
+        # 否则又回到「路径 5/14 · 13769/48313」，看不出本条路径还剩多少。
         self._worker = ScanWorker(self.lib.get("paths", []),
-                                  library_name=self.lib["name"], mode=self.mode,
-                                  total_hint=self._vids)     # 统计阶段已经数过了，别再走一遍
+                                  library_name=self.lib["name"], mode=self.mode)
         self._worker.progress.connect(self.status.setText)
         if self._on_tick:
             self._worker.tick.connect(self._on_tick)
@@ -2224,10 +2307,15 @@ class PosterCard(QFrame):
         _full_title = media.get("title", "") or ""
         title.setText(_fit_lines(_full_title, POSTER_W, 2, title.fontMetrics()))
         title.setToolTip(_full_title)
-        title.setAlignment(Qt.AlignCenter | Qt.AlignTop)
+        # v2.0.5（反馈 3）：标题由**居中**改为**靠左**，与下面「演员：/导演：」两行左对齐，
+        # 长番号折行后左边缘齐整、也好扫读（居中时每一行的左边缘都是斜的）。
+        title.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         title.setWordWrap(True)
         title.setFixedHeight(_TITLE_H)
         v.addWidget(title)
+        # v2.0.5（反馈 2）：收藏的影片标题变金黄色，且点星标**就地**改色（不重建卡片）
+        self._title = title
+        self._apply_title_color()
         # 副信息：评分 / 年份 / 画质（三项都受内容卡片设置控制；全关则整块不建，卡高相应缩短）
         sub = None
         if parts:
@@ -2292,6 +2380,23 @@ class PosterCard(QFrame):
             fb.raise_()
             self.fav_btn = fb
 
+    def _apply_title_color(self):
+        """收藏的影片标题用金黄色（v2.0.5 反馈 2）。
+
+        未收藏时把内联样式**清空**（回到 `QLabel#CardTitle` 的 #fafafa），
+        这样主题相关的那部分仍由 QSS 说了算，代码里只补「收藏」这一种例外。
+        """
+        t = getattr(self, "_title", None)
+        if t is None:
+            return
+        try:
+            if self.media.get("favorite"):
+                t.setStyleSheet("color:%s;" % uhero.FAV_TITLE)
+            else:
+                t.setStyleSheet("")
+        except RuntimeError:          # 卡片已 deleteLater
+            pass
+
     def _fav_clicked(self):
         """点左下角星标：交给回调切库（回调会改写 media['favorite']），再据实刷新星标。"""
         if self._on_fav is None:
@@ -2301,6 +2406,7 @@ class PosterCard(QFrame):
             on = bool(self.media.get("favorite"))
             self.fav_btn.set_on(on)
             self.fav_btn.setToolTip("取消收藏" if on else "加入收藏")
+        self._apply_title_color()     # v2.0.5：星标点亮的同时标题跟着变金（就地生效）
 
     # ---------- 选中 / 流光动画 ----------
     def set_selected(self, on):
@@ -4726,8 +4832,7 @@ class MainWindow(QMainWindow):
         c = dlg.result or {}
         QMessageBox.information(
             self, "扫描完成",
-            f"媒体库「{name}」\n电影 {c.get('movie', 0)} 部 / "
-            f"剧集 {c.get('tvshow', 0)} 部 / 分集 {c.get('episode', 0)} 个")
+            f"媒体库「{name}」\n" + scan_result_text(c))
         self._refresh_stats()
         self.go(self._view_folders)
 
@@ -5452,7 +5557,12 @@ class MainWindow(QMainWindow):
         info.addLayout(name_row)
         if p.get("alias"):
             al = QLabel("别名：" + str(p["alias"]))
-            al.setWordWrap(True); al.setStyleSheet("color:#66a9ff;")
+            al.setWordWrap(True)
+            # v2.0.7（反馈 1）：用户原话「别名改成白色」。
+            # 原来这里是链接蓝 `#66a9ff`（当年为了在深底上抢眼），但别名不是可点链接，
+            # 蓝色会让人误以为能点；而且和上下几行的正文不同色，整块信息看着发散。
+            # 用与正文一致的近白 `#fafafa`（与 `NAME_UNKNOWN` 同一个白）。
+            al.setStyleSheet("color:#fafafa;")
             info.addWidget(al)
         # 状态（现役 / 退役 / 未知）手动切换；未手动设置的按「作品年份」推断
         st = (p.get("status") or "").strip()
@@ -5666,8 +5776,7 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.information(
             self, "扫描完成",
-            f"媒体库「{name}」\n电影 {counts.get('movie', 0)} 部 / "
-            f"剧集 {counts.get('tvshow', 0)} 部 / 分集 {counts.get('episode', 0)} 个")
+            f"媒体库「{name}」\n" + scan_result_text(counts))
         self._refresh_stats()
         lib = cfg.get_settings().library(name)
         if lib:
@@ -5793,10 +5902,7 @@ class MainWindow(QMainWindow):
     def _on_scan_done(self, counts):
         if counts.get("error"):
             QMessageBox.warning(self, "扫描出错", counts["error"]); return
-        QMessageBox.information(
-            self, "扫描完成",
-            f"电影 {counts.get('movie',0)} 部 / 剧集 {counts.get('tvshow',0)} 部 / "
-            f"分集 {counts.get('episode',0)} 个")
+        QMessageBox.information(self, "扫描完成", scan_result_text(counts))
         self._refresh_stats()
         self.go(self._view_home)
 

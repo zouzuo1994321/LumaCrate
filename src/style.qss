@@ -118,6 +118,15 @@ QPushButton#Ghost:hover {
     background: rgba(__ACCENT__, 0.16); border-color: rgba(__ACCENT__, 0.55); color: #fafafa;
 }
 QPushButton#Ghost:pressed { background: rgba(__ACCENT__, 0.26); }
+/* ⚠ 这条**必须有**（v2.0.6 真机前探针量出来的）：上面的 `QPushButton#Ghost` 带 ID，
+   CSS 权重 (0,1,0,1) 高于通用那条 `QPushButton:disabled` 的 (0,0,1,1) ——
+   少了它，禁用态的文字仍按 #d4d4d8 画（实测最亮 211，与 enabled 一模一样），
+   于是「重复检测」结果树下那四枚按钮**看着能点、其实点不动**。
+   ID 选择器与伪类冲突时只能靠同 ID + 伪类来压，不能指望通用规则。 */
+QPushButton#Ghost:disabled {
+    color: #52525b; border-color: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.03);
+}
 /* ---------- 智能推荐「已生效的引导向量」chip ----------
    chip 是个普通 QWidget 容器 —— 普通 QWidget **不绘制** QSS 背景（paintEvent 为空），
    所以代码里对它 setAttribute(Qt.WA_StyledBackground, True) 才吃这条规则。 */

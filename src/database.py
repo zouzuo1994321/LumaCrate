@@ -411,6 +411,25 @@ def link_media_person(media_id: int, person_id: int, char_role: str, order: int)
             conn.close()
 
 
+def unlink_media_person(media_id: int, person_id: int) -> int:
+    """解除「某部影片 ↔ 某个人」的关联（v2.0.6 反馈 3：演职人员头像上的「×」）。
+
+    **只删 `media_people` 这一行**，不动 `people` 表 —— 那个人还在演员库里，
+    别的作品照样能看到他；这里只是「这部片子里没有他」。
+    `works` 计数由 `trg_mp_del` 触发器自动回算，不用手工维护。
+    返回删掉的行数（0 = 本来就没有这个关联）。
+    """
+    with _LOCK:
+        conn = get_conn()
+        try:
+            cur = conn.execute("DELETE FROM media_people WHERE media_id=? AND person_id=?",
+                               (int(media_id), int(person_id)))
+            conn.commit()
+            return cur.rowcount or 0
+        finally:
+            conn.close()
+
+
 def insert_media(**fields) -> int:
     with _LOCK:
         conn = get_conn()
@@ -2024,8 +2043,37 @@ def media_id_by_path(fp: str):
             conn.close()
 
 
+def media_paths_under(root: str) -> list:
+    """取某条路径（含整个子树）下**已入库**的 file_path 列表。
+
+    扫描器用它算「减少」：这一遍在磁盘上没见到的索引条目 = 文件已被删 / 移走。
+    刻意用 `substr` 而不是 `LIKE '前缀%'` —— 媒体路径里普遍带下划线 `_`，
+    而 LIKE 把 `_` 当「任意单字符」通配符，会**多算**一批同长度的旁支路径，
+    报出来的「减少」就成了假数。substr 是逐字符精确比较，不存在这个问题。
+    """
+    pre = os.path.abspath(root).rstrip("\\/") + os.sep
+    with _LOCK:
+        conn = get_conn()
+        try:
+            return [r["file_path"] for r in conn.execute(
+                "SELECT file_path FROM media WHERE substr(file_path,1,?)=?",
+                (len(pre), pre)).fetchall()]
+        finally:
+            conn.close()
+
+
 def upsert_media_by_path(mode: str = "overwrite", **fields) -> int:
-    """按 file_path 去重写入，返回 media.id。
+    """按 file_path 去重写入，返回 media.id（薄封装，语义见 upsert_media_state）。"""
+    return upsert_media_state(mode, **fields)[0]
+
+
+def upsert_media_state(mode: str = "overwrite", **fields):
+    """按 file_path 去重写入，返回 `(media.id, state)`。
+
+    v2.0.5：多返回一个 state，供扫描界面的「新增 / 变更」实时计数用 ——
+    `"new"` 库里没有这条（新增）/ `"changed"` 有且这次确实改了内容 / `"same"` 有但一字未动。
+    `overwrite` 现在也**只写真正变了的列**（原先无条件整行 UPDATE）：结果一样，
+    但少写了绝大多数「其实没变」的条目，并让 state 能如实反映「这一遍到底改没改」。
 
     mode:
       - "overwrite": 全量覆盖（默认，兼容旧行为）。
@@ -2056,7 +2104,8 @@ def upsert_media_by_path(mode: str = "overwrite", **fields) -> int:
                             conn.execute(f"UPDATE media SET {sets} WHERE id=?",
                                          list(struct.values()) + [mid])
                             conn.commit()
-                        return mid  # 未变更，跳过
+                            return mid, "changed"   # 只改了结构字段（如重新归组）
+                        return mid, "same"          # 未变更，跳过
                 if mode == "fill":
                     cols, vals = list(struct), list(struct.values())
                     for c, v in fields.items():
@@ -2069,23 +2118,29 @@ def upsert_media_by_path(mode: str = "overwrite", **fields) -> int:
                     if cols:
                         sets = ",".join(f"{c}=?" for c in cols)
                         conn.execute(f"UPDATE media SET {sets} WHERE id=?", vals + [mid])
-                else:
-                    cols = [c for c in fields if c != "id"]
+                        conn.commit()
+                        return mid, "changed"
+                    return mid, "same"
+                # overwrite / new(mtime 变了)：只写真正变了的列（值一样就不写）
+                cols = [c for c in fields if c != "id" and row.get(c) != fields[c]]
+                if cols:
                     sets = ",".join(f"{c}=?" for c in cols)
                     conn.execute(
                         f"UPDATE media SET {sets} WHERE id=?",
                         [fields[c] for c in cols] + [mid],
                     )
-            else:
-                cols = list(fields.keys())
-                ph = ",".join("?" for _ in cols)
-                cur = conn.execute(
-                    f"INSERT INTO media({','.join(cols)}) VALUES({ph})",
-                    [fields[c] for c in cols],
-                )
-                mid = cur.lastrowid
+                    conn.commit()
+                    return mid, "changed"
+                return mid, "same"
+            cols = list(fields.keys())
+            ph = ",".join("?" for _ in cols)
+            cur = conn.execute(
+                f"INSERT INTO media({','.join(cols)}) VALUES({ph})",
+                [fields[c] for c in cols],
+            )
+            mid = cur.lastrowid
             conn.commit()
-            return mid
+            return mid, "new"
         finally:
             conn.close()
 

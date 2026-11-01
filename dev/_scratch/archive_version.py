@@ -83,7 +83,10 @@ with zipfile.ZipFile(ZIP, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
     ss = os.path.join(DEV, "screenshots")
     if os.path.isdir(ss):
         for f in sorted(os.listdir(ss)):
-            if f.startswith((minor_tag, vtag + "_")) and f.endswith(".png"):
+            # v2.0.6 起放宽成「只认版本号前缀」（vtag，不加下划线）：
+            # 真机图可能叫 v206_xxx.png，也可能叫 v206b_xxx.png（同版第 N 轮重跑），
+            # 死扣 vtag + "_" 会把后一类整批漏掉。vtag 本身（v206）不会误伤别的版本。
+            if f.startswith((minor_tag, vtag)) and f.endswith(".png"):
                 add(os.path.join(ss, f), "dev/screenshots/" + f)
 print("zip: %d 个文件，原始 %.1f MB，压缩后 %.1f MB"
       % (n, raw / 1048576, os.path.getsize(ZIP) / 1048576))

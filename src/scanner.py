@@ -87,8 +87,11 @@ def _under(path: str, dirs: set) -> bool:
 #      `on_item` 形参要穿 5 层，每层都得记得往下传，漏一层就静默无进度；
 #   ② 扫描可能同时跑两份（主窗右键扫描 + 工具窗「扫描」），所以不能放模块级变量，
 #      用 threading.local 各自隔离，互不串数。
-# 约定：`on_item({n, path, new, kind, title, index, total})`，`n` 是**本路径内**已处理数；
+# 约定：`on_item({n, path, new, state, kind, title, index, total})`，`n` 是**本路径内**已处理数；
 #      抛异常一律吞掉（进度上报绝不能影响扫描本身）。
+#      v2.0.5：多带一个 `state` —— "new"(新增) / "changed"(内容变了) / "same"(一字未动)。
+#      界面靠它把「新增 / 变更」分别计数，并决定「这一条值不值得刷新首页」
+#      （旧版只认 new，于是「扫描全部并覆盖」改了标题、海报也不刷新，看着像没生效）。
 _CTX = threading.local()
 
 
@@ -102,7 +105,8 @@ def _ctx_end(prev):
     _CTX.cur = prev
 
 
-def _ctx_item(path: str, is_new: bool = False, kind: str = "movie", title: str = ""):
+def _ctx_item(path: str, is_new: bool = False, kind: str = "movie", title: str = "",
+              state: str = ""):
     """每处理完一个条目回报一次（**新增与已存在都报** —— 否则百分比会一直停在 0%）。"""
     c = getattr(_CTX, "cur", None)
     if not c:
@@ -111,8 +115,9 @@ def _ctx_item(path: str, is_new: bool = False, kind: str = "movie", title: str =
     cb = c.get("on_item")
     if cb is None:
         return
+    st = state or ("new" if is_new else "same")
     try:
-        cb({"n": c["n"], "path": path, "new": bool(is_new), "kind": kind,
+        cb({"n": c["n"], "path": path, "new": bool(is_new), "state": st, "kind": kind,
             "title": title or "", "index": c["index"], "total": c["total"]})
     except Exception:
         pass
@@ -169,6 +174,8 @@ def scan_library(root: str, progress: Callable[[str], None] = None,
     mode: new(仅新增与修改) / fill(仅补充缺失) / overwrite(全量覆盖，默认)。
     on_item: v1.46.13 —— 每处理完一个条目回调一次（含「已存在」的），供 UI 算真进度；
              path_index/path_total 只是随回调带出去的「第几个路径」，本函数不做排序判断。
+             v2.0.5：回调里多带 `state`（new / changed / same），UI 据此分别统计
+             「新增 / 变更」，并只在真的变了时才刷新首页。
     """
     prev = _ctx_begin(on_item, path_index, path_total)
     try:
@@ -281,13 +288,15 @@ def _index_movie(info: dict, video: str, folder: str, root: str, counts: dict,
     actors = info.pop("actors", [])
     directors = info.pop("directors", [])
     people = actors + [dict(d, type="Director") for d in directors]
-    was_new = db.media_id_by_path(video) is None
-    mid = db.upsert_media_by_path(mode=mode, **info)
+    # v2.0.5：一次 upsert 同时拿到 id 与三态（new/changed/same），
+    # 原先「先 media_id_by_path 判断是否新增，再 upsert」是两条 SQL，且判不出「变更」。
+    mid, state = db.upsert_media_state(mode=mode, **info)
+    was_new = (state == "new")
     if mid and people:
         _link_actors(mid, people)
     # v1.46.13（反馈 2/3）：**已存在的条目也要回报** —— 旧版只在 was_new 时发进度，
     # 于是「扫描新添加和修改的」在没新片时进度环 / 进度条一直停在 0%，看着像没动。
-    _ctx_item(video, was_new, "movie", info.get("title") or "")
+    _ctx_item(video, was_new, "movie", info.get("title") or "", state)
     if was_new:
         counts["movie"] += 1
         if progress:
@@ -347,14 +356,19 @@ def _do_tvshow(folder: str, root: str, counts: dict, progress, library_name=None
         info.pop("resolution", None)
         info.setdefault("premiere", None)
         info.setdefault("user_rating", None)
+        # v2.0.5：剧集没有「视频文件」当主键，历史版本因此**没给 file_path 赋值**，
+        # 而 upsert 正是按 file_path 去重 → 每次扫描都会**再插一条重复的剧集行**，
+        # 界面上的「新增 N」也跟着虚高。这里显式拿 tvshow.nfo 的路径当主键
+        # （下面 _ctx_item 报的也是同一个值），去重就成立了。
+        info["file_path"] = nfo_path
         actors = info.pop("actors", [])
         directors = info.pop("directors", [])
         people = actors + [dict(d, type="Director") for d in directors]
-        was_new = db.media_id_by_path(nfo_path) is None
-        sid = db.upsert_media_by_path(mode=mode, **info)
+        sid, state = db.upsert_media_state(mode=mode, **info)
+        was_new = (state == "new")
         if sid and people:
             _link_actors(sid, people)
-        _ctx_item(nfo_path, was_new, "tvshow", info.get("title") or "")
+        _ctx_item(nfo_path, was_new, "tvshow", info.get("title") or "", state)
         if was_new:
             counts["tvshow"] += 1
             if progress:
@@ -408,11 +422,11 @@ def _do_tvshow(folder: str, root: str, counts: dict, progress, library_name=None
                 ea = ep.pop("actors", [])
                 ed = ep.pop("directors", [])
                 people_e = ea + [dict(d, type="Director") for d in ed]
-                was_new = db.media_id_by_path(video) is None
-                eid = db.upsert_media_by_path(mode=mode, **ep)
+                eid, state = db.upsert_media_state(mode=mode, **ep)
+                was_new = (state == "new")
                 if eid and people_e:
                     _link_actors(eid, people_e)
-                _ctx_item(video, was_new, "episode", ep.get("title") or "")
+                _ctx_item(video, was_new, "episode", ep.get("title") or "", state)
                 if was_new:
                     counts["episode"] += 1
             except Exception as e:
@@ -475,9 +489,9 @@ def _do_bare_episode(video: str, parent_id, parent_title: str, season_dir: str,
             "play_count": 0,
             "last_played": None,
         }
-        was_new = db.media_id_by_path(video) is None
-        db.upsert_media_by_path(mode=mode, **info)
-        _ctx_item(video, was_new, "episode", title or "")
+        _mid, state = db.upsert_media_state(mode=mode, **info)
+        was_new = (state == "new")
+        _ctx_item(video, was_new, "episode", title or "", state)
         if was_new:
             counts["episode"] += 1
             if progress:
@@ -527,9 +541,9 @@ def _do_bare_video(path: str, root: str, counts: dict, progress, library_name=No
             "play_count": 0,
             "last_played": None,
         }
-        was_new = db.media_id_by_path(path) is None
-        db.upsert_media_by_path(mode=mode, **info)
-        _ctx_item(path, was_new, "movie", title or "")
+        _mid, state = db.upsert_media_state(mode=mode, **info)
+        was_new = (state == "new")
+        _ctx_item(path, was_new, "movie", title or "", state)
         if was_new:
             counts["movie"] += 1
             if progress:

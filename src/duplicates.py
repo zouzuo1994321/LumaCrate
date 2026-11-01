@@ -22,9 +22,11 @@ Copyright  2026 肆月Aperture　本软件为开源软件，没有授权禁止�
 from __future__ import annotations
 
 import csv
+import ctypes
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -704,9 +706,88 @@ def import_json(path: str) -> DupReport:
     return rep
 
 
+# ---------------------------------------------------------------------------
+# 删除冗余副本（v2.0.6 反馈 2）—— 只走回收站，绝不永久删除
+# ---------------------------------------------------------------------------
+
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("wFunc", ctypes.c_uint),
+        ("pFrom", ctypes.c_wchar_p),
+        ("pTo", ctypes.c_wchar_p),
+        ("fFlags", ctypes.c_uint16),
+        ("fAnyOperationsAborted", ctypes.c_int),
+        ("hNameMappings", ctypes.c_void_p),
+        ("lpszProgressTitle", ctypes.c_wchar_p),
+    ]
+
+
+#: SHFileOperation 的删除动作
+_FO_DELETE = 3
+#: 允许撤销 → 进回收站（**这条是关键**，缺了就是永久删除）
+_FOF_ALLOWUNDO = 0x0040
+#: 不弹「确定要删除吗」——我们自己已经确认过一次了
+_FOF_NOCONFIRMATION = 0x0010
+#: 不出错误弹窗（错误码自己处理）
+_FOF_NOERRORUI = 0x0400
+#: 不显示进度条
+_FOF_SILENT = 0x0004
+#: 万一某文件**无法进回收站**（网络盘 / 超大 / 回收站被关），**先警告再毁**。
+#: 这个标志会覆盖 `_FOF_NOCONFIRMATION`，正是我们想要的那一道最后防线。
+_FOF_WANTNUKEWARNING = 0x4000
+
+
+def _shell_delete(path: str):
+    """调 SHFileOperationW 把**单个**路径放回收站。返回 `(rc, aborted)`。"""
+    op = _SHFILEOPSTRUCTW()
+    op.hwnd = None
+    op.wFunc = _FO_DELETE
+    # pFrom 必须是「双 NUL 结尾」的路径串（这里一次只放一个，逐个删才能精确定位失败项）
+    op.pFrom = os.path.normpath(path) + "\x00\x00"
+    op.pTo = None
+    op.fFlags = (_FOF_ALLOWUNDO | _FOF_NOCONFIRMATION | _FOF_NOERRORUI
+                 | _FOF_SILENT | _FOF_WANTNUKEWARNING)
+    rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    return int(rc), bool(op.fAnyOperationsAborted)
+
+
+def recycle_paths(paths) -> dict:
+    """把文件 / 文件夹**移到回收站**。返回 `{"ok": n, "failed": [(path, msg)], "unsupported": bool}`。
+
+    为什么不用 `os.remove` / `shutil.rmtree`：
+      ① 这是「清理冗余副本」，一次可能连删几十项，误删的代价是一整部片子 ——
+         回收站能还原，是唯一合理的兜底；
+      ② 本项目的 safe-delete shim 会拦 `os.remove`（跨盘 move 直接 `WinError 17`），
+         走 Windows 自己的 SHFileOperationW 既绕开它，也拿到系统级的"不可回收则警告"语义。
+
+    失败**绝不降级成永久删除**：删不掉的原样报回去，调用方只把真正删掉的从索引里移除，
+    这样"索引里有、磁盘上没了"与"磁盘上还在、索引里没了"两种错位都不会发生。
+    """
+    out = {"ok": 0, "failed": [], "unsupported": False}
+    items = [os.path.normpath(p) for p in (paths or []) if p and os.path.exists(p)]
+    if not items:
+        return out
+    if not sys.platform.startswith("win"):
+        out["unsupported"] = True
+        out["failed"] = [(p, "当前系统不支持回收站删除（%s）" % sys.platform) for p in items]
+        return out
+    for p in items:
+        try:
+            rc, aborted = _shell_delete(p)
+        except Exception as e:                      # ctypes 缺失 / 调用被拦
+            out["failed"].append((p, "%s: %s" % (type(e).__name__, e)))
+            continue
+        if rc == 0 and not aborted:
+            out["ok"] += 1
+        else:
+            out["failed"].append((p, "系统返回码 %s%s" % (rc, "（操作被取消）" if aborted else "")))
+    return out
+
+
 __all__ = [
     "DupMember", "DupGroup", "DupReport", "find_duplicates",
     "export_csv", "export_json", "import_json", "EXPORT_FORMAT",
-    "human_size", "human_duration",
+    "human_size", "human_duration", "recycle_paths",
     "norm_num", "extract_num", "title_key", "COPYRIGHT_NOTICE",
 ]

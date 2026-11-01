@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QGridLayout, QMessageBox, QCheckBox, QRadioButton, QInputDialog,
     QSpinBox, QProgressBar, QPlainTextEdit, QApplication, QSlider, QSizePolicy,
     QTableWidget, QTableWidgetItem, QHeaderView, QTreeWidget, QTreeWidgetItem,
-    QDoubleSpinBox, QScrollArea,   # v1.40.7：`_freeze()` 要用（原来是函数内局部 import）
+    QDoubleSpinBox, QScrollArea, QMenu,   # v2.0.6：重复检测结果的右键菜单
 )
 
 import config as cfg
@@ -40,6 +40,7 @@ import scraper as scraper_mod
 import browser_session                  # v1.41.0（方案B）：常驻浏览器抓取会话
 import applog
 import backup as backup_mod
+import player as player_mod     # v2.0.6：重复检测结果里「打开影片」直接调本地播放器
 import prefs as prefs_mod          # v1.43.0：偏好管理（番号级收藏 / 评分 / 人物收藏置顶）
 from ui_cleanup import PeopleCleanDialog   # v1.43.0：演员库清理
 import tagopt as tagopt_mod
@@ -1977,6 +1978,85 @@ class LibraryEditDialog(GlassDialog):
 
 
 # ---------- 设置对话框 ----------
+class DupDeleteDialog(GlassDialog):
+    """重复检测结果里的删除确认框（v2.0.6 反馈 2）。
+
+    用户原话：「可以选择删除影片文件和删除影片文件夹的功能，但是删除前需要确认
+    **是否删除源文件**」。所以这个框只有一件事要问清楚：
+      · 勾选「同时删除源文件」→ 源文件进**回收站**（可还原），索引同步移除；
+      · 不勾选 → 只从媒体库移除索引，磁盘上的文件一个字节都不动。
+    默认勾选（用户点的就是「删除」），但把后果逐条写出来，并列出**即将处理的全部路径**。
+    """
+
+    def __init__(self, targets, kind, in_db=None, parent=None):
+        super().__init__(parent)
+        self.delete_source = True
+        self._kind = "folder" if kind == "folder" else "file"
+        self.setWindowTitle("删除影片文件夹" if self._kind == "folder" else "删除影片文件")
+        self.setMinimumWidth(560)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 14)
+        v.setSpacing(10)
+
+        head = QLabel(("删除影片文件夹" if self._kind == "folder" else "删除影片文件"))
+        head.setStyleSheet("font-size:15px;font-weight:bold;color:#fafafa;")
+        v.addWidget(head)
+
+        n_db = len(in_db or [])
+        if self._kind == "folder":
+            _desc = ("将处理这一个文件夹（其中 %d 部已入库影片会一并从媒体库移除）。" % n_db)
+        else:
+            _desc = "将处理这一个视频文件（对应 1 条媒体库记录）。"
+        d = QLabel(_desc)
+        d.setWordWrap(True)
+        d.setStyleSheet("font-size:12px;color:#a1a1aa;")
+        v.addWidget(d)
+
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setFixedHeight(96)
+        box.setStyleSheet(LOG_BOX_STYLE)
+        box.setPlainText("\n".join(targets or []))
+        v.addWidget(box)
+
+        self.chk = QCheckBox("同时删除源文件（移入回收站，可从回收站还原）")
+        self.chk.setChecked(True)
+        self.chk.setStyleSheet("font-size:12px;color:#ecedee;")
+        self.chk.toggled.connect(self._on_toggle)
+        v.addWidget(self.chk)
+
+        self.tip = QLabel("")
+        self.tip.setWordWrap(True)
+        self.tip.setStyleSheet("font-size:11px;color:#f5a524;")
+        v.addWidget(self.tip)
+        self._on_toggle(True)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.setObjectName("Ghost")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("删除")
+        ok.setCursor(Qt.PointingHandCursor)
+        ok.setStyleSheet(
+            "QPushButton{background:#dc2626;color:#ffffff;border:none;border-radius:6px;"
+            "padding:7px 20px;font-weight:bold;}"
+            "QPushButton:hover{background:#ef4444;}")
+        ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        v.addLayout(row)
+
+    def _on_toggle(self, checked):
+        self.delete_source = bool(checked)
+        if checked:
+            self.tip.setText("源文件将移入回收站（占用空间直到清空回收站）；"
+                             "确认后会同时把对应记录从媒体库移除。")
+        else:
+            self.tip.setText("只从媒体库移除索引，磁盘上的文件保持不动；"
+                             "下次扫描若仍能扫到这些文件，它们会重新入库。")
+
+
 class SettingsDialog(QDialog):
     # ★ v1.40.7（本轮）：**固定默认尺寸 1320×960**，切页不再让窗口长高/收矮。
     # 用户反馈原文：「界面默认大小改为 1320x960px，不随着工具内的内容进行调整，
@@ -5278,7 +5358,33 @@ class SettingsDialog(QDialog):
         self.dd_tree.itemDoubleClicked.connect(self._open_dedupe_item)
         g2v.addWidget(self.dd_tree)
 
-        tip7 = QLabel("双击任意一条（或分组行）即用资源管理器打开它所在的文件夹并选中该文件。")
+        # v2.0.6（反馈 2）：结果行支持「打开影片 / 打开影片路径 / 打开影片文件夹路径 /
+        # 删除影片文件 / 删除影片文件夹」。**两条入口做同一件事**：
+        #   ① 右键菜单（在结果里就地操作，最符合直觉）；
+        #   ② 下面这排按钮（右键菜单是"藏起来"的功能，只做菜单用户会找不到）。
+        # 没选中任何行时四枚按钮全灰 —— 免得点了没反应看起来像卡死。
+        self.dd_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.dd_tree.customContextMenuRequested.connect(self._dedupe_menu)
+        self.dd_tree.itemSelectionChanged.connect(self._dd_sel_changed)
+
+        act = QHBoxLayout()
+        act.setSpacing(6)
+        self.dd_play = compact_button("播放", 64, 26, "用本地播放器打开选中的这部片")
+        self.dd_play.clicked.connect(self._dedupe_play)
+        self.dd_reveal = compact_button("定位文件", 80, 26, "在资源管理器中打开所在文件夹并选中该文件")
+        self.dd_reveal.clicked.connect(self._dedupe_reveal)
+        self.dd_open_dir = compact_button("打开文件夹", 92, 26, "直接打开这些文件所在的文件夹")
+        self.dd_open_dir.clicked.connect(self._dedupe_open_folder)
+        self.dd_del = compact_button("删除…", 72, 26, "删除冗余副本（删除前会确认是否删除源文件）")
+        self.dd_del.clicked.connect(self._dedupe_delete_menu)
+        for _b in (self.dd_play, self.dd_reveal, self.dd_open_dir, self.dd_del):
+            _b.setEnabled(False)
+            act.addWidget(_b)
+        act.addStretch(1)
+        g2v.addLayout(act)
+
+        tip7 = QLabel("双击任意一条（或分组行）即用资源管理器定位；右键 / 上面这排按钮可播放、"
+                      "打开文件夹、删除冗余副本（删除前会确认是否删除源文件）。")
         tip7.setStyleSheet("color:#71717a;font-size:11px;")
         tip7.setWordWrap(True)
         g2v.addWidget(tip7)
@@ -5370,6 +5476,7 @@ class SettingsDialog(QDialog):
 
     def _clear_dedupe_result(self):
         self._dd_report = None
+        self._dd_removed = set()      # v2.0.6：本次会话已删掉的路径（重填树时跳过）
         self.dd_tree.clear()
         self.dd_summary.setText("—")
         self.dd_status.setText("正在重新检测（已清空上次结果）…")
@@ -5396,6 +5503,182 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "打开失败", f"{type(e).__name__}: {e}")
 
+    # ---- v2.0.6（反馈 2）：打开 / 定位 / 删除 ----
+    @staticmethod
+    def _dd_item_path(item):
+        """树项对应的**视频文件绝对路径**（分组行取它体积最大的那一份）。"""
+        if item is None:
+            return None
+        p = item.data(0, Qt.UserRole)
+        if not p:
+            par = item.parent()
+            p = par.data(0, Qt.UserRole) if par is not None else None
+        return p or None
+
+    def _dd_current_path(self):
+        it = self.dd_tree.currentItem()
+        if it is None:
+            sel = self.dd_tree.selectedItems()
+            it = sel[0] if sel else None
+        return self._dd_item_path(it)
+
+    def _dd_sel_changed(self):
+        ok = bool(self._dd_current_path())
+        for b in (getattr(self, "dd_play", None), getattr(self, "dd_reveal", None),
+                  getattr(self, "dd_open_dir", None), getattr(self, "dd_del", None)):
+            if b is not None:
+                b.setEnabled(ok)
+
+    def _dedupe_play(self):
+        """用本地播放器打开选中的这部片（与详情页「播放」同一套 `player.launch`）。"""
+        path = self._dd_current_path()
+        if not path:
+            return
+        res = player_mod.launch(path)
+        if not res.get("ok"):
+            QMessageBox.warning(self, "播放失败", res.get("msg") or "未知错误")
+
+    def _dedupe_reveal(self):
+        """在资源管理器中打开所在文件夹并**选中该文件**。"""
+        path = self._dd_current_path()
+        if not path:
+            return
+        res = player_mod.reveal_in_explorer(path)
+        if not res.get("ok"):
+            # 文件可能已被删/改名：退一步打开它所在的目录，总比什么都不发生强
+            folder = os.path.dirname(os.path.normpath(path))
+            if os.path.isdir(folder):
+                self._open_folder(folder)
+            else:
+                QMessageBox.information(self, "无法定位", "文件与所在目录都不存在：\n%s" % path)
+
+    def _dedupe_open_folder(self):
+        """直接打开这些文件**所在的文件夹**（不选中文件）。"""
+        path = self._dd_current_path()
+        if not path:
+            return
+        folder = os.path.dirname(os.path.normpath(path))
+        if not os.path.isdir(folder):
+            QMessageBox.information(self, "文件夹不存在", "找不到这个文件夹：\n%s" % folder)
+            return
+        self._open_folder(folder)
+
+    @staticmethod
+    def _open_folder(folder):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(folder)          # noqa: F821（Windows only）
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception:
+            pass
+
+    def _dedupe_menu(self, pos):
+        """结果树的右键菜单：两条入口（菜单 / 按钮排）共用下面这些实现。"""
+        it = self.dd_tree.itemAt(pos)
+        if it is not None:
+            self.dd_tree.setCurrentItem(it)
+        path = self._dd_current_path()
+        if not path:
+            return
+        m = QMenu(self)
+        a1 = m.addAction("打开影片（播放）")
+        a1.setEnabled(os.path.exists(path))
+        a1.triggered.connect(self._dedupe_play)
+        a2 = m.addAction("打开影片路径（在资源管理器中定位）")
+        a2.triggered.connect(self._dedupe_reveal)
+        a3 = m.addAction("打开影片文件夹路径")
+        a3.triggered.connect(self._dedupe_open_folder)
+        m.addSeparator()
+        a4 = m.addAction("删除影片文件…")
+        a4.triggered.connect(self._dedupe_delete_file)
+        a5 = m.addAction("删除影片文件夹…")
+        a5.triggered.connect(self._dedupe_delete_folder)
+        m.exec(self.dd_tree.viewport().mapToGlobal(pos))
+
+    def _dedupe_delete_menu(self):
+        """「删除…」按钮 → 一个二选一的小菜单（文件 / 文件夹）。"""
+        path = self._dd_current_path()
+        if not path:
+            return
+        m = QMenu(self)
+        a1 = m.addAction("删除影片文件…")
+        a1.triggered.connect(self._dedupe_delete_file)
+        a2 = m.addAction("删除影片文件夹…")
+        a2.triggered.connect(self._dedupe_delete_folder)
+        b = self.dd_del
+        m.exec(b.mapToGlobal(b.rect().bottomLeft()))
+
+    def _dedupe_delete_file(self):
+        path = self._dd_current_path()
+        if path:
+            self._dedupe_do_delete(path, "file")
+
+    def _dedupe_delete_folder(self):
+        path = self._dd_current_path()
+        if not path:
+            return
+        folder = os.path.dirname(os.path.normpath(path))
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.information(self, "文件夹不存在", "找不到这个影片所在的文件夹：\n%s" % folder)
+            return
+        self._dedupe_do_delete(folder, "folder")
+
+    def _dedupe_do_delete(self, target, kind):
+        """确认 → （可选）把源文件移入回收站 → 从索引移除 → 重填结果树。"""
+        target = os.path.normpath(target)
+        if kind == "folder":
+            in_db = db.media_paths_under(target)
+        else:
+            in_db = [target] if db.media_id_by_path(target) else []
+        dlg = DupDeleteDialog([target], kind, in_db, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if dlg.delete_source:
+            res = dup_mod.recycle_paths([target])
+            if res.get("unsupported"):
+                QMessageBox.warning(self, "无法删除",
+                                    "当前系统不支持回收站删除，操作已取消（不会永久删除）。")
+                return
+            if res.get("failed"):
+                msg = "\n".join("%s（%s）" % (p, m) for p, m in res["failed"])
+                QMessageBox.warning(
+                    self, "删除失败",
+                    "源文件没能删掉。为免出现「索引没了、文件还在」，本次没有做任何改动：\n\n%s"
+                    % msg)
+                applog.log("[重复检测] 删除源文件失败：%s" % target, "error")
+                return
+        n = 0
+        for p in in_db:
+            mid = db.media_id_by_path(p)
+            if mid is None:
+                continue
+            try:
+                db.delete_media(mid)
+                n += 1
+            except Exception as e:
+                applog.log("[重复检测] 从索引移除失败 %s：%s" % (p, e), "error")
+        # 结果树里这些行不再出现（报告本身不动，只是渲染时跳过 —— 原始检测结论仍可导出）
+        _rm = set(getattr(self, "_dd_removed", None) or ())
+        _rm |= set(in_db)
+        _rm.add(target)
+        self._dd_removed = _rm
+        rep = getattr(self, "_dd_report", None)
+        if rep is not None:
+            self._fill_dedupe_tree(rep)
+            self.dd_tree.resizeColumnToContents(0)
+        else:
+            self.dd_tree.clear()
+        what = "源文件已移入回收站" if dlg.delete_source else "仅移除索引（磁盘文件保留）"
+        self.dd_status.setText("已处理：%s · %s · 索引移除 %d 条"
+                               % (os.path.basename(target.rstrip("\\/")) or target, what, n))
+        applog.log("[重复检测] 删除 %s（%s），索引移除 %d 条" % (target, what, n))
+        self._dd_sel_changed()
+        if self.on_changed:
+            self.on_changed()          # 让主界面 / 侧栏计数跟着变
+
     def _on_dedupe_progress(self, a, b, msg):
         if b:
             self.dd_bar.setRange(0, 100)
@@ -5410,6 +5693,7 @@ class SettingsDialog(QDialog):
             self.dd_status.setText("检测失败（详见运行日志）。")
             return
         self._dd_report = report
+        self._dd_removed = set()      # 新一轮结果 → 清空「已删除」记录
         s = report.summary()
         self.dd_bar.setValue(100)
         gone = f"，其中 {report.missing} 部在磁盘上已不存在、未参与比对" if report.missing else ""
@@ -5448,6 +5732,8 @@ class SettingsDialog(QDialog):
         只在选了 AI 算法时才追加「AI 建议」列，普通算法下不多出一列空白。
         """
         show_ai = (report.algo == "ai")
+        # v2.0.6（反馈 2）：本次会话里已经删掉的路径 —— 重填树时跳过。
+        skip = set(getattr(self, "_dd_removed", None) or ())
         heads = (["标识 / 文件", "依据", "置信度", "AI 建议", "体积", "时长", "目录"]
                  if show_ai else ["标识 / 文件", "依据", "置信度", "体积", "时长", "目录"])
         self.dd_tree.setColumnCount(len(heads))
@@ -5469,12 +5755,30 @@ class SettingsDialog(QDialog):
             return ["%s（%s）" % (a.get("advice") or "", a.get("confidence") or "")]
 
         for g in report.groups:
-            row = [f"{g.label}   （{g.copies} 份，冗余 {g.redundant_copies}）",
+            # v2.0.6（反馈 2）：删掉的副本不再出现在树里。
+            # 「份数 / 体积 / 目录」跟着**剩下的成员**重算 —— 否则删完还写着「3 份」，
+            # 用户会以为没删掉（这正是《重复的片子我已经删掉了，检测结果里还有》的同款体验）。
+            members = [m for m in (g.members or []) if m.path not in skip]
+            if not members:
+                continue
+            lost = len(members) != len(g.members or ())
+            if lost and len({m.folder for m in members}) < 2:
+                continue        # 只剩同一个目录里的副本 → 已经不是「跨目录重复」
+            if lost:
+                _n = len({m.folder for m in members})
+                _label = f"{g.label}   （{_n} 份，冗余 {max(0, _n - 1)}）"
+                _total = dup_mod.human_size(sum(m.size for m in members))
+                _dirs = " | ".join(dict.fromkeys(m.folder for m in members))
+            else:
+                _label = f"{g.label}   （{g.copies} 份，冗余 {g.redundant_copies}）"
+                _total = g.total_text
+                _dirs = " | ".join(g.folders)
+            row = [_label,
                    "番号" if g.kind == "num" else "标题+年份",
                    g.confidence] + _ai_cells(g) + \
-                  [g.total_text, "", " | ".join(g.folders)]
+                  [_total, "", _dirs]
             top = QTreeWidgetItem(row)
-            top.setToolTip(C_DIR, "\n".join(g.folders))
+            top.setToolTip(C_DIR, "\n".join(_dirs.split(" | ")))
             ai_tip = ""
             if show_ai and g.ai:
                 ai_tip = "\nAI 建议：%s（%s）%s" % (g.ai.get("advice") or "",
@@ -5488,18 +5792,17 @@ class SettingsDialog(QDialog):
                 top.setForeground(C_AI, QBrush(QColor(
                     "#45d483" if (g.ai.get("advice") or "") == "全部保留" else "#f5a524")))
             # 分组行双击 → 打开它最大的那一份（体积最大的留、其余是冗余）
-            if g.members:
-                top.setData(0, Qt.UserRole, g.members[0].path)
-            for m in g.members:
+            top.setData(0, Qt.UserRole, members[0].path)
+            for m in members:
                 cells = [(m.original_filename or m.path),
-                         "保留（最大）" if m is g.members[0] else "冗余副本",
+                         "保留（最大）" if m is members[0] else "冗余副本",
                          m.num or ""] + ([""] if show_ai else []) + \
                         [m.size_text, m.duration_text, m.folder]
                 child = QTreeWidgetItem(cells)
                 child.setData(0, Qt.UserRole, m.path)
                 child.setToolTip(0, m.path)
                 child.setToolTip(C_DIR, m.folder)
-                if m is not g.members[0]:
+                if m is not members[0]:
                     child.setForeground(1, QBrush(QColor("#f87171")))
                 top.addChild(child)
             self.dd_tree.addTopLevelItem(top)
@@ -5508,10 +5811,13 @@ class SettingsDialog(QDialog):
                                    + [""] * (len(heads) - 1))
             head.setForeground(0, QBrush(QColor("#71717a")))
             for g in report.multipart:
+                parts = [m for m in (g.members or []) if m.path not in skip]
+                if not parts:
+                    continue
                 it = QTreeWidgetItem([g.label, "同目录多份", g.confidence]
                                      + ([""] if show_ai else [])
                                      + [g.total_text, "", " | ".join(g.folders)])
-                for m in g.members:
+                for m in parts:
                     ch = QTreeWidgetItem([m.original_filename or m.path, "分片",
                                           m.num or ""]
                                          + ([""] if show_ai else [])

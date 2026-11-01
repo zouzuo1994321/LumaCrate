@@ -407,6 +407,66 @@ def write_tags(nfo_path: str, tags) -> bool:
     return _write_multi_nodes(nfo_path, "tag", tags)
 
 
+def write_people(nfo_path: str, actors=(), directors=()) -> bool:
+    """把演职人员写回 nfo（`<actor>` 组 + 多个 `<director>`）—— v2.0.6（反馈 3）。
+
+    为什么必须回写：`scanner._link_actors()` 每次扫描（含详情页「刷新」单片）都会先
+    `clear_media_people()` 再按 nfo 重建关联。详情页手工「＋」加的人 / 点「×」删的人
+    若只改库不改 nfo，下一次扫描就被抹平 —— 与标签当年踩的是同一个坑（见 `write_tags`）。
+
+    `actors` = [{"name","role","thumb","type"}]；`directors` = ["姓名", ...]。
+    只替换 `<actor>` / `<director>` 两类节点，其余节点与缩进保持原样
+    （`<thumb>` 原样带回：库里存的是 nfo 里那个相对路径，别改写成缓存绝对路径）。
+    """
+    if not nfo_path or not os.path.exists(nfo_path):
+        return False
+    acts = []
+    for a in (actors or []):
+        if isinstance(a, str):
+            a = {"name": a}
+        name = str(a.get("name") or "").strip()
+        if not name:
+            continue
+        acts.append((name,
+                     str(a.get("role") or "").strip(),
+                     str(a.get("thumb") or "").strip(),
+                     str(a.get("type") or "Actor").strip() or "Actor"))
+    dirs = [str(d).strip() for d in (directors or []) if str(d).strip()]
+    try:
+        tree = ET.parse(nfo_path)
+        root = tree.getroot()
+        kids = list(root)
+        idx = [i for i, el in enumerate(kids)
+               if _strip_ns(el.tag) in ("actor", "director")]
+        for el in kids:
+            if _strip_ns(el.tag) in ("actor", "director"):
+                root.remove(el)
+        # 插回**原来第一处**的位置；两类节点都没出现过就追加到末尾
+        pos = min(idx) if idx else len(list(root))
+        for off, (name, role, thumb, ptype) in enumerate(acts):
+            el = ET.Element("actor")
+            ET.SubElement(el, "name").text = name
+            if role:
+                ET.SubElement(el, "role").text = role
+            if thumb:
+                ET.SubElement(el, "thumb").text = thumb
+            ET.SubElement(el, "type").text = ptype
+            root.insert(pos + off, el)
+        base = pos + len(acts)
+        for off, d in enumerate(dirs):
+            el = ET.Element("director")
+            el.text = d
+            root.insert(base + off, el)
+        try:
+            ET.indent(tree, space="  ")
+        except Exception:
+            pass
+        tree.write(nfo_path, encoding="utf-8", xml_declaration=True)
+        return True
+    except Exception:
+        return False
+
+
 def _write_multi_nodes(nfo_path: str, tag: str, values) -> bool:
     """把多值节点 `<tag>` 整体替换掉，插回**原来第一个**的位置（保持文件结构）。"""
     if not nfo_path or not os.path.exists(nfo_path):

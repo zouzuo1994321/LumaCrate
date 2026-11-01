@@ -5,7 +5,7 @@ import os
 from PySide6.QtCore import (Qt, QRectF, QRect, QPoint, QPointF, QSize, QTimer, QEvent,
                             QObject)
 from PySide6.QtGui import (QPixmap, QPainter, QColor, QPen, QLinearGradient, QFont,
-                           QTextLayout, QFontMetrics, QPainterPath, QAction)
+                           QTextLayout, QFontMetrics, QPainterPath, QAction, QCursor)
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea,
     QFrame, QMenu, QMessageBox, QApplication, QDialog, QDoubleSpinBox,
@@ -68,11 +68,83 @@ NAME_UNKNOWN = "#fafafa"
 #: （`main_window._CREW_NAME_DIM` 只是别名，别再各写一份）。
 CREW_NAME_DIM = "#a1a1aa"
 
+#: v2.0.5（反馈 2）：**收藏**的影片，名称用金黄色。
+#: 详情页大标题（`HeroView`）与影片卡标题（`PosterCard`）共用这一个真源，
+#: 且刻意与卡片左下角那颗金色星标（`_FavStarButton` 的 #f5a524）同色 ——
+#: 「亮起的星 → 亮起的标题」是同一件事的两种提示，不该是两种黄。
+FAV_TITLE = "#f5a524"
+
+#: v2.0.6（反馈 1）：「评分」按钮的**文字**用金色 —— 与收藏标题同一种黄，
+#: 但**只染字**（按钮底仍是 `#HeroAct` 的深底 + 鎏金描边），不再是一枚纯白字按钮。
+RATE_GOLD = "#f5a524"
+#: v2.0.6（反馈 1）：当按钮上显示的是**用户自己的评分**时，改橙色加粗的「用户评分 X.X」。
+#: 橙色刻意比金色更暖更亮一档（#ff8c3a vs #f5a524），这样「我打的分」与
+#: 「站点评分 / 收藏金」在同一个横幅里一眼能分开。
+RATE_USER = "#ff8c3a"
+
 
 def is_director_role(role_text):
     """角色串是不是「导演」。数据里可能是 `Director`（大写）/ `导演` / 其它写法。"""
     t = str(role_text or "").strip().lower()
     return t in ("director", "导演") or "导演" in t or "director" in t
+
+
+#: v2.0.7（反馈 2）：职务名中文化 —— nfo 里存的是英文 `Actor` / `Director`，
+#: 导演那条 `_parse_directors` 又写成中文「导演」，于是同一排头像下面
+#: 一半「Actor」一半「导演」，看着像两种东西。统一翻成中文再显示。
+#: 注意**只翻已知职务**：认不出来的原样显示（翻成「其他」等于把信息抹掉）。
+ROLE_ZH = {
+    "actor": "演员", "actress": "演员", "演员": "演员", "女優": "演员", "女优": "演员",
+    "director": "导演", "导演": "导演",
+    "writer": "编剧", "编剧": "编剧",
+    "producer": "制片", "制片": "制片",
+    "composer": "音乐", "音乐": "音乐",
+    "cinematographer": "摄影", "摄影": "摄影",
+    "editor": "剪辑", "剪辑": "剪辑",
+}
+
+#: v2.0.7（反馈 2）：排序档位 —— 「演员 > 导演 > 其他」。
+ROLE_RANK = {"演员": 0, "导演": 1}
+#: v2.0.7（反馈 2）：排序档位 —— 「女 > 男 > 未知」。
+GENDER_RANK = {"female": 0, "male": 1}
+
+
+def role_label(person):
+    """把一条演职人员的「职务」翻成中文（认不出来就原样返回，绝不吞掉）。"""
+    p = person or {}
+    raw = str(p.get("char_role") or p.get("role_type") or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    if low in ROLE_ZH:
+        return ROLE_ZH[low]
+    # 带附加信息的写法（`演員 / 主演`、`Director (監督)`）按关键词归一到两档
+    if "导演" in raw or "director" in low:
+        return "导演"
+    if "演员" in raw or "演員" in raw or "actor" in low or "女優" in raw or "女优" in raw:
+        return "演员"
+    return raw
+
+
+def cast_sort_key(person):
+    """演职人员排序键（v2.0.7 反馈 2）：**女 > 男 > 未知**，再**演员 > 导演 > 其他**。
+
+    用户原话：「然后一次是 女>男>未知，演员>导演>其他 的顺序」→ 性别是主序、
+    职务是次序；同档内保留 nfo 里的 `person_order`（原编排顺序），最后用姓名兜底，
+    保证排序**稳定**（同一份数据刷两次顺序不会跳）。
+
+    ⚠ 性别取 `people.gender`（female / male / 空）。没有性别记录的（大多是导演）
+    自然落到最后一档 —— 这是对的：导演本来就不按性别排。
+    """
+    p = person or {}
+    g = str(p.get("gender") or "").strip().lower()
+    zh = role_label(p)
+    try:
+        order = int(p.get("person_order") or 0)
+    except (TypeError, ValueError):
+        order = 0
+    return (GENDER_RANK.get(g, 2), ROLE_RANK.get(zh, 2), order,
+            str(p.get("name") or ""))
 
 
 def crew_name_color(gender, is_director=False):
@@ -609,11 +681,13 @@ class HeroBanner(QWidget):
 
 # ---------- 演员头像 ----------
 class CastAvatar(QFrame):
-    def __init__(self, person, on_click, on_context=None, size=96):
+    def __init__(self, person, on_click, on_context=None, size=96, on_remove=None):
         super().__init__()
         self.person = person
         self.on_click = on_click
         self.on_context = on_context
+        # v2.0.6（反馈 4）：给了回调就在头像右上角挂一枚「×」，点它把这个人从**本片**移除
+        self.on_remove = on_remove
         # v2.0.1（反馈 4）：卡片宽度按「头像 + 两侧流光」定，有无流光都一样宽，
         # 一排头像的姓名才对得齐。8 = 布局左右各 4px 内边距。
         self.setFixedWidth(size + 2 * GLOW_W + 8)
@@ -647,7 +721,9 @@ class CastAvatar(QFrame):
         name.setStyleSheet(f"font-size:12px;color:{_nc};font-weight:{_nw};")
         name.setToolTip(person.get("name", ""))
         v.addWidget(name)
-        role = QLabel(person.get("char_role") or person.get("role_type") or "")
+        # v2.0.7（反馈 2）：职务名中文化（Actor → 演员、Director/导演 → 导演），
+        # 认不出来的原样显示 —— 见 `role_label()`。
+        role = QLabel(role_label(person))
         role.setAlignment(Qt.AlignHCenter)
         role.setStyleSheet("font-size:11px;color:%s;" % CREW_NAME_DIM)
         v.addWidget(role)
@@ -656,6 +732,36 @@ class CastAvatar(QFrame):
         for _c in self.findChildren(QWidget):
             _c.setContextMenuPolicy(Qt.NoContextMenu)
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
+        # v2.0.6（反馈 4）：右上角的「×」—— 绝对定位叠在圆形头像的右上角（不进布局，
+        # 否则会占掉一行、把这一排头像的高度整体顶起来）。见 `_place_remove()`。
+        self._rm = None
+        if on_remove is not None:
+            rm = QPushButton("×", self)
+            rm.setCursor(Qt.PointingHandCursor)
+            rm.setFixedSize(18, 18)
+            rm.setToolTip("把「%s」从本片演职人员里移除" % (person.get("name") or ""))
+            rm.setStyleSheet(
+                "QPushButton{border:1px solid #3f3f46;background:rgba(24,24,27,0.90);"
+                "color:#d4d4d8;font-size:13px;font-weight:bold;padding:0;border-radius:9px;}"
+                "QPushButton:hover{background:#f87171;border-color:#f87171;color:#ffffff;}")
+            rm.clicked.connect(lambda _=False: self.on_remove(self.person))
+            rm.raise_()
+            self._rm = rm
+            self._place_remove()
+
+    def _place_remove(self):
+        """把「×」贴到圆形头像的右上角（随控件宽度变，故单独抽出来给 resizeEvent 复用）。"""
+        rm = getattr(self, "_rm", None)
+        if rm is None:
+            return
+        try:
+            rm.move(max(0, self.width() - rm.width() - 8), 0)
+        except RuntimeError:
+            pass
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_remove()
 
     def mousePressEvent(self, e):
         # 左键单击 → 进入详情（与双击同一动作）
@@ -725,10 +831,14 @@ class PersonSearchDialog(QDialog):
     不再跳到「工具」界面。
     """
 
-    def __init__(self, initial=None, old_name=None, on_pick=None, parent=None):
+    def __init__(self, initial=None, old_name=None, on_pick=None, parent=None,
+                 title=None, hint=None):
         super().__init__(parent)
         self._on_pick = on_pick
         self._old_name = old_name or ""
+        # v2.0.6（反馈 3）：同一个弹层兼作「添加」（详情页演职人员旁的「＋」）用 ——
+        # 只有标题与提示语不同，输入法/联想/点选那套逻辑完全复用，别复制第二份。
+        self._hint_base = hint or ""
         # v1.46.10（反馈 2）：**不能再用 Qt.Popup** —— Popup 窗口在 Windows 上不激活，
         # 输入法挂不上，弹层里切不了中文（用户截图里的「输入框打不出中文」就是这个）。
         # 改成一个**能激活的无边框对话框**：输入法正常、Esc 照旧关闭；
@@ -739,7 +849,10 @@ class PersonSearchDialog(QDialog):
         self.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, False)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setWindowTitle(f"替换「{self._old_name}」" if self._old_name else "搜索演员 / 导演")
+        # 弹层标题：给了 title 就用它（「添加演员 / 导演」），否则沿用「替换『XX』」
+        _tt = title or (f"替换「{self._old_name}」" if self._old_name else "搜索演员 / 导演")
+        self._title_text = _tt
+        self.setWindowTitle(_tt)
         self.setMinimumWidth(380)
         self.setMaximumHeight(470)
         # 弹层自身不透明底色（避免离屏/真机透明），不走全局 QWidget 背景规则
@@ -756,8 +869,7 @@ class PersonSearchDialog(QDialog):
         head = QHBoxLayout()
         head.setContentsMargins(1, 0, 1, 0)
         head.setSpacing(8)
-        self._title = QLabel(
-            f"替换「{self._old_name}」" if self._old_name else "搜索演员 / 导演")
+        self._title = QLabel(self._title_text)
         self._title.setStyleSheet(
             "font-size:13px;font-weight:bold;color:#ecedee;background:transparent;")
         head.addWidget(self._title)
@@ -780,7 +892,7 @@ class PersonSearchDialog(QDialog):
         self._edit.setFocusPolicy(Qt.StrongFocus)
         self._edit.setInputMethodHints(Qt.ImhNone)
         lay.addWidget(self._edit)
-        self._hint = QLabel("点选即替换本片该位 · 演员库 + 导演库 联想")
+        self._hint = QLabel(self._hint_base or "点选即替换本片该位 · 演员库 + 导演库 联想")
         self._hint.setStyleSheet("font-size:11px;color:#a1a1aa;background:transparent;")
         lay.addWidget(self._hint)
         self._list = QListWidget()
@@ -840,7 +952,8 @@ class PersonSearchDialog(QDialog):
         self._list.blockSignals(False)
         if self._list.count():
             self._list.setCurrentRow(0)
-        self._hint.setText(f"联想结果：{self._list.count()} 位（演员库 + 导演库）")
+        _pre = (self._hint_base + " · ") if self._hint_base else ""
+        self._hint.setText(f"{_pre}联想结果：{self._list.count()} 位（演员库 + 导演库）")
 
     def _on_text(self, text):
         self._refresh(text)
@@ -881,6 +994,156 @@ class PersonSearchDialog(QDialog):
 
 
 # ---------- 详情页 ----------
+class RoundClose(QWidget):
+    """圆形「×」小按钮（v2.0.8 反馈 1）：圆与叉**全部自绘**。
+
+    为什么不再用 `QPushButton("×")`：16px 的圆里塞一个 13px 的「×」字形，
+    字形的位置由字体的行高/侧承（ascent/descent、左边距）决定，不是由控件中心决定 ——
+    实测叉号整体偏左上约 1.5px，用户反馈「× 没有处在圆心」。改成画两条线后，
+    两条线的交点恒等于 `self.rect().center()`，任何字号 / DPI / 缩放下都不会偏。
+
+    颜色（与全局暗色面板一致）：
+      · 常态：灰底 `#3f3f46` + 亮灰叉；
+      · 悬停 / 按下：红底 `#f87171` + 纯白叉（危险动作用红，一眼知道点了会删东西）。
+    """
+
+    def __init__(self, d=14, on_click=None, parent=None, tip=""):
+        super().__init__(parent)
+        self._d = int(d)
+        self._hover = False
+        self._down = False
+        self._on_click = on_click
+        self.setFixedSize(self._d, self._d)
+        self.setCursor(Qt.PointingHandCursor)
+        if tip:
+            self.setToolTip(tip)
+        # 提示框要能弹在这枚小圆上（父控件是自绘芯片，默认吃不到 hover 事件）
+        self.setMouseTracking(True)
+
+    # 外部偶尔要换回调（标签重建时）
+    def set_callback(self, fn):
+        self._on_click = fn
+
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self._down = False
+        self.update()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._down = True
+            self.update()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._down:
+            self._down = False
+            self.update()
+            inside = self.rect().contains(e.position().toPoint())
+            e.accept()
+            if inside and self._on_click is not None:
+                self._on_click()
+            return
+        super().mouseReleaseEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        hot = self._hover or self._down
+        r = self._d / 2.0
+        c = QPointF(r, r)
+        # 常态：近黑底 + 一圈细描边（和演职人员头像右上角那枚 × 同一套视觉，不抢标签的字）
+        # 悬停：整枚转红 —— 删除是危险动作，指上去必须一眼看出来
+        p.setBrush(QColor("#f87171" if hot else "#18181b"))
+        p.setPen(Qt.NoPen if hot else QPen(QColor("#3f3f46"), 1.0))
+        p.drawEllipse(c, r - 0.5, r - 0.5)
+        pen = QPen(QColor("#ffffff" if hot else "#d4d4d8"),
+                   max(1.35, self._d * 0.115))
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        k = self._d * 0.225                  # 14px → 3.15px 半臂长
+        p.drawLine(QPointF(c.x() - k, c.y() - k), QPointF(c.x() + k, c.y() + k))
+        p.drawLine(QPointF(c.x() - k, c.y() + k), QPointF(c.x() + k, c.y() - k))
+        p.end()
+
+
+class TagChip(QWidget):
+    """标签胶囊 + 右上角圆形「×」（v2.0.8 反馈 1，重写 v2.0.6 的版本）。
+
+    v2.0.6 用「QWidget + QSS + QHBoxLayout(QLabel, QPushButton)」拼，出了两个问题：
+      ① **圆角丢失**：QSS 写 `border-radius:11px`，但芯片被布局压到只有 18px 高 ——
+         Qt 在「圆角半径 > 高度/2」时会**静默放弃圆角**，退化成直角矩形。
+         用户看到的「标签变方了」就是这个（半径本身没写错，是高度不够了）。
+      ② **× 不在圆心**：见 `RoundClose` 的说明。
+
+    现在整枚芯片自绘（圆角按高度算 = 永远是个胶囊），只有那枚「×」是子控件：
+
+        ┌───────────────┐
+        │             (×)│   ← 徽章圆心正好压在胶囊的右上角上（探出 OVER 像素）
+        └───┴───────────┘
+      · 胶囊矩形 = (0, OVER, W-OVER, PILL_H)，半径 = PILL_H/2 → 药丸形，不可能变方；
+      · 徽章是**容器内**的绝对定位子控件，不参与布局，所以探出去的部分不会被裁掉，
+        也不会把胶囊顶高（v2.0.6 的 `AlignTop` 就是被布局改高度的元凶）。
+    """
+
+    PILL_H = 20          # 胶囊净高
+    PAD_L = 10
+    PAD_R = 10
+    BADGE = 14           # 圆形「×」直径
+    OVER = 7             # 徽章圆心压在胶囊右上角 → 向上/向右各探出 7px
+
+    def __init__(self, text, on_delete=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("TagChip")        # 探针 / 冒烟按这个名字找芯片
+        self._text = str(text)
+        self._hover = False
+        f = QFont(self.font())
+        f.setPixelSize(12)
+        self.setFont(f)
+        self._tw = QFontMetrics(f).horizontalAdvance(self._text)
+        self.setFixedSize(self.PAD_L + self._tw + self.PAD_R + self.OVER,
+                          self.PILL_H + self.OVER)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("标签：%s" % self._text)
+        self.setMouseTracking(True)
+        self._dot = RoundClose(self.BADGE, on_delete, self,
+                               tip="删除标签「%s」" % self._text)
+        self._dot.move(self.width() - self.BADGE, 0)     # 中心 = (W-7, 7) = 胶囊右上角
+
+    # ---------- 外观 ----------
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pill = QRectF(0.5, self.OVER + 0.5, self.width() - self.OVER - 1.0,
+                      self.PILL_H - 1.0)
+        rad = pill.height() / 2.0                       # = 9.5 → 永远是药丸
+        p.setPen(QPen(QColor("#52525b" if self._hover else "#3f3f46"), 1.0))
+        p.setBrush(QColor("#2f2f34" if self._hover else "#27272a"))
+        p.drawRoundedRect(pill, rad, rad)
+        p.setPen(QColor("#ecedee" if self._hover else "#d4d4d8"))
+        p.drawText(QRectF(self.PAD_L, self.OVER, self._tw + 2, self.PILL_H),
+                   int(Qt.AlignLeft | Qt.AlignVCenter), self._text)
+        p.end()
+
+
 class HeroView(QScrollArea):
     def __init__(self, media, on_open_actor=None, on_back=None, on_changed=None,
                  on_person_replaced=None, on_open_actors=None):
@@ -932,13 +1195,20 @@ class HeroView(QScrollArea):
         bl.addLayout(self._action_row(m))
         # 标题（v1.45.4 反馈 1）：与简介同规则 —— **最多 2 行**，放不下「 ...」，高度锁 2 行。
         # 长番号标题在窄面板会折 3~4 行，把下面的元数据挤走，所以这里也用 ElidedLabel。
+        # v2.0.5（反馈 2）：收藏的影片标题走金黄色（见 FAV_TITLE），颜色只在
+        # `_apply_title_color()` 一处算 —— 收藏按钮是就地改状态、不重建页面，
+        # 所以 `_toggle_fav()` 里要再调它一次，否则金币色要等下次进详情页才生效。
         _t = ElidedLabel(m.get("title", ""), max_lines=2, px=34)
-        _t.setStyleSheet("color:#ecedee;font-weight:bold;")
         _apply_text_shadow(_t)
         bl.addWidget(_t)
+        self._title_lbl = _t
+        self._apply_title_color()
         # 元数据行（流式：窄面板自动换行 —— v1.19.1 反馈 1）
         meta = FlowLayout(spacing=12)
         self._meta = meta          # v1.18.0 反馈 97：评分写回后即时刷新此行
+        # v2.0.8（反馈 2）：本行**第一个「★ 5.0」改成金色**（RATE_GOLD = #f5a524）。
+        # 原来它是链接蓝 `#66a9ff` —— 用户圈出的「下面蓝色框里的评分」就是这处。
+        # 另一处同规则染色在 `_refresh_meta()`（打完分即时重刷这一行），两处必须同改。
         rating = f"★ {m.get('rating')}" if m.get("rating") else "★ —"
         year = m.get("year") or "—"
         country = f"({m.get('country')})" if m.get("country") else ""
@@ -951,7 +1221,7 @@ class HeroView(QScrollArea):
         if isinstance(m.get("user_rating"), (int, float)):
             parts.append(f"我评 {m['user_rating']:.1f}★")
         for i, t in enumerate(parts):
-            meta.addWidget(_label(str(t), 12, False, "#d4d4d8" if i else "#66a9ff", shadow=True))
+            meta.addWidget(_label(str(t), 12, False, "#d4d4d8" if i else RATE_GOLD, shadow=True))
         meta.addWidget(_label(kind_cn, 12, False, "#d4d4d8", shadow=True))
         meta.addStretch(1)
         bl.addLayout(meta)
@@ -994,6 +1264,21 @@ class HeroView(QScrollArea):
         root.addWidget(body, 1)
 
         self.setWidget(content)
+
+    def _apply_title_color(self):
+        """收藏的影片标题用金黄色（v2.0.5 反馈 2）；未收藏保持近白。
+
+        单独抽出来是因为收藏按钮**不重建页面**（`_toggle_fav` 只改 `self.media` 与按钮
+        文字），颜色必须跟着就地重算，否则要退出再进才变色。
+        """
+        lbl = getattr(self, "_title_lbl", None)
+        if lbl is None:
+            return
+        col = FAV_TITLE if self.media.get("favorite") else "#ecedee"
+        try:
+            lbl.setStyleSheet("color:%s;font-weight:bold;" % col)
+        except RuntimeError:          # 页面已换掉，C++ 对象没了
+            pass
 
     def _intro_section(self, m):
         """海报 + 基本信息 + 演职人员信息（v1.46.10 反馈 1：三栏并排，左图右文）。
@@ -1056,7 +1341,12 @@ class HeroView(QScrollArea):
         return [t.strip() for t in str(raw).split(",") if t.strip()]
 
     def _tag_section(self, m):
-        """标签行：现有标签（芯片） + 「＋」（添加）/「－」（删除）两个按钮。"""
+        """标签行：现有标签（芯片，每枚自带右上角「×」） + 「＋」添加按钮。
+
+        v2.0.6（反馈 4）：撤掉原来的「－」按钮（它要弹菜单再选「删除『XX』」，两步才删一个），
+        删除改为点芯片上的 ×。因为「－」没了，「清空全部标签」挪到芯片的**右键菜单**里
+        （见 `_tag_chip`），否则这个能力会凭空消失。
+        """
         box = QWidget()
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
@@ -1066,11 +1356,8 @@ class HeroView(QScrollArea):
         head.setSpacing(6)
         head.addWidget(_label("标签", 15, True))
         add = compact_button("＋", 28, 24, "添加标签")
-        rm = compact_button("－", 28, 24, "删除标签")
         add.clicked.connect(self._add_tag)
-        rm.clicked.connect(lambda: self._remove_tag_menu(rm))
         head.addWidget(add)
-        head.addWidget(rm)
         head.addStretch(1)
         v.addLayout(head)
 
@@ -1085,13 +1372,33 @@ class HeroView(QScrollArea):
         v.addWidget(host)
         return box
 
+    def _del_tag_btn_style(self):
+        """已废弃（v2.0.8）：芯片的「×」改成自绘的 `RoundClose`，不再走 QSS。
+
+        保留这个空壳只是为了让旧探针 / 旧脚本里 `getsource` 之类的断言不至于 KeyError；
+        新代码一律不要调它。
+        """
+        return ""
+
     def _tag_chip(self, text):
-        chip = QLabel(text)
-        chip.setStyleSheet(
-            "background:#27272a;color:#d4d4d8;border:1px solid #3f3f46;"
-            "border-radius:10px;padding:2px 10px;font-size:12px;")
-        chip.setToolTip(f"标签：{text}")
+        """标签芯片（v2.0.8 反馈 1 重写）：药丸 + **右上角圆形 ×**，点 × 即删这个标签。
+
+        v2.0.6 那一版是「QWidget + QSS 圆角 + 布局里的 QPushButton('×')」，两处硬伤：
+          · `border-radius:11px` 遇上 18px 高的芯片 → 半径 > 高度/2，**Qt 静默退成直角**；
+          · 「×」是字形，位置由字体度量决定 → 不在圆心。
+        现在换成 `TagChip`（整枚自绘、半径 = 高度/2）+ `RoundClose`（两条线自绘），
+        圆角和叉号中心都由几何算出，不依赖字体与 QSS 的隐式规则。
+        右键仍能唤出「删除某标签 / 清空全部标签」的旧菜单（保留批量能力）。
+        """
+        chip = TagChip(text, on_delete=lambda t=text: self._del_tag(t))
+        chip.setContextMenuPolicy(Qt.CustomContextMenu)
+        chip.customContextMenuRequested.connect(
+            lambda _p, w=chip: self._remove_tag_menu(w))
         return chip
+
+    def _del_tag(self, text):
+        """删掉单个标签（芯片上的 ×）。不弹确认 —— 误删了点「＋」打回来即可。"""
+        self._apply_tags([x for x in self._tag_values() if x != text])
 
     @staticmethod
     def _split_tags(text):
@@ -1243,10 +1550,11 @@ class HeroView(QScrollArea):
         self._fav_btn = fav
         row.addWidget(fav)
 
-        rate = QPushButton(self._rate_label(m))
+        rate = QPushButton("")
         rate.setObjectName("HeroAct")
         rate.clicked.connect(self._rate)
         self._rate_btn = rate
+        self._rate_style()          # v2.0.6（反馈 1）：文案 + 颜色一处算（金色 / 用户评分橙）
         row.addWidget(rate)
 
         # v1.20.0 新增：只针对本片重读 nfo 并刷新（不重扫整个媒体库）
@@ -1321,13 +1629,41 @@ class HeroView(QScrollArea):
         new = db.toggle_favorite(self.media["id"])
         self.media["favorite"] = new
         self._fav_btn.setText("已收藏" if new else "收藏")
+        self._apply_title_color()          # v2.0.5：收藏 → 标题变金黄色（就地生效）
         if self.on_changed:
             self.on_changed()
 
     # ---------- 用户评分（写库 + 回写 nfo） ----------
     def _rate_label(self, m):
-        v = m.get("user_rating")
-        return f"评分 {v:.1f}" if isinstance(v, (int, float)) else "评分"
+        """评分按钮的文案（v2.0.6 起「评过」显示为「用户评分 X.X」）。"""
+        v = (m or {}).get("user_rating")
+        return "用户评分 %.1f" % v if isinstance(v, (int, float)) else "评分"
+
+    def _rate_style(self):
+        """v2.0.6（反馈 1）：评分按钮的**文案 + 颜色**在这里一次算完。
+
+        v2.0.8（反馈 2）：用户重新指定了两处颜色 ——
+          · 这枚**按钮**（红框那个「评分」）→ 白字（`#ffffff`）。上一版给的是金色，
+            和标题上方的元数据行评分撞成两片黄，用户要求「按钮归按钮、评分归评分」；
+          · 标题下方那行元数据里的 **★ 5.0** → 金色（见 `_build` / `_refresh_meta`）。
+        评过分的状态不变：「用户评分 7.5」仍然是**橙色 + 加粗**（RATE_USER），
+        一眼区分「我自己打的分」。
+        只 inline 覆盖 color / font-weight：按钮底、鎏金描边、悬停态仍由 QSS 的
+        `#HeroAct` 决定 —— 这里若写整条 QSS 会把那套描边一起冲掉。
+        """
+        btn = getattr(self, "_rate_btn", None)
+        if btn is None:
+            return
+        v = self.media.get("user_rating")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            css = "color:%s;font-weight:bold;" % RATE_USER
+        else:
+            css = "color:#ffffff;"
+        try:
+            btn.setText(self._rate_label(self.media))
+            btn.setStyleSheet(css)
+        except RuntimeError:
+            pass
 
     def _rate(self):
         if self.media.get("id") is None:
@@ -1339,7 +1675,7 @@ class HeroView(QScrollArea):
         db.set_user_rating(self.media["id"], val)
         self.media["user_rating"] = val
         nfo_mod.write_user_rating(self.media.get("nfo_path"), val)
-        self._rate_btn.setText(self._rate_label(self.media))
+        self._rate_style()         # v2.0.6：文案与颜色一起变（金色 ⇄ 橙色加粗）
         self._refresh_meta()       # v1.18.0 反馈 97：即时刷新顶部「我评 X.X★」
         if self.on_changed:
             self.on_changed()
@@ -1367,7 +1703,7 @@ class HeroView(QScrollArea):
         if isinstance(m.get("user_rating"), (int, float)):
             parts.append(f"我评 {m['user_rating']:.1f}★")
         for i, t in enumerate(parts):
-            meta.addWidget(_label(str(t), 12, False, "#d4d4d8" if i else "#66a9ff", shadow=True))
+            meta.addWidget(_label(str(t), 12, False, "#d4d4d8" if i else RATE_GOLD, shadow=True))
         meta.addWidget(_label(kind_cn, 12, False, "#d4d4d8", shadow=True))
         meta.addStretch(1)
 
@@ -1403,17 +1739,33 @@ class HeroView(QScrollArea):
         box = QWidget()
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(_label("演职人员信息", 15, True))
+        v.setSpacing(6)
+        # v2.0.6（反馈 3）：与「标签」同一套头部 —— 标题 + 「＋」。
+        # 「－」不再建（反馈 4：删除改成每个头像右上角的「×」）。
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        head.addWidget(_label("演职人员信息", 15, True))
+        add = compact_button("＋", 28, 24, "从演员库 / 导演库添加一位到本片")
+        add.clicked.connect(self._add_person)
+        head.addWidget(add)
+        head.addStretch(1)
+        v.addLayout(head)
         cast = db.get_cast(m["id"]) if m.get("id") else []
+        # v2.0.7（反馈 2）：这一排头像的**显示顺序**由 `cast_sort_key` 决定 ——
+        #   女 > 男 > 未知，再 演员 > 导演 > 其他（同档保留 nfo 里的 person_order）。
+        # 只排「显示」，库里的 person_order 一个字节都不动：下次扫描回写 nfo 时
+        # 仍按原来的编排顺序，不会因为看了两眼界面就把数据改了。
+        cast = sorted(cast, key=cast_sort_key)
         if not cast:
-            v.addWidget(_label("（无演员信息，nfo 中未包含 actor 节点）", 12, False, "#a1a1aa"))
+            v.addWidget(_label("（无演职人员信息，点「＋」从演员库/导演库添加）", 12, False, "#a1a1aa"))
             return box
         row_host = QWidget()
         rl = QHBoxLayout(row_host)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(8)
         for p in cast:
-            rl.addWidget(CastAvatar(p, self.on_open_actor, on_context=self._apply_person_replace))
+            rl.addWidget(CastAvatar(p, self.on_open_actor, on_context=self._apply_person_replace,
+                                    on_remove=self._remove_person))
         rl.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1424,6 +1776,93 @@ class HeroView(QScrollArea):
         scroll.setStyleSheet("background:transparent;")
         v.addWidget(scroll)
         return box
+
+    # ---------- 演职人员增删（v2.0.6 反馈 3 / 4） ----------
+    def _add_person(self):
+        """「＋」→ 打开演员/导演联想框，点选即把该人**加进本片**演职人员。
+
+        与右键「替换」（`_apply_person_replace`）互补：那个是换掉现有的某一位，
+        这个是**新增**一位（比如 nfo 里漏了导演）。加完立刻重建演职人员区，
+        并同步回写 nfo（否则下次扫描按 nfo 重建关联时会被抹掉）。
+        """
+        mid = (self.media or {}).get("id")
+        if mid is None:
+            return
+        have = {p.get("id") for p in (db.get_cast(mid) or []) if p.get("id") is not None}
+
+        def _pick(p):
+            pid = (p or {}).get("id")
+            name = (p or {}).get("name") or ""
+            if pid is None:
+                return
+            if pid in have:
+                QMessageBox.information(self, "已在演职人员里",
+                                        "「%s」已经在本片演职人员中，无需重复添加。" % name)
+                return
+            cast = db.get_cast(mid) or []
+            order = max([int(x.get("person_order") or 0) for x in cast] + [-1]) + 1
+            # 导演的 char_role 沿用 nfo 的「导演」写法（`_parse_directors` 就是这么给的），
+            # 演员留空 → 界面回落显示 role_type（Actor），与既有数据一模一样。
+            role = "导演" if is_director_role((p or {}).get("role_type")) else ""
+            db.link_media_person(mid, pid, role, order)
+            self._sync_people_to_nfo()
+            QTimer.singleShot(0, self._refresh_cast)
+            if self.on_changed:
+                self.on_changed()
+
+        dlg = PersonSearchDialog(initial="", old_name="", on_pick=_pick, parent=self.window(),
+                                 title="添加演员 / 导演",
+                                 hint="点选即加入本片演职人员")
+        dlg.move_to(QCursor.pos())
+        dlg.exec()
+
+    def _remove_person(self, person):
+        """头像右上角「×」→ 把这个人从**本片**移除（不动演员库里的这个人）。"""
+        mid = (self.media or {}).get("id")
+        pid = (person or {}).get("id")
+        if mid is None or pid is None:
+            return
+        db.unlink_media_person(mid, pid)
+        self._sync_people_to_nfo()
+        # 与 replace 同理：本函数由头像上那枚按钮的 clicked 触发，此刻同步销毁含它的旧块
+        # 等于「在自身事件里删除自身」→ 延后一拍，等事件回到主循环再重建。
+        QTimer.singleShot(0, self._refresh_cast)
+        if self.on_changed:
+            try:
+                self.on_changed()
+            except Exception:
+                pass
+
+    def _sync_people_to_nfo(self):
+        """把当前演职人员**写回 nfo**（`<actor>` / `<director>`）。
+
+        不做这一步的后果很具体：`scanner._link_actors()` 每次扫都先清空 `media_people`
+        再按 nfo 重建 → 手工增删在下次扫描（甚至只是点一下「刷新」）后全部消失。
+        写失败不弹框：库里已生效、界面照常刷新（与 `_apply_tags` 同一口径）。
+        """
+        mid = (self.media or {}).get("id")
+        if mid is None:
+            return
+        actors, directors = [], []
+        try:
+            cast = db.get_cast(mid) or []
+        except Exception:
+            return
+        for p in cast:
+            name = (p.get("name") or "").strip()
+            if not name:
+                continue
+            if is_director_role(p.get("char_role") or p.get("role_type")):
+                directors.append(name)
+            else:
+                actors.append({"name": name,
+                               "role": p.get("char_role") or "",
+                               "thumb": p.get("thumb") or "",
+                               "type": "Actor"})
+        try:
+            nfo_mod.write_people(self.media.get("nfo_path"), actors, directors)
+        except Exception:
+            pass
 
     def _apply_person_replace(self, old_person, new_person):
         """右键搜索框点选某人 → 把**本片**该位演员/导演替换为该人（v1.40.14）。

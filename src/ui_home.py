@@ -11,8 +11,9 @@
 import os
 import time
 
-from PySide6.QtCore import Qt, QTimer, QEvent
-from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtCore import Qt, QTimer, QEvent, Signal, QPoint
+from PySide6.QtGui import (QCursor, QGuiApplication, QPainter, QColor, QPen,
+                           QPainterPath)
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QPushButton,
@@ -79,7 +80,12 @@ _COL_WIDTH = {
 
 
 def row_media(table, row):
-    """取某一行绑定的 media 字典（列顺序可变，故逐列查找 UserRole）。"""
+    """取某一行绑定的 media 字典（列顺序可变，故逐列查找 UserRole）。
+
+    v2.0.8：表格改成**视口懒填**后，屏幕外的行没有 QTableWidgetItem ——
+    这时按行号回退到表格持有的 `_media_view`（与 `_view` 同一份列表）。
+    没有这层回退，Ctrl+A 全选 / 批量导出 / 批量删除 会拿到一堆 None。
+    """
     if row is None or row < 0:
         return None
     for c in range(table.columnCount()):
@@ -88,7 +94,376 @@ def row_media(table, row):
             m = it.data(Qt.UserRole)
             if isinstance(m, dict):
                 return m
+    view = getattr(table, "_media_view", None)
+    if view is not None and 0 <= row < len(view):
+        return view[row]
     return None
+
+
+# ---------- v2.0.7（反馈 3）：表头「左漏斗（筛选）+ 右三角（排序）」 ----------
+#: 能按「数值比较」筛的列（其余列一律按「包含文本」筛）
+_NUM_COLS = frozenset(("rating", "user_rating", "play_count", "year",
+                       "file_size", "runtime_min"))
+
+
+def _draw_funnel(p, cx, cy, size, color, filled):
+    """画一枚漏斗（宽口 → 收腰 → 细颈）。
+
+    ⚠ 形状得**一眼能认出是漏斗**，否则会和右边的排序三角混成「两个小三角」：
+    上沿保持满宽走前 1/3 高度，再陡收到 22% 宽的颈，颈占下半段。
+    """
+    w, h = size * 0.94, size
+    x0, y0 = cx - w / 2.0, cy - h / 2.0
+    neck_w = w * 0.11          # 半宽
+    mouth_h = h * 0.58         # 收腰止于这个高度
+    path = QPainterPath()
+    path.moveTo(x0, y0)
+    path.lineTo(x0 + w, y0)
+    path.lineTo(cx + neck_w, y0 + mouth_h)
+    path.lineTo(cx + neck_w, y0 + h)
+    path.lineTo(cx - neck_w, y0 + h)
+    path.lineTo(cx - neck_w, y0 + mouth_h)
+    path.closeSubpath()
+    if filled:
+        p.fillPath(path, QColor(color))
+    else:
+        p.setPen(QPen(QColor(color), 1.35))
+        p.drawPath(path)
+
+
+def _draw_tri(p, cx, cy, size, color, up=True, filled=False):
+    """画一枚排序三角：升序朝上、降序朝下。"""
+    s = size * 0.46
+    path = QPainterPath()
+    if up:
+        path.moveTo(cx - s, cy + s * 0.80)
+        path.lineTo(cx + s, cy + s * 0.80)
+        path.lineTo(cx, cy - s * 0.86)
+    else:
+        path.moveTo(cx - s, cy - s * 0.80)
+        path.lineTo(cx + s, cy - s * 0.80)
+        path.lineTo(cx, cy + s * 0.86)
+    path.closeSubpath()
+    if filled:
+        p.fillPath(path, QColor(color))
+    else:
+        p.setPen(QPen(QColor(color), 1.35))
+        p.drawPath(path)
+
+
+class FilterHeaderView(QHeaderView):
+    """带「左漏斗 / 右三角」的表头（v2.0.7 反馈 3）。
+
+    为什么自绘而不是往上叠 QToolButton：表头会随**列宽拖动 / 列换位 / 横向滚动**
+    一直在动位置，叠上去的按钮得手工同步几何，任何一处跟不上就错位；自绘 + 自己
+    判点击位置最稳，也不额外占控件。
+
+    点击分区（`_zone_at`）：
+      · 距列左边 ≤ PAD+ICON+HIT → 漏斗 → `filterClicked`
+      · 距列右边 ≤ PAD+ICON+HIT → 三角 → `sortClicked`（正序 / 逆序）
+      · 其它 → 交回默认实现（原来的「点表头整列排序」和「拖动换位」都还在）
+    列窄于 `MIN_W` 时**不画也不响应**（画上去只会压住列名）。
+    """
+
+    ICON = 13
+    PAD = 7
+    HIT = 6
+    MIN_W = 68
+
+    filterClicked = Signal(int)      # logical index
+    sortClicked = Signal(int)
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.setMouseTracking(True)
+        self._hover = (-1, "")       # (logicalIndex, "funnel"/"tri")
+        self._hover_section = -1     # 鼠标所在的整列（v2.0.8 反馈 3：图标只在悬停列显示）
+        self.sort_col = -1           # 当前排序列（logical），-1 = 未排序
+        self.sort_asc = True
+        # 由 HomeListView 注入：logical -> 列 key / 列 key -> 是否已筛选
+        self.key_of = None
+        self.has_filter = None
+
+    # ---------- 几何 ----------
+    def _zones(self, idx):
+        """返回 ((漏斗 x0, x1), (三角 x0, x1))；列太窄或不在可视区返回 None。"""
+        if idx < 0 or idx >= self.count():
+            return None
+        left = self.sectionViewportPosition(idx)
+        w = self.sectionSize(idx)
+        if w < self.MIN_W or left + w <= 0:
+            return None
+        f1 = left + self.PAD + self.ICON + self.HIT
+        t0 = left + w - self.PAD - self.ICON - self.HIT
+        return ((left, f1), (t0, left + w))
+
+    def _zone_at(self, pos):
+        idx = self.logicalIndexAt(pos)
+        z = self._zones(idx)
+        if z is None:
+            return (-1, "")
+        (f0, f1), (t0, t1) = z
+        x = pos.x()
+        if f0 <= x <= f1:
+            return (idx, "funnel")
+        if t0 <= x <= t1:
+            return (idx, "tri")
+        return (-1, "")
+
+    @staticmethod
+    def _accent():
+        try:
+            a = (cfg.get_settings().appearance or {}).get("accent")
+            return str(a) if a else "#e4587c"
+        except Exception:
+            return "#e4587c"
+
+    def _filter_active(self, idx):
+        try:
+            key = self.key_of(idx) if self.key_of else None
+            return bool(key and self.has_filter and self.has_filter(key))
+        except Exception:
+            return False
+
+    # ---------- 绘制 ----------
+    def paintSection(self, painter, rect, logicalIndex):
+        super().paintSection(painter, rect, logicalIndex)
+        z = self._zones(logicalIndex)
+        if z is None:
+            return
+        # v2.0.8（反馈 3）：图标**只在鼠标停在这一列时**才画。
+        # 用户原话：「列表顶部 筛选和排序 图标，只有鼠标到了列表顶部的那一列才显示」——
+        # 满屏都是漏斗和三角太吵。唯一例外：**这一列确实有筛选**时，漏斗常驻
+        # （否则用户完全看不出「现在列表是筛过的」，会以为数据丢了）。
+        hov = logicalIndex == self._hover_section
+        active = self._filter_active(logicalIndex)
+        if not hov and not active:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        cy = rect.center().y()
+        # 漏斗：已筛选 → 实心强调色（常驻）；否则悬停时描边亮白
+        hov_f = self._hover == (logicalIndex, "funnel")
+        fcol = self._accent() if active else ("#ecedee" if hov_f else "#a1a1aa")
+        _draw_funnel(painter, rect.left() + self.PAD + self.ICON / 2.0, cy,
+                     self.ICON, fcol, filled=active)
+        # 三角：只随悬停出现；当前排序列 → 强调色实心且朝上/朝下
+        if hov:
+            here = logicalIndex == self.sort_col
+            hov_t = self._hover == (logicalIndex, "tri")
+            tcol = self._accent() if here else ("#ecedee" if hov_t else "#a1a1aa")
+            _draw_tri(painter, rect.right() - self.PAD - self.ICON / 2.0 - 1, cy,
+                      self.ICON, tcol, up=self.sort_asc, filled=here)
+        painter.restore()
+
+    # ---------- 交互 ----------
+    def _repaint_section(self, idx):
+        if 0 <= idx < self.count():
+            try:
+                self.updateSection(idx)
+            except RuntimeError:
+                pass
+
+    def mouseMoveEvent(self, e):
+        pos = e.position().toPoint()
+        zone = self._zone_at(pos)
+        sec = self.logicalIndexAt(pos)
+        if sec != self._hover_section:
+            old = self._hover_section
+            self._hover_section = sec
+            self._repaint_section(old)
+            self._repaint_section(sec)
+        if zone != self._hover:
+            old_idx = self._hover[0]
+            self._hover = zone
+            self._repaint_section(old_idx)
+            on_icon = bool(zone[1])
+            self.setCursor(Qt.PointingHandCursor if on_icon else Qt.ArrowCursor)
+        super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        if self._hover != (-1, "") or self._hover_section != -1:
+            idx = self._hover[0]
+            old = self._hover_section
+            self._hover = (-1, "")
+            self._hover_section = -1
+            self._repaint_section(idx)
+            self._repaint_section(old)
+            self.setCursor(Qt.ArrowCursor)
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            idx, zone = self._zone_at(e.position().toPoint())
+            if zone == "funnel":
+                self.filterClicked.emit(idx)
+                return                       # 不调 super：别触发「整列排序」
+            if zone == "tri":
+                self.sortClicked.emit(idx)
+                return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        # 图标区按下后松手不能落回默认实现（否则会额外发一次 sectionClicked）
+        if e.button() == Qt.LeftButton:
+            idx, zone = self._zone_at(e.position().toPoint())
+            if zone:
+                return
+        super().mouseReleaseEvent(e)
+
+
+class ColumnFilterPopup(QFrame):
+    """点表头漏斗弹出的小面板（v2.0.7 反馈 3）。
+
+    只做一件事：问清「这一列要留下哪些行」。三种形态按列自动选：
+      · 文本列 → 一个输入框（包含匹配，不区分大小写）；
+      · 数值列（评分 / 年份 / 观看次数 / 体积 / 时长）→ 比较符「= ≥ ≤」+ 数值；
+      · 枚举列（收藏、类型）→ 一排可点的胶囊，点哪个选哪个。
+    用 `Qt.Popup` 而不是普通对话框：点面板外面 / 按 Esc 自动关，和系统菜单一致。
+    """
+
+    applied = Signal(str, object)     # (列 key, spec dict 或 None=清除)
+
+    def __init__(self, key, label, spec=None, options=None, parent=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setObjectName("ColFilter")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._key = key
+        self._mode = ("eq" if options is not None
+                      else ("num" if key in _NUM_COLS else "text"))
+        spec = dict(spec or {})
+        self._chips = []
+        self._op = str(spec.get("op") or ">=")
+        self._eq = str(spec.get("value") or "")
+        self.setStyleSheet(
+            "QFrame#ColFilter{background:#18181b;border:1px solid #3f3f46;"
+            "border-radius:8px;}"
+            "QLabel{background:transparent;color:#ecedee;font-size:12px;}"
+            "QLabel#ColFilterHint{color:#8b8b93;font-size:11px;}"
+            "QPushButton#Chip{background:transparent;border:1px solid #3f3f46;"
+            "border-radius:11px;padding:3px 10px;color:#d4d4d8;font-size:12px;}"
+            "QPushButton#Chip:hover{border-color:#71717a;color:#fafafa;}"
+            "QPushButton#Chip:checked{background:rgba(228,88,124,0.22);"
+            "border-color:#e4587c;color:#ffffff;}"
+            "QPushButton#Mini{background:rgba(255,255,255,0.06);"
+            "border:1px solid #3f3f46;border-radius:6px;padding:4px 12px;"
+            "color:#ecedee;font-size:12px;}"
+            "QPushButton#Mini:hover{background:rgba(255,255,255,0.12);}"
+            "QPushButton#MiniGo{background:#e4587c;border:1px solid #e4587c;"
+            "border-radius:6px;padding:4px 12px;color:#ffffff;font-size:12px;"
+            "font-weight:bold;}"
+            "QPushButton#MiniGo:hover{background:#ef6f92;}")
+        self.setMinimumWidth(248)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 10)
+        v.setSpacing(7)
+        head = QLabel("筛选 · %s" % label)
+        head.setStyleSheet("font-size:12px;font-weight:bold;color:#fafafa;")
+        v.addWidget(head)
+
+        self.edit = None
+        if self._mode == "eq":
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            for text, val in (options or []):
+                b = QPushButton(text)
+                b.setObjectName("Chip")
+                b.setCheckable(True)
+                b.setCursor(Qt.PointingHandCursor)
+                b.setChecked(str(val) == self._eq)
+                b.clicked.connect(lambda _c, vv=str(val): self._set_eq(vv))
+                row.addWidget(b)
+                self._chips.append((b, str(val)))
+            row.addStretch(1)
+            v.addLayout(row)
+        else:
+            if self._mode == "num":
+                row = QHBoxLayout()
+                row.setSpacing(6)
+                for text, val in (("=", "="), ("≥", ">="), ("≤", "<=")):
+                    b = QPushButton(text)
+                    b.setObjectName("Chip")
+                    b.setCheckable(True)
+                    b.setCursor(Qt.PointingHandCursor)
+                    b.setFixedWidth(34)
+                    b.setChecked(val == self._op)
+                    b.clicked.connect(lambda _c, vv=val: self._set_op(vv))
+                    row.addWidget(b)
+                    self._chips.append((b, val))
+                row.addStretch(1)
+                v.addLayout(row)
+            self.edit = QLineEdit()
+            self.edit.setText(str(spec.get("value") or ""))
+            self.edit.setPlaceholderText("数值，例如 2020 / 7.5" if self._mode == "num"
+                                         else "包含这个文字即可（留空 = 不筛选）")
+            self.edit.returnPressed.connect(self._apply)
+            v.addWidget(self.edit)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(6)
+        btns.addStretch(1)
+        clear = QPushButton("清除")
+        clear.setObjectName("Mini")
+        clear.setCursor(Qt.PointingHandCursor)
+        clear.clicked.connect(lambda: self._emit(None))
+        btns.addWidget(clear)
+        ok = QPushButton("确定")
+        ok.setObjectName("MiniGo")
+        ok.setCursor(Qt.PointingHandCursor)
+        ok.clicked.connect(self._apply)
+        btns.addWidget(ok)
+        v.addLayout(btns)
+        self.adjustSize()
+
+    # ---------- 选择 ----------
+    def _set_op(self, val):
+        self._op = val
+        for b, vv in self._chips:
+            if vv in ("=", ">=", "<="):
+                b.setChecked(vv == val)
+
+    def _set_eq(self, val):
+        self._eq = val
+        for b, vv in self._chips:
+            b.setChecked(vv == val)
+
+    def spec(self):
+        """把面板上的选择折成一条筛选条件；空值返回 None（= 清除）。"""
+        if self._mode == "eq":
+            return {"mode": "eq", "value": self._eq} if self._eq != "" else None
+        text = self.edit.text().strip() if self.edit is not None else ""
+        if not text:
+            return None
+        if self._mode == "num":
+            try:
+                float(text)
+            except ValueError:
+                return None
+            return {"mode": "num", "op": self._op, "value": text}
+        return {"mode": "text", "value": text}
+
+    def _apply(self):
+        self._emit(self.spec())
+
+    def _emit(self, spec):
+        try:
+            self.applied.emit(self._key, spec)
+        finally:
+            self.close()
+            self.deleteLater()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.edit is not None:
+            self.edit.setFocus()
+            self.edit.selectAll()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(e)
 
 
 class HoverPreview(QFrame):
@@ -209,6 +584,9 @@ class HomeListView(QWidget):
         self._sort_col = -1
         self._sort_asc = True
         self._cols = list(cfg.get_settings().home_columns)
+        # v2.0.7（反馈 3）：每列筛选条件 {列 key: {"mode":…, "value":…}}，与排序一样落盘
+        self._filters = dict(cfg.get_settings().home_filters or {})
+        self._filter_popup = None
         self._reordering = False
         self._width_user = False        # 用户是否手动拖过列宽（未拖过则不落盘，避免把默认/拉伸值当用户设置）
         self._split_restored = False
@@ -265,6 +643,17 @@ class HomeListView(QWidget):
         lv.addWidget(self.search)
 
         self.table = QTableWidget(0, max(len(self._cols), 1))
+        # v2.0.7（反馈 3）：换成自绘表头（左漏斗 / 右三角）。**必须先装表头再
+        # `_rebuild_headers()`** —— 后者是按 `horizontalHeader()` 现取现配的
+        # （可拖动、可点、sectionMoved 连接），装晚了这些设置会落在被丢弃的旧表头上。
+        hdr = FilterHeaderView(Qt.Horizontal, self.table)
+        hdr.key_of = self._col_key
+        hdr.has_filter = lambda k: k in self._filters
+        hdr.setDefaultAlignment(Qt.AlignCenter)
+        hdr.filterClicked.connect(self._open_column_filter)
+        hdr.sortClicked.connect(self._sort)
+        self.table.setHorizontalHeader(hdr)
+        self._header = hdr
         self._rebuild_headers()
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
@@ -282,6 +671,8 @@ class HomeListView(QWidget):
         self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.table.viewport().installEventFilter(self)
         self.table.verticalScrollBar().valueChanged.connect(self._hide_preview)
+        # v2.0.8（反馈 4）：滚动就补填新露出的一段（`_fill_window` 自己判重，没变化直接返回）
+        self.table.verticalScrollBar().valueChanged.connect(lambda *_: self._fill_window())
         self.table.horizontalScrollBar().valueChanged.connect(self._hide_preview)
         lv.addWidget(self.table, 1)
 
@@ -367,6 +758,21 @@ class HomeListView(QWidget):
         # 用户未自定义列宽：最后一列拉伸填满，默认美观；
         # 一旦用户拖过列宽（home_column_widths 非空），改用精确宽度、关闭拉伸，避免污染列宽
         hdr.setStretchLastSection(not has_custom)
+        # v2.0.7（反馈 3）：换列 / 改列宽后，把「当前排序列 + 升降」再喂给表头，
+        # 否则三角会停在旧列上（排序没变、箭头却指错列）。
+        if isinstance(hdr, FilterHeaderView):
+            hdr.sort_col = self._sort_col
+            hdr.sort_asc = self._sort_asc
+            hdr.viewport().update()
+
+    def _col_key(self, logical):
+        """表头回调用：logical 列号 → 列 key（越界 / 换列途中一律 None）。"""
+        try:
+            if 0 <= logical < len(self._cols):
+                return self._cols[logical]
+        except Exception:
+            pass
+        return None
 
     # ---------- 列拖动排序 ----------
     def _on_section_moved(self, logical, old_visual, new_visual):
@@ -401,7 +807,13 @@ class HomeListView(QWidget):
         if self._reordering:
             return
         self._width_user = True
-        self._width_timer.start(150)
+        # v2.0.8：构造期 `table` 一进布局，最后一列的「拉伸」就会触发一次
+        # sectionResized —— 那一刻 `_width_timer` 还没建（它建在 `_build` 更后面），
+        # 直接 `.start()` 就是未捕获的 AttributeError（只影响「列宽去抖落盘」，
+        # 所以从前一直没被发现，但 app.log 里会留一条）。用 getattr 兜住。
+        _t = getattr(self, "_width_timer", None)
+        if _t is not None:
+            _t.start(150)
 
     def _commit_width(self):
         hdr = self.table.horizontalHeader()
@@ -438,6 +850,10 @@ class HomeListView(QWidget):
         except TypeError:
             self._view = sorted(self._view, key=lambda m: str(keyf(m)), reverse=not self._sort_asc)
         self._apply_view()
+        if getattr(self, "_header", None) is not None:
+            self._header.sort_col = self._sort_col
+            self._header.sort_asc = self._sort_asc
+            self._header.viewport().update()
 
     # ---------- 数据 ----------
     def live_refresh(self):
@@ -482,68 +898,112 @@ class HomeListView(QWidget):
         # （不确定态），配合 `_on_busy` 里的同步 repaint，朱红在阻塞开始前就画上去。
         _busy(-1, "载入列表")
         self._media = db.search_media(limit=100000, light=True, top_only=True)
-        self._view = list(self._media)
+        # v2.0.7（反馈 3）：重载后仍要套用「搜索框 + 每列筛选」，否则扫描刷新一次筛选就没了
+        self._view = self._filter_view(list(self._media))
         self._set_active_chip(None)      # v1.25.0（反馈 6）：回到全量列表 → 取消选中态
         self._apply_view()
 
-    _FILL_CHUNK = 200         # 每次往表格里填多少行，然后交还事件循环
+    _FILL_PAD = 14            # 视口上下各多填几行 —— 滚动时不会先看到一片空白
+    _FILL_FALLBACK = 60       # 视口还没布局出来时（构造期）先填这么多行
 
     def _apply_view(self):
-        """按当前 `_view` 重建表格 —— **分批填充**，避免一次填几万行把界面卡死。"""
-        self._fill_gen = getattr(self, "_fill_gen", 0) + 1
-        self._filled = 0
-        self._backdrop_id = None          # 列表内容变了 → 允许下一行重新刷磨砂底衬
-        # v1.46.8：分批填表也要报进度（0% 起步，`_fill_chunk` 每批推进）
-        _busy(0, "载入列表")
-        # v1.21.0：改行数也会逐行触发布局/重绘，先关掉刷新一次性做完
-        self.table.setUpdatesEnabled(False)
-        try:
-            self.table.setRowCount(0)
-            self.table.setRowCount(len(self._view))
-        finally:
-            self.table.setUpdatesEnabled(True)
-        self._schedule_fill()
+        """按当前 `_view` 重建表格 —— **只填视口里看得见的那几十行**（v2.0.8 反馈 4）。
 
-    def _schedule_fill(self, delay=0):
-        QTimer.singleShot(delay, self._fill_chunk)
-
-    def _fill_chunk(self):
-        gen = getattr(self, "_fill_gen", 0)
+        原来的做法是「`setRowCount(全量)` → 每 200 行一批把整表填满」，离屏实测 4 万条：
+          · `setRowCount(0)+setRowCount(40000)` 一次阻塞 **738ms**（纯建行，不含内容）；
+          · 全量填表 200 批合计 **3.5s**，每批 17ms —— 用户感觉就是「一直在顿」；
+          · 于是「点一次表头排序」= 再填一遍 = **4.1s 卡顿**，也就是反馈里的「有点卡」。
+        关键事实：QTableWidget 只有**可见行**真的需要 QTableWidgetItem。行数照旧设成全量
+        （滚动条长度才对），内容按视口懒填、滚到哪儿填哪儿 —— 排序 / 筛选 / 换列
+        立刻降到毫秒级，内存也少了几十万个 item。
+        """
         n = len(self._view)
-        if getattr(self, "_filled", 0) >= n:
-            _busy(None)                   # v1.46.8：空列表也要回落，别让进度条悬着
-            return
-        end = min(self._filled + self._FILL_CHUNK, n)
-        chunk = self._view[self._filled:end]
-        try:
-            amap = db.actors_map(ids=[m.get("id") for m in chunk if m.get("id")])
-        except Exception:
-            amap = {}
+        self._backdrop_id = None          # 列表内容变了 → 允许下一行重新刷磨砂底衬
+        # 行没填时 `row_media()` 按行号回退到这里（导出 / 全选 / 批量删都靠它）
+        self.table._media_view = self._view
         tv = self.table
-        # v1.21.0：一批 200 行 × 8 列 = 1600 次 setItem，若每次都重绘/发信号，
-        # 滚动期间就是持续的卡顿源。这里关掉刷新与信号，一批只处理一次。
+        if tv.rowCount() != n:
+            # 只有行数变了才动它 —— 排序时行数不变，这一步 0 开销
+            tv.setUpdatesEnabled(False)
+            try:
+                tv.setRowCount(n)
+            finally:
+                tv.setUpdatesEnabled(True)
+        self._filled_range = None
+        _busy(None)
+        self._fill_window(force=True)      # 填视口
+        self._on_select()                  # 底部「已选 N 项」跟着刷新
+
+    def _viewport_rows(self):
+        """当前视口覆盖的行区间 (first, last)；几何还没算出来时给安全默认值。"""
+        tv = self.table
+        h = tv.viewport().height()
+        first = tv.rowAt(0)
+        if first < 0:
+            vsb = tv.verticalScrollBar()
+            first = max(0, vsb.value()) if vsb is not None else 0
+        last = tv.rowAt(max(0, h - 1)) if h > 0 else -1
+        if last < 0:
+            row_h = tv.verticalHeader().defaultSectionSize() or 24
+            cnt = max(1, h // row_h) if h > 0 else self._FILL_FALLBACK
+            last = first + cnt - 1
+        return first, last
+
+    def _fill_window(self, force=False):
+        """把「视口 + 上下各 `_FILL_PAD` 行」需要的那一段写进表格。"""
+        n = len(self._view)
+        if n == 0:
+            self._filled_range = None
+            return
+        first, last = self._viewport_rows()
+        a = max(0, first - self._FILL_PAD)
+        b = min(n - 1, last + self._FILL_PAD)
+        if not force and (a, b) == getattr(self, "_filled_range", None):
+            return                      # 视口没动 → 什么都不用做
+        chunk = self._view[a:b + 1]
+        # 演员列仍然懒加载，但只查这一段（原先是整批 200 行查一次）
+        need = [m.get("id") for m in chunk
+                if m.get("id") and not m.get("_cast_loaded")]
+        amap, ok = {}, False
+        if need:
+            try:
+                amap = db.actors_map(ids=need)
+                ok = True
+            except Exception:
+                amap = {}
+        tv = self.table
         tv.setUpdatesEnabled(False)
         tv.blockSignals(True)
         try:
-            for i, m in enumerate(chunk, start=self._filled):
-                if not m.get("actors_text"):
+            for i, m in enumerate(chunk, start=a):
+                if not m.get("_cast_loaded"):
                     m["actors_text"] = amap.get(m.get("id"), "")
+                    if ok:
+                        # 查成功才记号：查失败（库忙）时下一步还会再试，不会永久显示「—」
+                        m["_cast_loaded"] = True
                 self._set_row(i, m)
         finally:
             tv.blockSignals(False)
             tv.setUpdatesEnabled(True)
-        self._filled = end
-        if gen != getattr(self, "_fill_gen", 0):
-            _busy(None)                   # v1.46.8：视图已变，本轮作废 → 进度条回落
-            return                      # 期间视图已变，丢弃本轮
-        if self._filled < n:
-            self.status.setText(f"正在载入列表… {self._filled} / {n}")
-            # v1.46.8：把 0~100 的确定进度喂给状态栏（每批一次，频率 = 200 行）
-            _busy(int(self._filled * 100 / max(1, n)), "载入列表")
-            self._schedule_fill(1)
-        else:
-            _busy(None)                   # v1.46.8：填完回落空槽
-            self._on_select()
+        self._filled_range = (a, b)
+
+    # ---- 兼容旧探针（dev/test_v121_cards.py 等还在调这两个名字）----
+    def _schedule_fill(self, delay=0):
+        QTimer.singleShot(delay, self._fill_window)
+
+    def _fill_chunk(self):
+        """旧名：语义等同「把当前视口填满」。"""
+        self._fill_window(force=True)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if getattr(self, "_view", None) is not None:
+            self._fill_window()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # 首次显示时视口几何才是真的 → 下一帧补一次（构造期算出来的是默认高度）
+        QTimer.singleShot(0, self._fill_window)
 
     def _col_value(self, m, key):
         if key == "title":
@@ -679,14 +1139,150 @@ class HomeListView(QWidget):
         self._search_timer.start(250)
 
     def _apply_filter_now(self):
-        text = self.search.text().strip().lower()
-        if not text:
-            self._view = list(self._media)
-        else:
-            self._view = [m for m in self._media
-                          if text in (m.get("title") or "").lower()
-                          or text in (m.get("actors_text") or "").lower()]
+        """搜索框去抖后 + 每列筛选统一在这里落地（v2.0.7：多了一层列筛选）。"""
+        self._hide_preview()
+        self._view = self._filter_view(list(self._media))
         self._apply_view()
+
+    def _filter_view(self, seq):
+        """把「搜索框 + 每列筛选」一起套上去，返回新列表（不改入参）。
+
+        筛选与排序是两件事：这里只筛，排序仍由 `_sort` / `_restore_sort` 负责，
+        所以「先筛后排」与「先排后筛」结果一致。
+        """
+        text = self.search.text().strip().lower()
+        out = []
+        for m in seq:
+            if text:
+                if (text not in (m.get("title") or "").lower()
+                        and text not in (m.get("actors_text") or "").lower()):
+                    continue
+            ok = True
+            for key, spec in self._filters.items():
+                if not self._match_filter(m, key, spec):
+                    ok = False
+                    break
+            if ok:
+                out.append(m)
+        return out
+
+    def _num_value(self, m, key):
+        """取一列的**数值**（筛选用）；取不到返回 None（这类行在数值筛选下一律不显示）。"""
+        if key == "runtime_min":
+            v = mm.runtime_minutes(m.get("runtime"))
+        else:
+            v = m.get(key)
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        try:
+            return float(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _match_filter(self, m, key, spec):
+        """单行是否通过某一列的筛选条件。"""
+        spec = spec or {}
+        mode = str(spec.get("mode") or "text")
+        val = spec.get("value")
+        if mode == "eq":
+            if val in (None, ""):
+                return True
+            if key == "favorite":
+                return bool(m.get("favorite")) == (str(val) == "1")
+            return str(self._col_value(m, key) or "") == str(val)
+        if mode == "num":
+            try:
+                target = float(val)
+            except (TypeError, ValueError):
+                return True
+            cur = self._num_value(m, key)
+            if cur is None:
+                return False
+            op = str(spec.get("op") or ">=")
+            if op == "=":
+                return abs(cur - target) < 1e-6
+            if op == "<=":
+                return cur <= target
+            return cur >= target
+        q = str(val or "").strip().lower()
+        if not q:
+            return True
+        return q in str(self._col_value(m, key) or "").lower()
+
+    # ---------- 每列筛选（v2.0.7 反馈 3） ----------
+    def _eq_options(self, key):
+        """枚举型列的候选值；返回 None 表示「不是枚举列」（走输入框 / 数值）。"""
+        if key == "favorite":
+            return [("全部", ""), ("已收藏", "1"), ("未收藏", "0")]
+        if key == "kind":
+            seen = []
+            for m in self._media or []:
+                v = self._col_value(m, "kind")
+                if v and v != "—" and v not in seen:
+                    seen.append(v)
+            return [("全部", "")] + [(v, v) for v in sorted(seen)[:12]]
+        return None
+
+    def _open_column_filter(self, logical):
+        """表头漏斗被点 → 在该列正下方弹出筛选面板。"""
+        key = self._col_key(logical)
+        if not key:
+            return
+        self._hide_preview()
+        label = dict(cfg.HOME_COLUMNS).get(key, key)
+        pop = ColumnFilterPopup(key, label, self._filters.get(key),
+                                self._eq_options(key), self)
+        pop.applied.connect(self._on_filter_applied)
+        self._filter_popup = pop
+        hdr = self.table.horizontalHeader()
+        left = hdr.sectionViewportPosition(logical)
+        gp = hdr.mapToGlobal(QPoint(max(0, left), hdr.height()))
+        pop.adjustSize()
+        scr = QGuiApplication.screenAt(gp) or QGuiApplication.primaryScreen()
+        x, y = gp.x(), gp.y() + 2
+        if scr is not None:
+            geo = scr.availableGeometry()
+            x = max(geo.left() + 6, min(x, geo.right() - pop.width() - 6))
+            y = max(geo.top() + 6, min(y, geo.bottom() - pop.height() - 6))
+        pop.move(x, y)
+        pop.show()
+
+    def _on_filter_applied(self, key, spec):
+        """面板点「确定 / 清除」→ 改状态 → 落盘 → 重筛 → 刷新漏斗高亮。"""
+        if spec:
+            self._filters[key] = spec
+        else:
+            self._filters.pop(key, None)
+        try:
+            cfg.get_settings().set_home_filters(self._filters)
+        except Exception:
+            pass
+        hdr = getattr(self, "_header", None)
+        if hdr is not None:
+            try:
+                hdr.viewport().update()
+            except RuntimeError:
+                pass
+        self._apply_filter_now()
+
+    def clear_column_filters(self):
+        """一键清掉所有列筛选（右键菜单「清除列筛选」用）。"""
+        if not self._filters:
+            return
+        self._filters = {}
+        try:
+            cfg.get_settings().set_home_filters({})
+        except Exception:
+            pass
+        hdr = getattr(self, "_header", None)
+        if hdr is not None:
+            try:
+                hdr.viewport().update()
+            except RuntimeError:
+                pass
+        self._apply_filter_now()
 
     def _click_chip(self, key):
         """点同一个快捷筛选第二次 = 取消筛选，回到全部作品（v1.25.0 反馈 6）。
@@ -730,6 +1326,8 @@ class HomeListView(QWidget):
         self.search.blockSignals(True)
         self.search.clear()
         self.search.blockSignals(False)
+        # v2.0.7（反馈 3）：快捷筛选（最近添加 / 我的收藏 / 合集）之上仍叠每列筛选
+        self._view = self._filter_view(self._view)
         self._apply_view()
 
     def _sort(self, col):
@@ -749,6 +1347,11 @@ class HomeListView(QWidget):
                                 reverse=not self._sort_asc)
         self._apply_view()
         cfg.get_settings().set_home_sort(self._cols[col], self._sort_asc)
+        # v2.0.7（反馈 3）：把排序列/方向告诉表头，好把对应的三角点亮
+        if getattr(self, "_header", None) is not None:
+            self._header.sort_col = self._sort_col
+            self._header.sort_asc = self._sort_asc
+            self._header.viewport().update()
 
     def _on_select(self):
         rows = self.table.selectionModel().selectedRows()

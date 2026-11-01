@@ -85,9 +85,10 @@
     "key": "added_date",
     "asc": false
   },
+  "home_filters": {},
   "home_split": [
-    782,
-    925
+    780,
+    927
   ],
   "window_opacity": 1.0,
   "libraries": [

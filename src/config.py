@@ -423,6 +423,9 @@ class Settings:
         self.home_columns = list(DEFAULT_HOME_COLUMNS)
         self.home_column_widths = {}        # 列 key -> 像素宽（持久化列宽）
         self.home_sort = {"key": None, "asc": True}   # 首页列表排序（列 key + 升降）
+        # v2.0.7（反馈 3）：首页列表的**每列筛选**条件 —— {列 key: {"mode":…, "value":…}}。
+        # mode: "text"（包含）/ "num"（op = "=" / ">=" / "<="）/ "eq"（枚举，如收藏、类型）
+        self.home_filters = {}
         self.home_split = []                # 首页「列表 / 详情」分栏宽度 [左, 右]
         self.window_opacity = 1.0          # 整窗透明度（0.2~1.0，1=不透明）
         self.libraries = [dict(x) for x in DEFAULT_LIBRARIES]   # 唯一的媒体库列表（全用户命名）
@@ -501,6 +504,14 @@ class Settings:
         if isinstance(data.get("home_split"), list):
             self.home_split = [int(x) for x in data["home_split"]
                                if isinstance(x, (int, float)) and int(x) > 0]
+        # v2.0.7（反馈 3）：首页每列筛选条件。只认已知列 + 结构正确的字典，
+        # 且 value 非空的（空 value 等于「没筛」，留着会白占一个 key 让漏斗误显示为「已筛选」）。
+        if isinstance(data.get("home_filters"), dict):
+            _valid = {k for k, _ in HOME_COLUMNS}
+            self.home_filters = {
+                k: v for k, v in data["home_filters"].items()
+                if k in _valid and isinstance(v, dict)
+                and str(v.get("value", "")).strip() != ""}
         if isinstance(data.get("window_opacity"), (int, float)):
             self.window_opacity = max(0.2, min(1.0, float(data["window_opacity"])))
         if isinstance(data.get("libraries"), list):
@@ -681,6 +692,7 @@ class Settings:
                 "home_columns": self.home_columns,
                 "home_column_widths": self.home_column_widths,
                 "home_sort": self.home_sort,
+                "home_filters": self.home_filters,      # v2.0.7（反馈 3）
                 "home_split": self.home_split,
                 "window_opacity": self.window_opacity,
                 "libraries": self.libraries,
@@ -737,6 +749,15 @@ class Settings:
 
     def set_home_sort(self, key, asc: bool):
         self.home_sort = {"key": key, "asc": bool(asc)}
+        self.save()
+
+    def set_home_filters(self, filters: dict):
+        """v2.0.7（反馈 3）：首页每列筛选条件落盘（空 value / 未知列一律丢掉）。"""
+        valid = {k for k, _ in HOME_COLUMNS}
+        self.home_filters = {
+            k: dict(v) for k, v in (filters or {}).items()
+            if k in valid and isinstance(v, dict)
+            and str(v.get("value", "")).strip() != ""}
         self.save()
 
     def set_home_split(self, sizes: list):

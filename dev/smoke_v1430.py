@@ -64,8 +64,8 @@ import main_window as mw
 from ui_hero import HeroView
 
 print("== 版本 ==")
-check("VERSION == v2.0.4", VER.VERSION == "v2.0.4", VER.VERSION)
-check("BUILD == 2610290125", VER.BUILD == "2610290125", VER.BUILD)
+check("VERSION == v2.0.7", VER.VERSION == "v2.0.7", VER.VERSION)
+check("BUILD == 2611010128", VER.BUILD == "2611010128", VER.BUILD)
 
 # ============================================================
 print("== ① 导航名：数据与日志（v1.43.1 回改） ==")
@@ -1257,8 +1257,9 @@ win.stack.addWidget(_home)
 win.stack.setCurrentWidget(_home)
 _spin(1500)
 mw.BUSY.changed.disconnect(_on_busy_probe2)
-check("首页列表载入上报状态栏进度",
-      any(isinstance(_p, (int, float)) and _p >= 0 and _t == "载入列表" for _p, _t in _SEEN2),
+check("首页列表载入上报状态栏进度（v2.0.8：改成「不确定态 → 立刻回落」）",
+      any(_p == -1 and _t == "载入列表" for _p, _t in _SEEN2)
+      and any(_p is None for _p, _t in _SEEN2),
       _SEEN2[:4])
 _ui_home_txt = open(os.path.join(ROOT, "src", "ui_home.py"), encoding="utf-8").read()
 check("ui_home 已接入 set_busy", "def _busy(" in _ui_home_txt
@@ -1379,8 +1380,9 @@ check("反馈3 nfo 编辑器里也有「标签」字段",
       [f[0] for f in _nfe.FIELDS if f[2] == "multi"])
 check("反馈3 media 表已有 tags 列",
       "tags" in {r["name"] for r in db.get_conn().execute("PRAGMA table_info(media)").fetchall()})
-check("反馈3 详情页有 ＋/－ 按钮与落库调用",
+check("反馈3 详情页有标签的 ＋ 按钮（v2.0.6：删除改到芯片上的 ×）与落库调用",
       "添加标签" in _hero_src and "删除标签" in _hero_src
+      and "TagChip" in _hero_src
       and "db.set_media_tags" in _hero_src and "nfo_mod.write_tags" in _hero_src)
 
 # 真点一次「＋」：QInputDialog 打桩返回文本，断言按钮 → 落库 → nfo 全链路
@@ -1390,8 +1392,10 @@ _hv2.resize(1100, 1000)
 _hv2.show()
 for _ in range(20):
     app.processEvents()
-_plus = [b for b in _hv2.findChildren(_uh.QPushButton) if b.text() == "＋"]
-check("反馈3 找得到「＋」按钮", len(_plus) == 1, len(_plus))
+_plus = [b for b in _hv2.findChildren(_uh.QPushButton)
+         if b.text() == "＋" and "标签" in b.toolTip()]
+check("反馈3 找得到标签的「＋」按钮（演职人员那枚的 tooltip 不含「标签」）",
+      len(_plus) == 1, len(_plus))
 if _plus:
     _orig_get = _uh.QInputDialog.getText
     _uh.QInputDialog.getText = staticmethod(lambda *a, **k: ("真机标签, 第二个", True))
@@ -1788,8 +1792,9 @@ for _dd, _tt, _mm in _tk:
         if _s.startswith("路径 ") and _s not in _seq:
             _seq.append(_s)
 check("ScanWorker：按传入顺序逐条扫（路径 1/2 → 2/2）", _seq == ["路径 1/2", "路径 2/2"], _seq)
-check("ScanWorker：最后一条 tick 是定量 2/2",
-      bool(_tk) and _tk[-1][0] == 2 and _tk[-1][1] == 2,
+# v2.0.5：分母改成「本条路径」的片数 —— 两条路径各 1 个视频，所以末条是 1/1（旧版是全局 2/2）
+check("ScanWorker：末条 tick 是「本条路径」的定量（1/1，不再是全局 2/2）",
+      bool(_tk) and _tk[-1][0] == 1 and _tk[-1][1] == 1,
       str(_tk[-1]) if _tk else "")
 check("ScanWorker：有新片才发 live（边扫边刷新）", len(_lv) >= 1, len(_lv))
 check("ScanWorker：done 带统计", _dn and "movie" in _dn[0], _dn)
@@ -2816,6 +2821,858 @@ check("详情页角色小字（Actor / 导演）与默认灰同色",
 check("默认灰只有一个真源（main_window 里的常量就是 ui_hero 那份）",
       mw._CREW_NAME_DIM is uhero.CREW_NAME_DIM,
       "%r / %r" % (mw._CREW_NAME_DIM, uhero.CREW_NAME_DIM))
+
+print("== ㉚ v2.0.5：扫描改成「逐路径 统计→扫描」/ 新增·变更·减少 实时刷新 / 收藏金色标题 / 标题靠左 ==")
+
+import ctypes
+
+# ---- ① 结构：全局预统计已删除，统计改为逐路径 ----
+_src_wk = inspect.getsource(mw.ScanWorker)
+check("ScanWorker 不再有全局预统计 _count_files", "def _count_files" not in _src_wk)
+check("改由 _count_path 只数「这一条」路径", "def _count_path" in _src_wk)
+check("run() 里先数本条再扫本条（count 在 scan_library 之前）",
+      _src_wk.index("self._count_path(p)") < _src_wk.index("scanner_mod.scan_library("))
+check("路径整条读不了时早退，不把整库误报成「减少」",
+      "_path_unreadable" in inspect.getsource(mw.ScanWorker._count_gone))
+check("total_hint / precount 不再进进度分母（只剩形参兼容）",
+      "_total = int(total_hint" not in _src_wk and "self._total " not in _src_wk)
+
+
+def _mk_case(root, tag, n):
+    for k in range(n):
+        d = os.path.join(root, "S_%s%d" % (tag, k))
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "movie.nfo"), "w", encoding="utf-8") as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>'
+                    '<movie><title>%s%d</title><year>2021</year></movie>' % (tag, k))
+        with open(os.path.join(d, "%s%d.mp4" % (tag, k)), "wb") as f:
+            f.write(b"\0" * 512)
+    return root
+
+
+_pc = _mk_case(os.path.join(TMP, "scan_lib", "pc"), "C", 2)   # 2 片
+_pd = _mk_case(os.path.join(TMP, "scan_lib", "pd"), "D", 1)   # 1 片
+
+_wk5 = mw.ScanWorker([_pc, _pd], library_name="冒烟库", mode="new")
+_tk5, _lv5, _dn5 = [], [], []
+_wk5.tick.connect(lambda d, t, m: _tk5.append((d, t, m)))
+_wk5.live.connect(lambda: _lv5.append(1))
+_wk5.done.connect(lambda c: _dn5.append(dict(c)))
+_wk5.run()
+
+_keys, _den = [], []
+for _d, _t, _m in _tk5:
+    _seg = [s for s in _m.split(" · ") if s.startswith("路径 ")]
+    if not _seg:
+        continue                     # 「正在统计路径…」那条没有分节，跳过
+    _k = _seg[0]
+    if _k not in _keys:
+        _keys.append(_k)
+    if _t and (_k, _t) not in _den:
+        _den.append((_k, _t))
+check("路径顺序仍是配置里的自上而下", _keys == ["路径 1/2", "路径 2/2"], _keys)
+check("两条路径的分母各自独立（2 片 / 1 片，不再是全局 3）",
+      _den == [("路径 1/2", 2), ("路径 2/2", 1)], _den)
+check("每条路径扫完都强制发一次 live（≥ 路径数 + 1）", len(_lv5) >= 3, len(_lv5))
+check("done 带 新增 / 变更 / 减少 三个数",
+      all(k in _dn5[0] for k in ("new", "changed", "removed")), _dn5[0] if _dn5 else "无")
+check("首次扫两条路径：新增 3、变更 0、减少 0",
+      _dn5[0]["new"] == 3 and _dn5[0]["changed"] == 0 and _dn5[0]["removed"] == 0,
+      _dn5[0] if _dn5 else "无")
+
+# ---- ② 三态：new / same / changed ----
+_it5 = []
+_scanner.scan_library(_pc, None, library_name="冒烟库", mode="overwrite",
+                      on_item=lambda d: _it5.append(dict(d)))
+check("on_item 带上 state 字段", bool(_it5) and "state" in _it5[0], _it5[:1])
+check("复扫「全部并覆盖」时全部是 same（不再无脑重写整行）",
+      bool(_it5) and all(x["state"] == "same" for x in _it5),
+      [x["state"] for x in _it5])
+_wk6 = mw.ScanWorker([_pc], library_name="冒烟库", mode="overwrite")
+_dn6 = []
+_wk6.live.connect(lambda: None)
+_wk6.done.connect(lambda c: _dn6.append(dict(c)))
+_wk6.run()
+check("无变化复扫：变更 0（旧版会把整行重写、看不出到底改没改）",
+      _dn6[0]["changed"] == 0 and _dn6[0]["new"] == 0, _dn6[0])
+
+_nfo5 = os.path.join(_pc, "S_C0", "movie.nfo")
+with open(_nfo5, "w", encoding="utf-8") as f:
+    f.write('<?xml version="1.0" encoding="UTF-8"?>'
+            '<movie><title>改过名的片子</title><year>2022</year></movie>')
+_wk7 = mw.ScanWorker([_pc], library_name="冒烟库", mode="overwrite")
+_dn7 = []
+_wk7.done.connect(lambda c: _dn7.append(dict(c)))
+_wk7.run()
+check("改了 nfo 标题 → 变更 1", _dn7[0]["changed"] == 1, _dn7[0])
+_mid5 = db.media_id_by_path(os.path.join(_pc, "S_C0", "C0.mp4"))
+_row5 = db.get_media(_mid5) if _mid5 else None
+check("变更会写进库（标题真的变了）",
+      bool(_row5) and (_row5.get("title") or "") == "改过名的片子",
+      (_row5 or {}).get("title"))
+
+_vid5 = os.path.join(_pd, "S_D0", "D0.mp4")
+ctypes.windll.kernel32.SetFileAttributesW(_vid5, 0x80)
+ctypes.windll.kernel32.DeleteFileW(_vid5)
+_wk8 = mw.ScanWorker([_pd], library_name="冒烟库", mode="new")
+_dn8 = []
+_wk8.done.connect(lambda c: _dn8.append(dict(c)))
+_wk8.run()
+check("删掉一个视频 → 减少 1", _dn8[0]["removed"] == 1, _dn8[0])
+check("索引记录不会被扫描悄悄删掉（减少只是统计）",
+      db.media_id_by_path(_vid5) is not None)
+_wk9 = mw.ScanWorker([os.path.join(TMP, "scan_lib", "没这个目录")], mode="new")
+_dn9 = []
+_wk9.done.connect(lambda c: _dn9.append(dict(c)))
+_wk9.run()
+check("整条路径不可用时不会误报「减少」", _dn9[0]["removed"] == 0, _dn9[0])
+
+# ---- ③ 三态 API 直查 ----
+_f5 = os.path.join(TMP, "tri.mp4")
+_m1, _s1 = db.upsert_media_state(mode="overwrite", kind="movie", title="甲",
+                                 sort_title="a", file_path=_f5)
+_m2, _s2 = db.upsert_media_state(mode="overwrite", kind="movie", title="甲",
+                                 sort_title="a", file_path=_f5)
+_m3, _s3 = db.upsert_media_state(mode="overwrite", kind="movie", title="乙",
+                                 sort_title="a", file_path=_f5)
+check("upsert_media_state：首插 new / 同值 same / 改值 changed",
+      (_s1, _s2, _s3) == ("new", "same", "changed"), str((_s1, _s2, _s3)))
+check("三态不改变 upsert_media_by_path 的返回值语义（还是 id）",
+      db.upsert_media_by_path(mode="overwrite", kind="movie", title="乙",
+                              sort_title="a", file_path=_f5) == _m1)
+check("剧集也用自己的路径当主键（不再每扫一次插一条重复）",
+      'info["file_path"] = nfo_path' in inspect.getsource(_scanner._do_tvshow))
+
+# ---- ④ 结果文案 ----
+_txt5 = mw.scan_result_text({"new": 9, "movie": 7, "tvshow": 1, "episode": 1,
+                             "changed": 3, "removed": 2})
+check("完成对话框写明 新增/变更/减少",
+      "新增 9" in _txt5 and "变更 3" in _txt5 and "减少 2" in _txt5, _txt5)
+
+# ---- ⑤ 收藏 → 影片名称金黄色 ----
+check("金色只有一个真源 ui_hero.FAV_TITLE == #f5a524", uhero.FAV_TITLE == "#f5a524",
+      uhero.FAV_TITLE)
+check("金色与卡片金星同色（#f5a524）", uhero.FAV_TITLE == uhero.NAME_DIRECTOR,
+      "%s / %s" % (uhero.FAV_TITLE, uhero.NAME_DIRECTOR))
+
+
+def _card5(fav, title="259LUXU-1903 長いタイトルのテスト"):
+    m = {"id": 1, "title": title, "poster": "", "rating": 8.5, "year": 2025,
+         "quality": "4K", "favorite": fav, "file_path": "X:/a/b.mp4",
+         "plot": "", "tags": ""}
+    return mw.PosterCard(m, lambda *_a: None, on_play=lambda *_a: None,
+                         on_fav=lambda *_a: None)
+
+
+_c_fav = _card5(1)
+_c_dim = _card5(0)
+check("收藏卡片的标题是金黄色",
+      uhero.FAV_TITLE in _c_fav._title.styleSheet(), _c_fav._title.styleSheet())
+check("未收藏卡片标题不带内联色（回落 QSS 的白）",
+      _c_dim._title.styleSheet() == "", _c_dim._title.styleSheet())
+check("点星标就地变金（_fav_clicked 里重算颜色）",
+      "_apply_title_color()" in inspect.getsource(mw.PosterCard._fav_clicked))
+_c_tog = mw.PosterCard({"id": 2, "title": "T", "poster": "", "favorite": 0,
+                        "file_path": "X:/a/c.mp4", "plot": "", "tags": ""},
+                       lambda *_a: None,
+                       on_fav=lambda m: m.update({"favorite": 1}))
+_c_tog._fav_clicked()
+check("星标点亮后标题立刻变金（不重建卡片）",
+      uhero.FAV_TITLE in _c_tog._title.styleSheet(), _c_tog._title.styleSheet())
+
+_src_hv5 = inspect.getsource(uhero.HeroView._apply_title_color)
+check("详情页大标题收藏走同一个金色真源", "FAV_TITLE" in _src_hv5, _src_hv5.splitlines()[0])
+check("详情页未收藏回落近白 #ecedee", "#ecedee" in _src_hv5)
+check("详情页收藏按钮就地改色",
+      "_apply_title_color()" in inspect.getsource(uhero.HeroView._toggle_fav))
+check("详情页 _build 不再写死标题颜色",
+      '_t.setStyleSheet("color:#ecedee' not in inspect.getsource(uhero.HeroView._build))
+
+# ---- ⑥ 卡片标题靠左 ----
+_align = _c_dim._title.alignment()
+check("卡片标题靠左（有 AlignLeft）", bool(_align & Qt.AlignLeft), int(_align))
+check("卡片标题不再居中（无 AlignCenter）",
+      not (_align & Qt.AlignCenter), int(_align))
+check("仍然顶对齐 + 自动换行",
+      bool(_align & Qt.AlignTop) and _c_dim._title.wordWrap(), int(_align))
+check("左右两行小字与标题同一条左基线（标题不再被居中成锯齿）",
+      bool(_c_dim._title.alignment() & Qt.AlignLeft)
+      and "Qt.AlignLeft" in inspect.getsource(mw.PosterCard.__init__))
+
+print()
+print("== ㉛ v2.0.6：评分金色/用户评分橙 / 重复检测打开与删除 / 演职人员 ＋ 与 × / 标签 × ==")
+import inspect as _insp31
+import duplicates as _dup31
+import ui_hero as _uh31
+
+_HERO_SRC31 = _insp31.getsource(_uh31.HeroView)
+_CAST_SRC31 = _insp31.getsource(_uh31.CastAvatar)
+
+# ---- ① 评分按钮 ----
+check("① 金色真源与收藏金同一个黄", _uh31.RATE_GOLD == "#f5a524", _uh31.RATE_GOLD)
+check("① 用户评分橙 #ff8c3a", _uh31.RATE_USER == "#ff8c3a", _uh31.RATE_USER)
+check("① 两色不是同一个值（一眼能分开）", _uh31.RATE_GOLD != _uh31.RATE_USER)
+
+_mr31 = dict(db.get_media(_media_id))
+_mr31["user_rating"] = None          # 确保从「没评过」这一态开始（按钮是 _build 建的）
+_hv_r = _uh31.HeroView(_mr31)
+_hv_r.resize(1100, 900)
+_hv_r.show()
+for _ in range(10):
+    app.processEvents()
+check("① 没评过 → 按钮文案「评分」", _hv_r._rate_btn.text() == "评分", _hv_r._rate_btn.text())
+# v2.0.8（反馈 2）：这枚按钮从金色改成**白色**（金色只留给元数据行的 ★ 评分）
+check("① 没评过 → 按钮白字（v2.0.8 改）", "#ffffff" in _hv_r._rate_btn.styleSheet(),
+      _hv_r._rate_btn.styleSheet())
+check("① 没评过 → 不加粗", "bold" not in _hv_r._rate_btn.styleSheet())
+_hv_r.media["user_rating"] = 7.5
+_hv_r._rate_style()
+check("① 评过 → 「用户评分 7.5」", _hv_r._rate_btn.text() == "用户评分 7.5",
+      _hv_r._rate_btn.text())
+check("① 评过 → 橙色", _uh31.RATE_USER in _hv_r._rate_btn.styleSheet(),
+      _hv_r._rate_btn.styleSheet())
+check("① 评过 → 加粗", "font-weight:bold" in _hv_r._rate_btn.styleSheet())
+_hv_r.media["user_rating"] = None
+_hv_r._rate_style()
+check("① 清除评分后回落白色「评分」",
+      _hv_r._rate_btn.text() == "评分" and "#ffffff" in _hv_r._rate_btn.styleSheet(),
+      _hv_r._rate_btn.styleSheet())
+_RATE_SRC31 = _insp31.getsource(_uh31.HeroView._rate)
+check("① 改完评分就地改色（不是重建整页）",
+      "_rate_style()" in _RATE_SRC31 and "_rebuild_page" not in _RATE_SRC31)
+check("① _action_row 建按钮后立刻算一次色（不在构造时写死）",
+      "_rate_style()" in _insp31.getsource(_uh31.HeroView._action_row))
+
+# ---- ② 重复检测：打开 / 定位 / 打开文件夹 / 删除 ----
+_DUP_SRC31 = _insp31.getsource(_dup31)
+check("② duplicates 提供 recycle_paths", hasattr(_dup31, "recycle_paths"))
+check("② FOF_ALLOWUNDO = 0x40（进回收站的关键位）", _dup31._FOF_ALLOWUNDO == 0x40)
+_REC_SRC31 = (_insp31.getsource(_dup31.recycle_paths)
+              + _insp31.getsource(_dup31._shell_delete))
+check("② 真删只走 Windows SHFileOperationW（没有 os.remove( / shutil.rmtree( 调用）",
+      "SHFileOperationW" in _REC_SRC31
+      and "os.remove(" not in _REC_SRC31 and "shutil.rmtree(" not in _REC_SRC31)
+check("② 带上「不可回收则先警告」的 FOF_WANTNUKEWARNING",
+      _dup31._FOF_WANTNUKEWARNING == 0x4000)
+
+_tf = os.path.join(TMP, "smoke_recycle.bin")
+open(_tf, "wb").write(b"\0" * 32)
+_res31 = _dup31.recycle_paths([_tf])
+check("② 真删一个临时文件成功（走回收站）",
+      _res31["ok"] == 1 and not os.path.exists(_tf), _res31)
+_res31b = _dup31.recycle_paths([os.path.join(TMP, "根本不存在.mp4")])
+check("② 不存在的路径不算失败（索引里的死链也能清）",
+      _res31b["ok"] == 0 and not _res31b["failed"], _res31b)
+
+_dlg31 = uis.SettingsDialog(None)
+check("② 结果区有四枚动作按钮",
+      all(hasattr(_dlg31, n) for n in ("dd_play", "dd_reveal", "dd_open_dir", "dd_del")))
+check("② 四枚按钮初始都不可点（没选中行）",
+      all(not getattr(_dlg31, n).isEnabled()
+          for n in ("dd_play", "dd_reveal", "dd_open_dir", "dd_del")))
+check("② 结果树挂了右键菜单",
+      _dlg31.dd_tree.contextMenuPolicy() == Qt.CustomContextMenu)
+check("② 右键菜单五项齐全",
+      all(k in _insp31.getsource(uis.SettingsDialog._dedupe_menu)
+          for k in ("打开影片（播放）", "打开影片路径", "打开影片文件夹路径",
+                    "删除影片文件…", "删除影片文件夹…")))
+_DO_SRC31 = _insp31.getsource(uis.SettingsDialog._dedupe_do_delete)
+check("② 删除流程 = 确认框 → 回收站 → 删索引",
+      "DupDeleteDialog" in _DO_SRC31 and "recycle_paths" in _DO_SRC31
+      and "delete_media" in _DO_SRC31)
+check("② 源文件删失败时**不删索引**（不留「索引没了文件还在」）",
+      "没有做任何改动" in _DO_SRC31)
+
+_dd31 = uis.DupDeleteDialog(["X:/a.mp4"], "file", ["X:/a.mp4"])
+check("② 确认框有「同时删除源文件」勾选框", "同时删除源文件" in _dd31.chk.text(), _dd31.chk.text())
+check("② 默认勾选（用户点的就是删除）", _dd31.chk.isChecked())
+check("② 文案写明回收站可还原", "回收站" in _dd31.chk.text())
+_dd31.chk.setChecked(False)
+check("② 取消勾选 → delete_source=False", _dd31.delete_source is False)
+check("② 取消勾选时说明「磁盘文件保持不动」", "保持不动" in _dd31.tip.text(), _dd31.tip.text())
+_dd31.close()
+
+# 真跑一遍：两条重复 → 删一条 → 文件没了 / 索引没了 / 组消失
+_dupdir = os.path.join(TMP, "dupsmoke")
+_dpa = os.path.join(_dupdir, "A", "SMK-777")
+_dpb = os.path.join(_dupdir, "B", "SMK-777")
+for _d in (_dpa, _dpb):
+    os.makedirs(_d, exist_ok=True)
+_v1 = os.path.join(_dpa, "SMK-777.mp4")
+_v2 = os.path.join(_dpb, "SMK-777.mp4")
+for _p in (_v1, _v2):
+    open(_p, "wb").write(b"\0" * 1024)
+db.insert_media(title="SMK-777 冒烟重复片", kind="movie", year=2020, rating=7.0,
+                file_path=_v1, library="冒烟库", sort_title="SMK-777 冒烟重复片")
+db.insert_media(title="SMK-777 冒烟重复片", kind="movie", year=2020, rating=7.0,
+                file_path=_v2, library="冒烟库", sort_title="SMK-777 冒烟重复片")
+_rep31 = _dup31.find_duplicates(library="冒烟库", verify_exists=True, exclude_multipart=True)
+# ⚠ 不能写「恰好 1 组」：㉔ 段往「冒烟库」里扫过 path-1/S_A/S_A.mp4 与 path-2/S_B/S_B.mp4，
+# 两份**同为 1024 字节**，按体积判重时也会成为一组。上一轮的假红就是这么来的
+# （第一组不是我们要删的那组，于是删了 S_B、断言 SMK-777 自然全红）。
+# 所以这里按路径认领自己那一组，别依赖组的顺序。
+_grp31 = [g for g in _rep31.groups
+          if any(os.path.normcase(getattr(m, "path", "")) == os.path.normcase(_v1)
+                 for m in g.members)]
+check("② 检出我们那组跨目录重复（SMK-777 两份）",
+      len(_grp31) == 1 and len(_grp31[0].members) == 2,
+      [(len(g.members), [os.path.basename(m.path) for m in g.members])
+       for g in _rep31.groups])
+_dlg31._dd_report = _rep31
+_dlg31._dd_removed = set()
+_dlg31._fill_dedupe_tree(_rep31)
+_top31 = None
+for _i31 in range(_dlg31.dd_tree.topLevelItemCount()):
+    _it31 = _dlg31.dd_tree.topLevelItem(_i31)
+    for _j31 in range(_it31.childCount()):
+        if os.path.normcase(str(_it31.child(_j31).data(0, Qt.UserRole))) == os.path.normcase(_v2):
+            _top31 = _it31
+check("② 结果树：我们那组 2 行", _top31 is not None and _top31.childCount() == 2,
+      _top31.childCount() if _top31 else None)
+
+_OrigDlg31 = uis.DupDeleteDialog
+
+
+class _StubDlg31:
+    def __init__(self, targets, kind, in_db=None, parent=None):
+        self.delete_source = True
+        self.kind = kind
+
+    def exec(self):
+        return 1        # QDialog.Accepted
+
+
+uis.DupDeleteDialog = _StubDlg31
+try:
+    _dlg31.dd_tree.setCurrentItem(_top31.child(1))
+    app.processEvents()
+    check("② 选中一行后按钮变可点", _dlg31.dd_del.isEnabled())
+    check("② 选中行的路径就是我们要删的那一份",
+          os.path.normcase(str(_dlg31._dd_current_path())) == os.path.normcase(_v2),
+          _dlg31._dd_current_path())
+    _dlg31._dedupe_delete_file()
+    app.processEvents()
+finally:
+    uis.DupDeleteDialog = _OrigDlg31
+check("② 删除后源文件从磁盘消失", not os.path.exists(_v2))
+check("② 删除后索引记录也没了", db.media_id_by_path(_v2) is None)
+_left31 = []
+for _i31b in range(_dlg31.dd_tree.topLevelItemCount()):
+    _it31b = _dlg31.dd_tree.topLevelItem(_i31b)
+    for _j31b in range(_it31b.childCount()):
+        _left31.append(os.path.normcase(str(_it31b.child(_j31b).data(0, Qt.UserRole))))
+check("② 删到只剩一份 → 该重复组从结果树消失（别的组还在）",
+      os.path.normcase(_v2) not in _left31 and os.path.normcase(_v1) not in _left31,
+      _left31)
+check("② 状态栏写明源文件去了哪", "移入回收站" in _dlg31.dd_status.text(),
+      _dlg31.dd_status.text())
+check("② 另一份（保留的那份）没被误删", os.path.exists(_v1) and db.media_id_by_path(_v1) is not None)
+
+# ---- ③ 演职人员：＋ 添加 / 头像右上角 × 删除 ----
+check("③ 演职人员标题旁有「＋」", "从演员库 / 导演库添加一位到本片" in _HERO_SRC31)
+check("③ CastAvatar 支持 on_remove", "on_remove" in _CAST_SRC31)
+check("③ 头像右上角那枚 × 是 18×18 的小圆钮",
+      'rm.setFixedSize(18, 18)' in _CAST_SRC31)
+check("③ 「×」随控件宽度重排（resizeEvent 里重算位置）",
+      "_place_remove" in _CAST_SRC31 and "resizeEvent" in _CAST_SRC31)
+_ADD_SRC31 = _insp31.getsource(_uh31.HeroView._add_person)
+check("③ 「＋」复用演员/导演联想框（不另写一套）", "PersonSearchDialog" in _ADD_SRC31)
+check("③ 「＋」用「添加演员 / 导演」标题", "添加演员 / 导演" in _ADD_SRC31)
+check("③ 已在演职人员里的人不会重复添加", "已经在本片演职人员中" in _ADD_SRC31)
+_RM_SRC31 = _insp31.getsource(_uh31.HeroView._remove_person)
+check("③ 「×」只解除本片关联 + 回写 nfo",
+      "db.unlink_media_person" in _RM_SRC31 and "_sync_people_to_nfo" in _RM_SRC31)
+check("③ 回写 nfo 用 write_people（否则重扫就抹掉）",
+      "write_people" in _insp31.getsource(_uh31.HeroView._sync_people_to_nfo))
+
+# db.unlink_media_person：只删关联、不动 people
+_p31 = db.upsert_person("冒烟演员甲", "Actor")
+_m31 = db.upsert_media_by_path(mode="overwrite", kind="movie", title="SMK-888 关联测试",
+                              file_path=os.path.join(TMP, "smk888.mp4"))
+db.link_media_person(_m31, _p31, "", 0)
+check("③ 关联前本片有 1 位演职人员", len(db.get_cast(_m31)) == 1, len(db.get_cast(_m31)))
+_n31 = db.unlink_media_person(_m31, _p31)
+check("③ unlink 删掉 1 行关联", _n31 == 1, _n31)
+check("③ 关联后本片没人了", len(db.get_cast(_m31)) == 0)
+check("③ 那个人还在演员库里（没被连坐删掉）", db.get_person(_p31) is not None)
+
+# nfo.write_people 往返
+_nfo31 = os.path.join(TMP, "smoke_people.nfo")
+open(_nfo31, "w", encoding="utf-8").write(
+    '<?xml version="1.0" encoding="utf-8"?>\n<movie>\n  <title>P</title>\n'
+    "  <tag>甲</tag>\n  <actor><name>旧人</name><type>Actor</type></actor>\n"
+    "  <director>旧导演</director>\n</movie>\n")
+_ok31 = _nfo.write_people(_nfo31,
+                          [{"name": "新人A", "role": "", "type": "Actor"},
+                           {"name": "新人B", "role": "角色", "type": "Actor"}],
+                          ["新导演"])
+check("③ write_people 返回成功", _ok31 is True)
+_p31info = _nfo.parse_movie(_nfo31)
+check("③ 写进去的演员能解析回来",
+      [a["name"] for a in (_p31info.get("actors") or [])] == ["新人A", "新人B"],
+      [a["name"] for a in (_p31info.get("actors") or [])])
+check("③ 导演仍用 <director> 节点",
+      [d["name"] for d in (_p31info.get("directors") or [])] == ["新导演"])
+_txt31 = open(_nfo31, encoding="utf-8").read()
+check("③ 旧人已被替换（不是追加）", "旧人" not in _txt31)
+check("③ 其它节点没被动（<title> / <tag> 都在）",
+      "<title>P</title>" in _txt31 and "<tag>甲</tag>" in _txt31)
+
+# ---- ④ 标签：芯片右上角 × ----
+_TAG_SRC31 = _insp31.getsource(_uh31.HeroView._tag_section)
+check("④ 标签行只剩「＋」，「－」已撤", "添加标签" in _TAG_SRC31 and "删除标签" not in _TAG_SRC31)
+_CHIP_SRC31 = _insp31.getsource(_uh31.HeroView._tag_chip)
+check("④ 芯片是 `TagChip` 控件（v2.0.8 换成整枚自绘）", "TagChip(" in _CHIP_SRC31)
+# v2.0.8（反馈 1）：QSS 的 border-radius 在「半径 > 高度/2」时会被 Qt 静默丢掉 →
+# 半径必须由高度算出来，且不能再依赖 QSS 背景。
+_TAGCLS_SRC = _insp31.getsource(_uh31.TagChip)
+check("④ 胶囊圆角由高度算出（不可能再退成直角）",
+      "pill.height() / 2" in _TAGCLS_SRC)
+check("④ 芯片不再用 QSS 画底（自绘 paintEvent）",
+      "def paintEvent" in _TAGCLS_SRC and "setStyleSheet" not in _TAGCLS_SRC)
+check("④ × 是自绘的 RoundClose（不是 QPushButton 的字形）",
+      "RoundClose(" in _TAGCLS_SRC
+      and 'QPushButton("×")' not in _CHIP_SRC31)
+check("④ × 走 _del_tag → _apply_tags（落库 + 写 nfo + 重建）",
+      "_del_tag" in _CHIP_SRC31
+      and "_apply_tags" in _insp31.getsource(_uh31.HeroView._del_tag))
+db.set_media_tags(_media_id, ["甲", "乙", "丙"])
+_hv_t = _uh31.HeroView(dict(db.get_media(_media_id)))
+_hv_t.resize(1100, 900)
+_hv_t.show()
+for _ in range(10):
+    app.processEvents()
+_chips31 = [w for w in _hv_t.findChildren(_uh31.QWidget) if w.objectName() == "TagChip"]
+check("④ 三枚标签芯片", len(_chips31) == 3, len(_chips31))
+_dots31 = [c.findChildren(_uh31.RoundClose) for c in _chips31]
+check("④ 每枚芯片恰好一枚圆叉", all(len(v) == 1 for v in _dots31),
+      [len(v) for v in _dots31])
+
+# ---- ④ 像素断言：圆角真的画出来了 / 叉号真的在圆心 ----
+if _chips31:
+    _c31 = _chips31[0]
+    _im31 = _c31.grab().toImage()
+    _ov, _ph = _uh31.TagChip.OVER, _uh31.TagChip.PILL_H
+    # 胶囊左上角的外接方角必须**透明**（圆角把它切掉了）；左边中段必须不透明
+    _tl_alpha = _im31.pixelColor(1, _ov + 1).alpha()
+    _ml_alpha = _im31.pixelColor(1, _ov + _ph // 2).alpha()
+    check("④ 胶囊左上角是圆角（角上像素透明、中段不透明）",
+          _tl_alpha == 0 and _ml_alpha > 0, "角=%s / 中=%s" % (_tl_alpha, _ml_alpha))
+    _d31 = _dots31[0][0]
+    _dim31 = _d31.grab().toImage()
+    # 只认「叉号笔画」：灰白 #d4d4d8（亮）vs 圆底 #18181b（暗）。
+    # 不能按 alpha 判 —— 那量到的是整个圆，圆本身居中时叉偏了也照样通过。
+    _mk = []
+    for _y in range(_d31.height()):
+        for _x in range(_d31.width()):
+            _cc = _dim31.pixelColor(_x, _y)
+            if (_cc.red() + _cc.green() + _cc.blue()) / 3 > 150:
+                _mk.append((_x, _y))
+    if _mk:
+        _xs = [p[0] for p in _mk]
+        _ys = [p[1] for p in _mk]
+        _cx = (min(_xs) + max(_xs)) / 2.0
+        _cy = (min(_ys) + max(_ys)) / 2.0
+        _mid = (_d31.width() - 1) / 2.0
+        check("④ 圆叉里的 × 在圆心（偏移 ≤ 0.75px）",
+              abs(_cx - _mid) <= 0.75 and abs(_cy - _mid) <= 0.75,
+              "中心 (%.1f,%.1f) / 理论 (%.1f,%.1f)" % (_cx, _cy, _mid, _mid))
+    else:
+        check("④ 圆叉里的 × 在圆心（偏移 ≤ 0.75px）", False, "没画出来")
+    check("④ 圆叉圆心压在胶囊右上角（探出 OVER 像素）",
+          _d31.x() + _d31.width() / 2.0 == _c31.width() - _ov
+          and _d31.y() + _d31.height() / 2.0 == _ov,
+          "圆%dx%d @%s / 胶囊 %dx%d" % (_d31.width(), _d31.height(), _d31.pos(),
+                                       _c31.width() - _ov, _ph))
+_dots31[1][0].set_callback(_dots31[1][0]._on_click)      # 换回调不炸
+_dots31[1][0]._on_click()
+for _ in range(10):
+    app.processEvents()
+check("④ 点第二枚的 × → 该标签从库里消失",
+      (db.get_media(_media_id).get("tags") or "") == "甲,丙",
+      db.get_media(_media_id).get("tags"))
+
+# ---- ㉜ 补丁（真机前用像素量出来的）：Ghost 禁用态必须真的变灰 ----
+# 背景：`QPushButton#Ghost` 带 ID，CSS 权重 (0,1,0,1) 高于通用 `QPushButton:disabled`
+# 的 (0,0,1,1) —— 少了同 ID + 伪类那条，禁用态文字仍按 #d4d4d8 画。
+# 实测（离屏 320×90 两块按钮，取各自矩形内最亮像素）：修前 211 / 211，修后 211 / 84。
+# 现象很具体：「重复检测」结果树下那四枚按钮**看着能点、其实点不动**。
+_qss32 = open(os.path.join(ROOT, "src", "style.qss"), encoding="utf-8").read()
+check("㉜ style.qss 补了 QPushButton#Ghost:disabled",
+      "QPushButton#Ghost:disabled" in _qss32)
+_mw32 = _uh31.QWidget()
+_mw32.setStyleSheet("background:#18181b;")
+_mw32.resize(320, 90)
+_v32 = _uh31.QVBoxLayout(_mw32)
+_b32a = _uh31.compact_button("删除…", 72, 26, "enabled")
+_b32b = _uh31.compact_button("删除…", 72, 26, "disabled")
+_b32b.setEnabled(False)
+_v32.addWidget(_b32a)
+_v32.addWidget(_b32b)
+_mw32.show()
+for _ in range(6):
+    app.processEvents()
+_im32 = _mw32.grab().toImage()
+
+
+def _maxb32(btn):
+    best = 0
+    for _y in range(btn.y(), btn.y() + btn.height()):
+        for _x in range(btn.x(), btn.x() + btn.width()):
+            _c = _im32.pixelColor(_x, _y)
+            best = max(best, (_c.red() + _c.green() + _c.blue()) // 3)
+    return best
+
+
+_bright32 = _maxb32(_b32a)
+_dim32 = _maxb32(_b32b)
+check("㉜ Ghost 启用态文字是亮的（>190）", _bright32 > 190, _bright32)
+check("㉜ Ghost 禁用态文字真的变灰（<120），不再「看着能点」", _dim32 < 120, _dim32)
+_mw32.close()
+
+print()
+print("== ㉝ v2.0.7：别名改白 / 演职人员职务中文化+排序 / 表头漏斗+三角 ==")
+import inspect as _insp33
+import ui_home as _uh33
+from PySide6.QtWidgets import QTableWidget as _QTW33, QLabel as _QL33
+from PySide6.QtGui import QImage as _QIM33, QPainter as _QP33
+from PySide6.QtCore import QPoint as _QPT33
+
+# ---- ① 演员详情页的「别名」改白色 ----
+_AD_SRC33 = _insp33.getsource(mw.MainWindow._view_actor_detail)
+check("① 别名是白色 #fafafa", "color:#fafafa" in _AD_SRC33)
+# ⚠ 别直接判「#66a9ff 不出现」—— 本函数里有一句解释「原来这里是链接蓝 #66a9ff」的注释，
+#   判全量文本会把自己写的注释算进去（第一版就是这么假红的）。只判**真的赋值语句**。
+check("① 不再是链接蓝（setStyleSheet 里不再有 #66a9ff）",
+      'setStyleSheet("color:#66a9ff' not in _AD_SRC33)
+check("① 用的白与「未知身份名」同一个白", _uh31.NAME_UNKNOWN == "#fafafa",
+      _uh31.NAME_UNKNOWN)
+
+# ---- ② 职务名中文化 ----
+check("② Actor → 演员", _uh31.role_label({"role_type": "Actor"}) == "演员",
+      _uh31.role_label({"role_type": "Actor"}))
+check("② Director → 导演", _uh31.role_label({"role_type": "Director"}) == "导演")
+check("② 数据里已写成「导演」的原样保留", _uh31.role_label({"char_role": "导演"}) == "导演")
+check("② char_role 为空时回落到 role_type", _uh31.role_label({"role_type": "Actor"}) == "演员")
+check("② Writer → 编剧（别的职务也一并翻）",
+      _uh31.role_label({"role_type": "Writer"}) == "编剧")
+check("② 认不出来的职务原样显示（翻成「其他」等于把信息抹掉）",
+      _uh31.role_label({"role_type": "Key Grip"}) == "Key Grip")
+check("② 完全没有职务 → 空串", _uh31.role_label({}) == "" and _uh31.role_label(None) == "")
+
+
+def _p33(name, gender="", role="Actor", order=0, char=""):
+    return {"name": name, "gender": gender, "role_type": role,
+            "char_role": char, "person_order": order}
+
+
+# ---- ② 排序：女>男>未知，再 演员>导演>其他 ----
+_cast33 = [_p33("男演员甲", "male", "Actor", 1),
+           _p33("女导演乙", "female", "Director", 2),
+           _p33("女演员丙", "female", "Actor", 0),
+           _p33("未知导演丁", "", "Director", 3),
+           _p33("男演员戊", "male", "Actor", 0)]
+_ord33 = [p["name"] for p in sorted(_cast33, key=_uh31.cast_sort_key)]
+check("② 排序 = 女 > 男 > 未知，同性别内 演员 > 导演 > 其他",
+      _ord33 == ["女演员丙", "女导演乙", "男演员戊", "男演员甲", "未知导演丁"], _ord33)
+check("② 同档内保留 nfo 原编排（person_order），不按姓名乱跳",
+      _ord33.index("男演员戊") < _ord33.index("男演员甲"))
+check("② 详情页演职人员区真的用了这个键（且只排显示、不改库）",
+      "sorted(cast, key=cast_sort_key)" in _insp33.getsource(_uh31.HeroView._cast_section))
+
+_av33 = _uh31.CastAvatar(_p33("测试演员", "female", "Actor"), None)
+_txt33 = [w.text() for w in _av33.findChildren(_QL33)]
+check("② 头像下面的职务显示「演员」（不再是 Actor）", "演员" in _txt33, _txt33)
+check("② 不再出现英文 Actor", "Actor" not in _txt33)
+_av33b = _uh31.CastAvatar(_p33("某导演", "", "Actor", 0, "导演"), None)
+check("② 导演那条显示「导演」", "导演" in [w.text() for w in _av33b.findChildren(_QL33)])
+_av33.deleteLater()
+_av33b.deleteLater()
+
+# ---- ③ 表头：左漏斗 / 右三角 ----
+check("③ 表头是自绘的 FilterHeaderView（父类是 QHeaderView）",
+      _uh33.FilterHeaderView.__mro__[1].__name__ == "QHeaderView")
+check("③ 漏斗/三角各有一个信号",
+      hasattr(_uh33.FilterHeaderView, "filterClicked")
+      and hasattr(_uh33.FilterHeaderView, "sortClicked"))
+
+_tw33 = _QTW33(0, 3)
+_tw33.setHorizontalHeaderLabels(["收藏", "标题", "用户评分"])
+_hdr33 = _uh33.FilterHeaderView(Qt.Horizontal, _tw33)
+_hdr33.setDefaultAlignment(Qt.AlignCenter)
+_hdr33.sort_col = 1
+_hdr33.sort_asc = False
+_tw33.setHorizontalHeader(_hdr33)
+for _c, _w in ((0, 120), (1, 300), (2, 120)):
+    _tw33.setColumnWidth(_c, _w)
+_tw33.resize(640, 160)
+_tw33.show()
+for _ in range(6):
+    app.processEvents()
+_z33 = _hdr33._zones(0)
+check("③ 每列能算出「左漏斗 / 右三角」两块命中区",
+      bool(_z33) and _z33[0][1] > _z33[0][0] and _z33[1][1] > _z33[1][0], str(_z33))
+check("③ 点最左边 → 判为漏斗", _hdr33._zone_at(_QPT33(4, 10))[1] == "funnel",
+      str(_hdr33._zone_at(_QPT33(4, 10))))
+check("③ 点最右边 → 判为三角", _hdr33._zone_at(_QPT33(116, 10))[1] == "tri",
+      str(_hdr33._zone_at(_QPT33(116, 10))))
+check("③ 点中间不拦截（原来的「点表头整列排序」还在）",
+      _hdr33._zone_at(_QPT33(60, 10))[1] == "")
+check("③ 列太窄时不画图标也不拦点击（否则会压住列名）",
+      _hdr33._zones(9) is None and _hdr33._zone_at(_QPT33(4, 10))[1] != "")
+
+# 图标真的画得出来。判「箭头朝哪边」不能用重心：三角形面积集中在**底边**，
+# 尖朝上的那份重心反而更靠下（第一版就这么判反了：13.8 > 11.2）。
+# 正确判据 = **最宽的那一行**（底边）在上半还是下半。
+def _glyph33(fn):
+    _im = _QIM33(26, 26, _QIM33.Format_ARGB32)
+    _im.fill(0)
+    _pp = _QP33(_im)
+    fn(_pp)
+    _pp.end()
+    _rows = {}
+    for y in range(26):
+        _n = sum(1 for x in range(26) if _im.pixelColor(x, y).alpha() > 0)
+        if _n:
+            _rows[y] = _n
+    _pts = sum(_rows.values())
+    _base = max(_rows.items(), key=lambda kv: kv[1])[0] if _rows else -1
+    return _pts, _base
+
+
+_nf33, _ = _glyph33(lambda p: _uh33._draw_funnel(p, 13, 13, 12, "#ffffff", True))
+check("③ 漏斗图形画得出来（实心像素 >30）", _nf33 > 30, _nf33)
+_, _base_up = _glyph33(lambda p: _uh33._draw_tri(p, 13, 13, 12, "#ffffff", True, True))
+_, _base_dn = _glyph33(lambda p: _uh33._draw_tri(p, 13, 13, 12, "#ffffff", False, True))
+check("③ 升序三角尖朝上（最宽的行在下）、降序反之", _base_up > _base_dn,
+      "底边 y：升序 %s / 降序 %s" % (_base_up, _base_dn))
+
+# ---- ③ 筛选面板 ----
+_pop33 = _uh33.ColumnFilterPopup("title", "标题", None, None)
+_pop33.edit.setText("  mida  ")
+check("③ 文本筛选：去首尾空格后生效", _pop33.spec() == {"mode": "text", "value": "mida"},
+      _pop33.spec())
+_pop33.edit.setText("   ")
+check("③ 文本筛选留空 = 清除（不是「筛出空标题」）", _pop33.spec() is None)
+_pop33b = _uh33.ColumnFilterPopup("rating", "评分", {"mode": "num", "op": ">=", "value": "7"},
+                                 None)
+check("③ 数值列默认「≥」并回显原值",
+      _pop33b.spec() == {"mode": "num", "op": ">=", "value": "7"}, _pop33b.spec())
+_pop33b.edit.setText("abc")
+check("③ 数值列填非数字不生效（不至于把整表筛空）", _pop33b.spec() is None)
+_pop33c = _uh33.ColumnFilterPopup("favorite", "收藏", None,
+                                 [("全部", ""), ("已收藏", "1"), ("未收藏", "0")])
+_pop33c._set_eq("1")
+check("③ 收藏列是枚举胶囊（不需要手打）",
+      _pop33c.spec() == {"mode": "eq", "value": "1"}, _pop33c.spec())
+_pop33c._set_eq("")
+check("③ 枚举选「全部」= 清除", _pop33c.spec() is None)
+for _w in (_pop33, _pop33b, _pop33c):
+    _w.deleteLater()
+
+# ---- ③ 筛选匹配 + 与搜索框叠加 ----
+_lv33 = _uh33.HomeListView()
+_lv33.setAttribute(Qt.WA_DontShowOnScreen, True)
+_lv33.resize(1200, 600)
+_rowsa = [{"id": 1, "title": "MIDA-846 中出", "favorite": 1, "rating": 7.5, "year": 2026},
+          {"id": 2, "title": "SSIS-001 別作品", "favorite": 0, "rating": 5.0, "year": 2019},
+          {"id": 3, "title": "mida 低分那部", "favorite": 0, "rating": None, "year": 2026}]
+check("③ 文本筛选不区分大小写",
+      _lv33._match_filter(_rowsa[0], "title", {"mode": "text", "value": "mida"}))
+check("③ 数值筛选 ≥ 命中", _lv33._match_filter(_rowsa[0], "rating",
+                                          {"mode": "num", "op": ">=", "value": "7"}))
+check("③ 数值筛选 ≤ 把 7.5 排除", not _lv33._match_filter(
+    _rowsa[0], "rating", {"mode": "num", "op": "<=", "value": "5"}))
+check("③ 该列为空的行在数值筛选下不显示",
+      not _lv33._match_filter(_rowsa[2], "rating", {"mode": "num", "op": ">=", "value": "0"}))
+check("③ 收藏列 eq：收藏命中、未收藏不命中",
+      _lv33._match_filter(_rowsa[0], "favorite", {"mode": "eq", "value": "1"})
+      and not _lv33._match_filter(_rowsa[1], "favorite", {"mode": "eq", "value": "1"}))
+_lv33._media = list(_rowsa)
+_lv33.search.setText("mida")
+_lv33._filters = {"favorite": {"mode": "eq", "value": "1"}}
+check("③ 搜索框与列筛选是「与」关系（只剩 1 条）",
+      [m["id"] for m in _lv33._filter_view(_rowsa)] == [1],
+      [m["id"] for m in _lv33._filter_view(_rowsa)])
+_lv33._filters = {}
+check("③ 去掉列筛选后按搜索词剩 2 条", len(_lv33._filter_view(_rowsa)) == 2)
+check("③ 首页列表的表头已换成 FilterHeaderView",
+      isinstance(_lv33._header, _uh33.FilterHeaderView))
+_lv33._filters = {"year": {"mode": "num", "op": ">=", "value": "2020"}}
+check("③ 有筛选的列，表头知道（漏斗要实心点亮）",
+      _lv33._header.has_filter("year") and not _lv33._header.has_filter("title"))
+_lv33._on_filter_applied("year", {"mode": "num", "op": ">=", "value": "2020"})
+check("③ 筛选条件落盘到设置（下次开着还在）",
+      (cfg.get_settings().home_filters.get("year") or {}).get("value") == "2020",
+      cfg.get_settings().home_filters)
+_lv33._sort(0)
+check("③ 点表头仍能排序，排序列同步给表头画三角",
+      _lv33._sort_col == 0 and _lv33._header.sort_col == 0,
+      "%s / %s" % (_lv33._sort_col, _lv33._header.sort_col))
+_lv33.clear_column_filters()
+check("③ 一键清除后设置里也空了", cfg.get_settings().home_filters == {},
+      cfg.get_settings().home_filters)
+_lv33.close()
+_lv33.deleteLater()
+_tw33.close()
+app.processEvents()
+
+# =====================================================================
+# ㉞ v2.0.8（反馈 1~4）
+#   ① 标签芯片恢复圆角 + 右上角圆形 ×，且 × 必须在圆心
+#   ② 详细页：「评分」按钮白字；元数据行的 ★ 评分金色
+#   ③ 列表表头：漏斗/三角只在鼠标所在那一列显示
+#   ④ 首页列表「有点卡」：不再整表填充，改成视口懒填
+# =====================================================================
+print("\n㉞ v2.0.8")
+
+# ---- ② 评分配色 ----
+_m34 = {"id": None, "title": "T", "rating": 5.0, "year": 2026, "genres": "剧情",
+        "runtime": "01:10:00", "kind": "movie", "tags": "甲", "plot": "x",
+        "file_path": "E:/a.mp4", "user_rating": None}
+_hv34 = _uh31.HeroView(dict(_m34))
+check("② 没评过时「评分」按钮是**白字**（#ffffff）",
+      "#ffffff" in _hv34._rate_btn.styleSheet(), _hv34._rate_btn.styleSheet())
+_m34b = dict(_m34)
+_m34b["user_rating"] = 7.5
+_hv34b = _uh31.HeroView(_m34b)
+check("② 评过分的按钮仍「橙色 + 加粗」（RATE_USER）",
+      _uh31.RATE_USER in _hv34b._rate_btn.styleSheet()
+      and "bold" in _hv34b._rate_btn.styleSheet(),
+      _hv34b._rate_btn.styleSheet())
+check("② 评过分的按钮文案带分值", _hv34b._rate_btn.text() == "用户评分 7.5",
+      _hv34b._rate_btn.text())
+_l034 = _hv34._meta.itemAt(0).widget()
+check("② 元数据行第一个 ★ 评分改成**金色**（RATE_GOLD）",
+      _uh31.RATE_GOLD in _l034.styleSheet(), "%s / %s" % (_l034.text(),
+                                                          _l034.styleSheet()))
+_l134 = _hv34._meta.itemAt(1).widget()
+check("② 元数据行其它项保持灰白（没被一起染金）",
+      _uh31.RATE_GOLD not in _l134.styleSheet(), _l134.styleSheet())
+# 打分后走 `_refresh_meta()` 重刷这一行 —— 那条路径也要是金色
+_hv34b._refresh_meta()
+_l034b = _hv34b._meta.itemAt(0).widget()
+check("② 打完分重刷元数据行，★ 评分仍是金色",
+      _uh31.RATE_GOLD in _l034b.styleSheet(), _l034b.styleSheet())
+
+# ---- ④ 职务中文化（v2.0.7 的回归，别被后面的改动带坏）----
+check("④ role_label 认得大写的 Actor", _uh31.role_label({"role_type": "Actor"}) == "演员",
+      _uh31.role_label({"role_type": "Actor"}))
+check("④ role_label 认得 Director 与中文「导演」",
+      _uh31.role_label({"role_type": "Director"}) == "导演"
+      and _uh31.role_label({"char_role": "导演"}) == "导演")
+check("④ 认不出的职务原样显示（不吞信息）",
+      _uh31.role_label({"role_type": "Gaffer"}) == "Gaffer")
+
+# ---- ③ 表头：图标只在悬停列显示（用计数器验，与主题颜色无关）----
+from PySide6.QtGui import QPixmap as _QP34, QPainter as _QPt34
+from PySide6.QtCore import QRect as _QR34
+_lv34 = _uh33.HomeListView()
+_lv34.setAttribute(Qt.WA_DontShowOnScreen, True)
+_lv34.resize(1200, 600)
+for _ in range(4):
+    app.processEvents()
+_hdr34 = _lv34._header
+_cnt34 = {"f": 0, "t": 0}
+_of34, _ot34 = _uh33._draw_funnel, _uh33._draw_tri
+
+
+def _fake_f(*a, **k):
+    _cnt34["f"] += 1
+
+
+def _fake_t(*a, **k):
+    _cnt34["t"] += 1
+
+
+def _paint_all(hdr, n):
+    _pm = _QP34(400, 40)
+    _pt = _QPt34(_pm)
+    _cnt34["f"] = _cnt34["t"] = 0
+    for _i in range(min(n, hdr.count())):
+        hdr.paintSection(_pt, _QR34(0, 0, 300, 40), _i)
+    _pt.end()
+
+
+_uh33._draw_funnel, _uh33._draw_tri = _fake_f, _fake_t
+try:
+    _hdr34._hover_section = -1
+    _lv34._filters = {}
+    _paint_all(_hdr34, _hdr34.count())
+    check("③ 鼠标不在表头上时，一列图标都不画",
+          _cnt34["f"] == 0 and _cnt34["t"] == 0,
+          "漏斗 %d / 三角 %d" % (_cnt34["f"], _cnt34["t"]))
+    _hdr34._hover_section = 1
+    _paint_all(_hdr34, _hdr34.count())
+    check("③ 悬停第 1 列：整排只画出这一列的漏斗 + 三角",
+          _cnt34["f"] == 1 and _cnt34["t"] == 1,
+          "漏斗 %d / 三角 %d" % (_cnt34["f"], _cnt34["t"]))
+    _hdr34._hover_section = -1
+    _lv34._filters = {_lv34._cols[1]: {"mode": "text", "value": "x"}}
+    _paint_all(_hdr34, _hdr34.count())
+    check("③ 有筛选的列即使没悬停也保留漏斗（否则看不出筛过）",
+          _cnt34["f"] == 1 and _cnt34["t"] == 0,
+          "漏斗 %d / 三角 %d" % (_cnt34["f"], _cnt34["t"]))
+    _lv34._filters = {}
+finally:
+    _uh33._draw_funnel, _uh33._draw_tri = _of34, _ot34
+_src34 = _insp31.getsource(_uh33.FilterHeaderView.paintSection)
+check("③ 非悬停 / 无筛选的列在 paintSection 里直接 return（省掉绘制）",
+      "if not hov and not active" in _src34)
+check("③ 三角只在悬停时画（不再常驻）", "if hov:" in _src34)
+_lv34.close()
+_lv34.deleteLater()
+
+# ---- ④ 视口懒填（首页卡顿的根因）----
+_n34 = 900
+_conn34 = db.get_conn()
+_base34 = 1720000000
+_conn34.executemany(
+    "INSERT INTO media (kind,title,year,file_path,favorite,added_time,rating) "
+    "VALUES (?,?,?,?,?,?,?)",
+    [("movie", "PERF %04d" % _i, 2000 + _i % 20, "E:/perf/%04d.mp4" % _i, _i % 2,
+      _base34 + _i, 5.0 + (_i % 40) / 10.0) for _i in range(_n34)])
+_conn34.commit()
+_src34b = _insp31.getsource(_uh33.HomeListView._apply_view)
+check("④ 行数没变时不再调 setRowCount（排序时省掉 700ms 建行）",
+      "tv.rowCount() != n" in _src34b)
+check("④ 填表改成按视口（_fill_window），不再整表 200 行一批",
+      "_fill_window" in _src34b and "_FILL_CHUNK" not in _src34b)
+_lv34b = _uh33.HomeListView()
+_lv34b.setAttribute(Qt.WA_DontShowOnScreen, True)
+_lv34b.resize(1200, 600)
+for _ in range(6):
+    app.processEvents()
+_rng = getattr(_lv34b, "_filled_range", None)
+check("④ 只填视口附近那一段（< 120 行），不再 900 行全填",
+      _rng is not None and (_rng[1] - _rng[0]) < 120, str(_rng))
+_last = len(_lv34b._view) - 3
+check("④ 屏幕外的行没有 item", _lv34b.table.item(_last, 0) is None)
+check("④ 但 row_media 能按行号回退到 _view（全选/导出不丢数据）",
+      _uh33.row_media(_lv34b.table, _last) is not None)
+check("④ 表格行数与 _view 一致（滚动条长度才对）",
+      _lv34b.table.rowCount() == len(_lv34b._view),
+      "%d / %d" % (_lv34b.table.rowCount(), len(_lv34b._view)))
+_lv34b._sort(1)
+for _ in range(4):
+    app.processEvents()
+_rng2 = getattr(_lv34b, "_filled_range", None)
+check("④ 排序后仍只填视口那一段（不会重填整表）",
+      _rng2 is not None and (_rng2[1] - _rng2[0]) < 120, str(_rng2))
+_lv34b.table.verticalScrollBar().setValue(400)
+for _ in range(4):
+    app.processEvents()
+_rng3 = getattr(_lv34b, "_filled_range", None)
+check("④ 滚动到 400 行后，视口那一段被补填",
+      _rng3 is not None and _rng3[0] <= 400 <= _rng3[1], str(_rng3))
+check("④ 滚过去的那一行真的有内容",
+      _lv34b.table.item(400, 0) is not None)
+_src34c = _insp31.getsource(_uh33.HomeListView._on_section_resized)
+check("④ 列宽去抖对「构造期提前到达的 sectionResized」有兜底（不再抛 AttributeError）",
+      'getattr(self, "_width_timer"' in _src34c)
+_lv34b.close()
+_lv34b.deleteLater()
+app.processEvents()
 
 print("通过 %d/%d" % (TOTAL[0] - len(FAILS), TOTAL[0]))
 if FAILS:
