@@ -10,8 +10,21 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea,
     QFrame, QMenu, QMessageBox, QApplication, QDialog, QDoubleSpinBox,
     QGridLayout, QLayout, QSizePolicy, QLineEdit, QListWidget,
-    QListWidgetItem, QInputDialog, QAbstractSpinBox,
+    QListWidgetItem, QInputDialog, QAbstractSpinBox, QAbstractButton,
 )
+
+
+def accent_rgb():
+    """当前主题高亮色（默认 #e4587c）。
+
+    `ui_hero` 不 import `main_window`（会成环），直接问 config —— 与
+    `style.qss` 里 `__ACCENT__` 用的是同一个真源。
+    """
+    try:
+        a = (cfg.get_settings().appearance or {}).get("accent")
+        return QColor(str(a)) if a else QColor("#e4587c")
+    except Exception:
+        return QColor("#e4587c")
 
 import database as db
 import media_meta as mm
@@ -734,17 +747,14 @@ class CastAvatar(QFrame):
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         # v2.0.6（反馈 4）：右上角的「×」—— 绝对定位叠在圆形头像的右上角（不进布局，
         # 否则会占掉一行、把这一排头像的高度整体顶起来）。见 `_place_remove()`。
+        # v2.0.9（反馈 2）：换成自绘的 `RoundClose` —— 原来这里是 `QPushButton("×")`，
+        # 18px 圆里塞 13px 字形，实测叉号偏左上约 1.5px（用户截图圈出来的就是这处）。
+        # 两条线自绘后交点恒等于圆心。
         self._rm = None
         if on_remove is not None:
-            rm = QPushButton("×", self)
-            rm.setCursor(Qt.PointingHandCursor)
-            rm.setFixedSize(18, 18)
-            rm.setToolTip("把「%s」从本片演职人员里移除" % (person.get("name") or ""))
-            rm.setStyleSheet(
-                "QPushButton{border:1px solid #3f3f46;background:rgba(24,24,27,0.90);"
-                "color:#d4d4d8;font-size:13px;font-weight:bold;padding:0;border-radius:9px;}"
-                "QPushButton:hover{background:#f87171;border-color:#f87171;color:#ffffff;}")
-            rm.clicked.connect(lambda _=False: self.on_remove(self.person))
+            rm = RoundClose(18, on_click=lambda: self.on_remove(self.person),
+                            parent=self,
+                            tip="把「%s」从本片演职人员里移除" % (person.get("name") or ""))
             rm.raise_()
             self._rm = rm
             self._place_remove()
@@ -1005,14 +1015,21 @@ class RoundClose(QWidget):
     颜色（与全局暗色面板一致）：
       · 常态：灰底 `#3f3f46` + 亮灰叉；
       · 悬停 / 按下：红底 `#f87171` + 纯白叉（危险动作用红，一眼知道点了会删东西）。
+
+    v2.0.9（反馈 1）：「圆里那个 × 太大」→ 叉的半臂长由 `d*0.225` 收到 **`d*0.18`**
+    （= 原来的 80%，`K_RATIO` 一处改、标签与演员头像两处徽章同时生效）。
+    `cross` 留给个别位置微调（1.0 = 标准，0.8 = 再小一档）。
     """
 
-    def __init__(self, d=14, on_click=None, parent=None, tip=""):
+    K_RATIO = 0.18           # 叉的半臂长 / 直径（v2.0.8 是 0.225，v2.0.9 缩到 80%）
+
+    def __init__(self, d=14, on_click=None, parent=None, tip="", cross=1.0):
         super().__init__(parent)
         self._d = int(d)
         self._hover = False
         self._down = False
         self._on_click = on_click
+        self._cross = float(cross)
         self.setFixedSize(self._d, self._d)
         self.setCursor(Qt.PointingHandCursor)
         if tip:
@@ -1069,10 +1086,79 @@ class RoundClose(QWidget):
                    max(1.35, self._d * 0.115))
         pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
-        k = self._d * 0.225                  # 14px → 3.15px 半臂长
+        k = self._d * self.K_RATIO * self._cross    # 14px → 2.52px 半臂长（v2.0.9：缩到 80%）
         p.drawLine(QPointF(c.x() - k, c.y() - k), QPointF(c.x() + k, c.y() + k))
         p.drawLine(QPointF(c.x() - k, c.y() + k), QPointF(c.x() + k, c.y() - k))
         p.end()
+
+
+class RoundPlus(QAbstractButton):
+    """胶囊/圆形「＋」小按钮（v2.0.9 反馈 3）：框与加号**全部自绘**。
+
+    原来是 `compact_button("＋", 28, 24)` —— QPushButton 里塞一个全角「＋」字形。
+    真机截图像素实测（`docs/preview` 的同一批图）：
+      · 框包围盒 x58..85 / y6..29 → 28×24，几何中心 **(71.5, 17.5)**；
+      · 「＋」墨迹 x68..72 / y17..22 → 中心 **(70.0, 19.5)**。
+    即**偏左 1.5px、偏下 2px**，用户反馈的「+ 不在图形正中央」就是这 2.5px。
+    根因与 `RoundClose` 同一条：字形落点由字体度量（ascent/descent/侧承）决定，
+    不由控件中心决定。改成两条线后，交点恒为 `(w/2, h/2)`，任何 DPI 都不偏。
+
+    外观对齐 `#Ghost`：透明底 + `rgba(255,255,255,.14)` 细边；悬停转主题高亮色。
+    """
+
+    def __init__(self, w=28, h=24, parent=None, tip="", radius=None):
+        super().__init__(parent)
+        self.setFixedSize(int(w), int(h))
+        self.setCursor(Qt.PointingHandCursor)
+        if tip:
+            self.setToolTip(tip)
+        self.setAttribute(Qt.WA_Hover, True)
+        # None → 取 min(w,h)/2，即原来 `border-radius` 被 Qt 钳到的高度一半（胶囊形）
+        self._radius = radius
+        self._arm = 3.0          # 加号半臂长（原字形实测约 5×6px，这里 6×6px）
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        hot = self.underMouse() or self.isDown()
+        acc = accent_rgb()
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rad = self._radius if self._radius is not None else min(r.width(), r.height()) / 2.0
+        if hot:
+            bgc = QColor(acc)
+            bgc.setAlphaF(0.16 if not self.isDown() else 0.26)
+            p.setBrush(bgc)
+            bd = QColor(acc)
+            bd.setAlphaF(0.55)
+            p.setPen(QPen(bd, 1.0))
+        else:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
+        p.drawRoundedRect(r, rad, rad)
+        pen = QPen(QColor("#fafafa" if hot else "#ecedee"), 1.35)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        c = QPointF(self.width() / 2.0, self.height() / 2.0)
+        a = self._arm
+        p.drawLine(QPointF(c.x() - a, c.y()), QPointF(c.x() + a, c.y()))
+        p.drawLine(QPointF(c.x(), c.y() - a), QPointF(c.x(), c.y() + a))
+        p.end()
+
+    def enterEvent(self, e):
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.update()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        super().mousePressEvent(e)
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        self.update()
 
 
 class TagChip(QWidget):
@@ -1355,7 +1441,7 @@ class HeroView(QScrollArea):
         head = QHBoxLayout()
         head.setSpacing(6)
         head.addWidget(_label("标签", 15, True))
-        add = compact_button("＋", 28, 24, "添加标签")
+        add = RoundPlus(28, 24, tip="添加标签")
         add.clicked.connect(self._add_tag)
         head.addWidget(add)
         head.addStretch(1)
@@ -1745,7 +1831,7 @@ class HeroView(QScrollArea):
         head = QHBoxLayout()
         head.setSpacing(6)
         head.addWidget(_label("演职人员信息", 15, True))
-        add = compact_button("＋", 28, 24, "从演员库 / 导演库添加一位到本片")
+        add = RoundPlus(28, 24, tip="从演员库 / 导演库添加一位到本片")
         add.clicked.connect(self._add_person)
         head.addWidget(add)
         head.addStretch(1)

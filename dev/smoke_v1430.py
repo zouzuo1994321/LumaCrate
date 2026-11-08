@@ -64,8 +64,8 @@ import main_window as mw
 from ui_hero import HeroView
 
 print("== 版本 ==")
-check("VERSION == v2.0.7", VER.VERSION == "v2.0.7", VER.VERSION)
-check("BUILD == 2611010128", VER.BUILD == "2611010128", VER.BUILD)
+check("VERSION == v2.0.10", VER.VERSION == "v2.0.10", VER.VERSION)
+check("BUILD == 2611050131", VER.BUILD == "2611050131", VER.BUILD)
 
 # ============================================================
 print("== ① 导航名：数据与日志（v1.43.1 回改） ==")
@@ -1392,8 +1392,10 @@ _hv2.resize(1100, 1000)
 _hv2.show()
 for _ in range(20):
     app.processEvents()
-_plus = [b for b in _hv2.findChildren(_uh.QPushButton)
-         if b.text() == "＋" and "标签" in b.toolTip()]
+# v2.0.9（反馈 3）：标签的「＋」不再是 QPushButton("＋") 字形，改成自绘 RoundPlus ——
+# 它没有 text()，只认 tooltip（演职人员那枚的 tooltip 不含「标签」）。
+_plus = [b for b in _hv2.findChildren(_uh.RoundPlus)
+         if "标签" in b.toolTip()]
 check("反馈3 找得到标签的「＋」按钮（演职人员那枚的 tooltip 不含「标签」）",
       len(_plus) == 1, len(_plus))
 if _plus:
@@ -3171,8 +3173,21 @@ check("② 另一份（保留的那份）没被误删", os.path.exists(_v1) and 
 # ---- ③ 演职人员：＋ 添加 / 头像右上角 × 删除 ----
 check("③ 演职人员标题旁有「＋」", "从演员库 / 导演库添加一位到本片" in _HERO_SRC31)
 check("③ CastAvatar 支持 on_remove", "on_remove" in _CAST_SRC31)
-check("③ 头像右上角那枚 × 是 18×18 的小圆钮",
-      'rm.setFixedSize(18, 18)' in _CAST_SRC31)
+
+
+def _code31(src):
+    """去掉整行注释后的源码。
+
+    ⚠ 源码里**解释性的注释**会带上被否掉的旧写法（例如「原来这里是 QPushButton("×")」），
+    直接 `not in src` 判全会把自己写的注释算成缺陷 —— v2.0.7 踩过一次，v2.0.9 又踩一次。
+    """
+    return "\n".join(_l for _l in src.splitlines() if not _l.strip().startswith("#"))
+
+
+# v2.0.9（反馈 2）：由 `QPushButton("×")` 换成自绘 `RoundClose(18)` ——
+# 见 ㉟ 段的像素断言；这里只钉住「没退回字形按钮」。
+check("③ 头像右上角那枚 × 是自绘的 RoundClose(18)",
+      "RoundClose(18" in _CAST_SRC31 and 'QPushButton("×")' not in _code31(_CAST_SRC31))
 check("③ 「×」随控件宽度重排（resizeEvent 里重算位置）",
       "_place_remove" in _CAST_SRC31 and "resizeEvent" in _CAST_SRC31)
 _ADD_SRC31 = _insp31.getsource(_uh31.HeroView._add_person)
@@ -3673,6 +3688,277 @@ check("④ 列宽去抖对「构造期提前到达的 sectionResized」有兜底
 _lv34b.close()
 _lv34b.deleteLater()
 app.processEvents()
+
+print()
+print("== ㉟ v2.0.9：× 缩到 80% / 演员 × 归圆心 / ＋ 归中 / 进度条上方的空白 ==")
+# 四条反馈的根因收敛成两条：
+#   A. 用字形（`QPushButton("×")` / `"＋"`）画图标 —— 落点由字体 ascent/descent/侧承决定，
+#      不由控件中心决定 → 必然偏。修法一律改成**两条线自绘**，交点 = rect 中心。
+#   B. 布局里挂着一枚**永远为空**的 QLabel —— 空串也有 sizeHint，照样占一整行。
+import inspect as _insp35
+import ui_hero as _uh35
+
+# ---- ① 标签徽章里的 × 缩到 80% ----
+_KR35 = _uh35.RoundClose.K_RATIO
+check("① RoundClose.K_RATIO = 0.18（v2.0.8 的 0.225 × 80%）",
+      abs(_KR35 - 0.18) < 1e-9, _KR35)
+check("① 14px 徽章半臂长 2.52px（原来是 3.15px）",
+      abs(14 * _KR35 - 2.52) < 0.02 and abs(14 * 0.225 - 3.15) < 0.02,
+      "%.2f / 原 %.2f" % (14 * _KR35, 14 * 0.225))
+
+
+def _ink35(w, thr=150):
+    """量自绘控件的「墨迹」：返回 (bbox, 像素数)，bbox = (x0, x1, y0, y1)。
+
+    ⚠ 两个坑，缺一个就会假红：
+      1. `grab()` 会**先按 QPalette.Window 铺一层底色**（离屏下是 #efefef 的**白**）——
+         不关掉的话整块图都 ≥ thr，bbox 直接等于控件矩形。`setPalette(transparent)`
+         改不动它，只有 `WA_NoSystemBackground` 有效。
+      2. 关掉填充之后，**透明区的 RGB 是未初始化的垃圾**（实测四角 a0 却是 #ffffff /
+         #000000 混着）—— 只看 RGB 会把 168 个透明像素算成墨迹。必须同时判 alpha。
+    """
+    w.setAttribute(Qt.WA_NoSystemBackground, True)
+    im = w.grab().toImage()
+    xs, ys = [], []
+    for _y in range(im.height()):
+        for _x in range(im.width()):
+            _c = im.pixelColor(_x, _y)
+            if _c.alpha() >= 128 and max(_c.red(), _c.green(), _c.blue()) >= thr:
+                xs.append(_x)
+                ys.append(_y)
+    if not xs:
+        return None, 0
+    return (min(xs), max(xs), min(ys), max(ys)), len(xs)
+
+
+_b35, _n35 = _ink35(_uh35.RoundClose(14, on_click=lambda: None))
+_uh35.RoundClose.K_RATIO = 0.225          # 临时切回 v2.0.8 的常量做 A/B
+_b35o, _n35o = _ink35(_uh35.RoundClose(14, on_click=lambda: None))
+_uh35.RoundClose.K_RATIO = _KR35
+check("① A/B：同一段绘制，叉的墨迹比 v2.0.8 小（像素数严格下降）",
+      _n35 < _n35o, "%d → %d（-%.0f%%）" % (_n35o, _n35, (1 - _n35 / float(_n35o)) * 100))
+if _b35:
+    _mx35 = (_b35[0] + _b35[1]) / 2.0
+    _my35 = (_b35[2] + _b35[3]) / 2.0
+    check("① 缩了之后叉仍在圆心（偏移 ≤ 0.75px）",
+          abs(_mx35 - 6.5) <= 0.75 and abs(_my35 - 6.5) <= 0.75,
+          "中心 (%.2f, %.2f) / 理论 (6.5, 6.5)" % (_mx35, _my35))
+else:
+    check("① 缩了之后叉仍在圆心（偏移 ≤ 0.75px）", False, "没画出来")
+
+def _code35(src):
+    """去掉整行注释后的源码 —— 注释里写着旧写法会把判据带成假红（同一个坑踩第三次）。"""
+    return "\n".join(_l for _l in src.splitlines() if not _l.strip().startswith("#"))
+
+
+# ---- ② 演员头像右上角的 × 换成自绘圆叉 ----
+_CAST_SRC35 = _insp35.getsource(_uh35.CastAvatar.__init__)
+check("② 头像上的 × 不再是 QPushButton 字形",
+      'QPushButton("×")' not in _code35(_CAST_SRC35)
+      and "RoundClose(18" in _CAST_SRC35)
+_av35 = _uh35.CastAvatar({"name": "冒烟甲", "gender": "female"},
+                         lambda p: None, on_remove=lambda p: None)
+_rcs35 = _av35.findChildren(_uh35.RoundClose)
+check("② 头像里真的挂了一枚 RoundClose", len(_rcs35) == 1, len(_rcs35))
+if _rcs35:
+    _rc35 = _rcs35[0]
+    check("② 就是 self._rm 那一枚（不是野控件）", _av35._rm is _rc35)
+    _b35b, _ = _ink35(_rc35)
+    if _b35b:
+        _cx35 = (_b35b[0] + _b35b[1]) / 2.0
+        _cy35 = (_b35b[2] + _b35b[3]) / 2.0
+        check("② 18px 圆里的叉在圆心（偏移 ≤ 0.75px）",
+              abs(_cx35 - 8.5) <= 0.75 and abs(_cy35 - 8.5) <= 0.75,
+              "中心 (%.2f, %.2f) / 理论 (8.5, 8.5)" % (_cx35, _cy35))
+    else:
+        check("② 18px 圆里的叉在圆心（偏移 ≤ 0.75px）", False, "没画出来")
+check("② 那枚 × 点下去仍走 on_remove（换成自绘没丢回调）",
+      _rc35._on_click is not None)
+_av35.close()
+_av35.deleteLater()
+
+# ---- ③ 两处「＋」换成自绘 RoundPlus ----
+from PySide6.QtWidgets import QAbstractButton as _QAB35
+check("③ RoundPlus 是 QAbstractButton 子类（否则 .clicked 信号不存在）",
+      issubclass(_uh35.RoundPlus, _QAB35))
+_rp35 = _uh35.RoundPlus(28, 24, tip="x")
+check("③ RoundPlus 带 clicked 信号（调用点才能 connect）",
+      hasattr(_rp35, "clicked") and hasattr(_rp35.clicked, "connect"))
+_rpb35, _rpn35 = _ink35(_rp35)
+_im35 = _rp35.grab().toImage()
+print("    [诊断] bbox=%s n=%d 图 %dx%d 角(0,0)=%s a%d 心(13,11)=%s a%d"
+      % (_rpb35, _rpn35, _im35.width(), _im35.height(),
+         _im35.pixelColor(0, 0).name(), _im35.pixelColor(0, 0).alpha(),
+         _im35.pixelColor(13, 11).name(), _im35.pixelColor(13, 11).alpha()))
+if _rpb35:
+    _px35 = (_rpb35[0] + _rpb35[1]) / 2.0
+    _py35 = (_rpb35[2] + _rpb35[3]) / 2.0
+    check("③ 28×24 框里的「＋」在图形正中央（偏移 ≤ 0.75px）",
+          abs(_px35 - 13.5) <= 0.75 and abs(_py35 - 11.5) <= 0.75,
+          "中心 (%.2f, %.2f) / 理论 (13.5, 11.5)" % (_px35, _py35))
+    check("③ 「＋」外接 6~9px（半臂 3px + 圆头线帽，与旧字形视觉相当）",
+          6 <= _rpb35[1] - _rpb35[0] + 1 <= 9 and 6 <= _rpb35[3] - _rpb35[2] + 1 <= 9,
+          "%dx%d" % (_rpb35[1] - _rpb35[0] + 1, _rpb35[3] - _rpb35[2] + 1))
+else:
+    check("③ 28×24 框里的「＋」在图形正中央（偏移 ≤ 0.75px）", False, "没画出来")
+_rp35.close()
+_rp35.deleteLater()
+_TAG_SRC35 = _insp35.getsource(_uh35.HeroView._tag_section)
+_CASTSEC_SRC35 = _insp35.getsource(_uh35.HeroView._cast_section)
+for _nm35, _src35 in (("标签", _TAG_SRC35), ("演员信息", _CASTSEC_SRC35)):
+    check("③ %s的「＋」已换成 RoundPlus（不再塞全角字形）" % _nm35,
+          "RoundPlus(" in _src35 and 'compact_button("＋"' not in _src35)
+    check("③ %s的「＋」仍挂在同一个回调上（add.clicked / add_btn.clicked）" % _nm35,
+          ".clicked.connect" in _src35)
+
+# ---- ④ 进度条上方那行空白 ----
+_SC_SRC35 = _insp35.getsource(uis.SettingsDialog._build_scraper)
+check("④ 空的模式说明标签建出来就 hide()", "self.sc_mode_hint.hide()" in _SC_SRC35)
+check("④ 新增 _set_mode_hint 守卫（将来有文案能显示回来）",
+      hasattr(uis.SettingsDialog, "_set_mode_hint")
+      and 'setVisible(bool(t))' in _insp35.getsource(uis.SettingsDialog._set_mode_hint))
+_dlg35 = uis.SettingsDialog(None)
+_dlg35.resize(uis.SettingsDialog.DEF_W, uis.SettingsDialog.DEF_H)
+_dlg35.show()                       # 离屏也必须 show()，否则几何 / 可见性全是假值
+for _ in range(6):
+    app.processEvents()
+_dlg35._show("演员刮削")
+for _ in range(8):
+    app.processEvents()
+check("④ 进「演员刮削」页后那枚空标签仍是隐藏的", _dlg35.sc_mode_hint.isHidden())
+_btn35 = _dlg35.mode_btns.get("full") or list(_dlg35.mode_btns.values())[0]
+
+
+def _gap35():
+    """「模式按钮行」底部 → 进度条顶部 的垂直距离（像素）。"""
+    _b = _btn35.mapTo(_dlg35, _QPT33(0, _btn35.height())).y()
+    _p = _dlg35.sc_prog.mapTo(_dlg35, _QPT33(0, 0)).y()
+    return _p - _b
+
+
+_g35 = _gap35()
+check("④ 按钮行与进度条之间不再空一整行（≤12px；旧实现实测 32px）",
+      0 <= _g35 <= 12, _g35)
+# 能力不能丢：给文案时标签要自己回来
+_dlg35._set_mode_hint("全量刮削会重写 nfo")
+for _ in range(4):
+    app.processEvents()
+check("④ 给了文案 → 标签显示出来（没把功能焊死）",
+      not _dlg35.sc_mode_hint.isHidden()
+      and _dlg35.sc_mode_hint.text() == "全量刮削会重写 nfo")
+check("④ 有文案时按钮行 → 进度条的距离被撑开（标签真的占了行）",
+      _gap35() > _g35, "%.0f → %.0f" % (_g35, _gap35()))
+_dlg35._set_mode_hint("")
+for _ in range(4):
+    app.processEvents()
+check("④ 文案清空 → 又收回隐藏态", _dlg35.sc_mode_hint.isHidden())
+check("④ 收回去后距离回到原值", abs(_gap35() - _g35) <= 1,
+      "%.0f / %.0f" % (_gap35(), _g35))
+_dlg35.close()
+_dlg35.deleteLater()
+app.processEvents()
+
+# ============================================================
+print("== ㊱ v2.0.10：首页表头筛选面板能打中文了 ==")
+# 反馈原话：「首页筛选无法正常输入中文」。
+# 根因：ColumnFilterPopup 用了 Qt.Popup —— Windows 上那是「菜单类窗口」
+# （EXSTYLE=WS_EX_TOOLWINDOW|WS_EX_TOPMOST，一律 SW_SHOWNOACTIVATE），永不成为前台窗口，
+# 输入法只肯把输入上下文交给前台窗口 → 中文组不出来，英文靠键盘抓取却能进。
+# 与 v1.46.10 的 PersonSearchDialog 同一病根，改法照抄：Qt.Dialog + 自补「点外面关闭」。
+#
+# ⚠ 冒烟跑在 offscreen 平台上，拿不到真 HWND / 前台窗口 / 系统输入法，
+#   所以这里只钉「窗口类型 + 属性 + 中文数据链路 + 过滤器不泄漏」；
+#   「弹窗是不是 Windows 前台窗口」这类必须在真机验收里量（live_v2010_exe.py）。
+import inspect as _insp36                                          # noqa: E402
+import ui_home as _uh36                                            # noqa: E402
+from PySide6.QtCore import QEvent as _QE36, QPointF as _QPF36      # noqa: E402
+from PySide6.QtGui import QMouseEvent as _QME36                    # noqa: E402
+
+_INIT36 = _insp36.getsource(_uh36.ColumnFilterPopup.__init__)
+_CODE36 = "\n".join(_l for _l in _INIT36.splitlines()
+                    if not _l.strip().startswith("#"))
+check("㊱ ColumnFilterPopup 不再用 Qt.Popup（会挂不上输入法）",
+      "Qt.Popup" not in _CODE36)
+check("㊱ ColumnFilterPopup 改用可激活的 Qt.Dialog + 无边框",
+      "Qt.Dialog | Qt.FramelessWindowHint" in _CODE36)
+
+_pop36 = _uh36.ColumnFilterPopup("title", "标题")
+try:
+    # ⚠ `int(Qt.Popup)` 里含 Qt.Window 位（0x8|0x1），必须用低 8 位剥出窗口类型再比，
+    #   直接 `flags & Qt.Popup` 任何窗口都为真（v2.0.10 探针第一版就这么假红的）。
+    _type36 = int(_pop36.windowFlags()) & 0xFF
+    check("㊱ 窗口类型是 Dialog（0x03），不是 Popup（0x09）",
+          _type36 == (int(Qt.Dialog) & 0xFF) and _type36 != (int(Qt.Popup) & 0xFF),
+          "type=0x%02x" % _type36)
+    check("㊱ 面板与输入框都显式打开 WA_InputMethodEnabled",
+          _pop36.testAttribute(Qt.WA_InputMethodEnabled)
+          and _pop36.edit.testAttribute(Qt.WA_InputMethodEnabled))
+    check("㊱ 关掉 WA_ShowWithoutActivating（否则显示时仍不激活）",
+          not _pop36.testAttribute(Qt.WA_ShowWithoutActivating))
+    check("㊱ 显示时会自己 activateWindow（源码里显式调过）",
+          "activateWindow()" in _insp36.getsource(_uh36.ColumnFilterPopup.showEvent))
+
+    _pop36.show()
+    for _ in range(6):
+        app.processEvents()
+    check("㊱ 显示后自动装上「点外面关闭」过滤器", _pop36._outside is not None)
+
+    # ---- 中文数据链路：输入 → spec → applied ----
+    _pop36.edit.setText("机器")
+    check("㊱ 输入框里的中文能折成筛选条件（不走数值分支）",
+          _pop36.spec() == {"mode": "text", "value": "机器"}, _pop36.spec())
+    _got36 = {}
+    _pop36.applied.connect(lambda k, s: _got36.update(key=k, spec=s))
+    _pop36.edit.returnPressed.emit()
+    for _ in range(6):
+        app.processEvents()
+    check("㊱ 回车提交后 applied 带出中文条件",
+          _got36.get("spec") == {"mode": "text", "value": "机器"}, _got36)
+    check("㊱ 提交后面板自己关掉", not _pop36.isVisible())
+    check("㊱ 关掉后「点外面」过滤器已从 app 上摘除（不泄漏）",
+          _pop36._outside is None, _pop36._outside)
+
+    # ---- 点面板外面 / Esc 都能关 ----
+    _dummy36 = QWidget()
+    _dummy36.resize(200, 120)
+    _dummy36.show()
+    _pop36b = _uh36.ColumnFilterPopup("title", "标题")
+    _pop36b.show()
+    for _ in range(6):
+        app.processEvents()
+    _geo36 = _pop36b.geometry()
+    _ev36 = _QME36(_QE36.MouseButtonPress, _QPF36(1, 1),
+                   _QPF36(_geo36.right() + 200, _geo36.bottom() + 200),
+                   Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    QApplication.sendEvent(_dummy36, _ev36)
+    for _ in range(6):
+        app.processEvents()
+    check("㊱ 点面板外面能关掉（Popup 原本白送的能力没丢）", not _pop36b.isVisible())
+    check("㊱ 点外面关掉后过滤器同样摘干净", _pop36b._outside is None)
+
+    from PySide6.QtTest import QTest as _QT36                       # noqa: E402
+    _pop36c = _uh36.ColumnFilterPopup("title", "标题")
+    _pop36c.show()
+    for _ in range(6):
+        app.processEvents()
+    _QT36.keyClick(_pop36c.edit, Qt.Key_Escape)
+    for _ in range(6):
+        app.processEvents()
+    check("㊱ 按 Esc 能关掉", not _pop36c.isVisible())
+    check("㊱ Esc 关掉后过滤器同样摘干净", _pop36c._outside is None)
+    for _w in (_pop36b, _pop36c):
+        _w.close()
+        _w.deleteLater()
+    _dummy36.close()
+    _dummy36.deleteLater()
+    app.processEvents()
+finally:
+    _pop36.close()
+    _pop36.deleteLater()
+    app.processEvents()
+
+check("㊱ 枚举列 / 数值列形态没被改坏（仍是三种形态）",
+      "self._mode == \"eq\"" in _CODE36 and "self._mode == \"num\"" in _CODE36)
 
 print("通过 %d/%d" % (TOTAL[0] - len(FAILS), TOTAL[0]))
 if FAILS:

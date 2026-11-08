@@ -227,6 +227,41 @@ _sl = getattr(dlg, "sc_log", None)
 res["scraper_log_rect"] = ([_sl.x(), _sl.y(), _sl.width(), _sl.height()]
                            if _sl is not None else None)
 
+# v2.0.9（反馈 4）：执行区「模式按钮行底 → 进度条顶 / 日志区顶」的距离。
+# 真机验收拿这两个数当基准，与截图里量到的比较 —— 空标签一旦回来就 +19px，立刻露馅。
+try:
+    _mb = getattr(dlg, "mode_btns", {}).get("full")
+    if _mb is None and getattr(dlg, "mode_btns", None):
+        _mb = list(dlg.mode_btns.values())[0]
+    if _mb is not None and _sl is not None:
+        _y_btn = _mb.mapTo(dlg, QPoint(0, _mb.height())).y()
+        _bt = _mb.mapTo(dlg, QPoint(0, 0))
+        res["sc_mode_btn"] = center(_mb, dlg)
+        res["sc_mode_btn_rect"] = [int(_bt.x()), int(_bt.y()),
+                                   int(_mb.width()), int(_mb.height())]
+        res["sc_gap_to_log"] = int(_sl.mapTo(dlg, QPoint(0, 0)).y() - _y_btn)
+        _pr = getattr(dlg, "sc_prog", None)
+        if _pr is not None:
+            _pt = _pr.mapTo(dlg, QPoint(0, 0))
+            res["sc_prog_rect"] = [int(_pt.x()), int(_pt.y()),
+                                   int(_pr.width()), int(_pr.height())]
+            res["sc_gap_btn_to_prog"] = int(_pt.y() - _y_btn)
+            # 真机截图里定位不到进度条的细边框，但**「0%」那两个字**看得到 ——
+            # 它的竖直中心就是进度条中线，拿这个当比对基准最稳。
+            res["sc_gap_btn_to_prog_center"] = int(
+                _pr.mapTo(dlg, QPoint(0, _pr.height() // 2)).y() - _y_btn)
+            res["sc_prog_h"] = int(_pr.height())
+        res["sc_mode_hint_hidden"] = bool(dlg.sc_mode_hint.isHidden())
+        # 有文案时应撑开多少（用来确认守卫没把功能焊死）
+        dlg._set_mode_hint("占位文案用于测量")
+        app.processEvents()
+        res["sc_gap_to_log_with_hint"] = int(
+            _sl.mapTo(dlg, QPoint(0, 0)).y() - _y_btn)
+        dlg._set_mode_hint("")
+        app.processEvents()
+except Exception as _e:
+    print(f"[警告] v2.0.9 执行区间距测量失败：{type(_e).__name__}: {_e}")
+
 # v1.38.0（需求 2）：演员检测页的多选批量工具栏。
 # 只取坐标，**真机验收不得点「批量确认关联」** —— 它会对真实索引执行
 # db.merge_people（删除演员记录、搬移作品关联），是不可逆的写操作。

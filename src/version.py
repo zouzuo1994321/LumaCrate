@@ -12,10 +12,10 @@
     第三位 = 小版本迭代(bug 修复 / 小改进)
 """
 
-# 外部版本号 v2.0.8
+# 外部版本号 v2.0.10
 PRODUCT_GENERATION = 2   # 产品代（v2.0.0：整代 UI 换血 —— UI 组件套件按 HeroUI 设计语言重做）
 MAJOR_ITER = 0           # 大版本迭代 -> 第二位
-MINOR_ITER = 8           # 小版本迭代 -> 第三位
+MINOR_ITER = 10          # 小版本迭代 -> 第三位
 
 VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 
@@ -1302,8 +1302,54 @@ VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 #          按行号回退到 `_view` 的路径（否则 Ctrl+A 全选 / 批量导出 / 批量删除会拿到 None）。
 #          附带修掉一个一直没被发现的未捕获异常：构造期表格进布局时最后一列「拉伸」会
 #          触发 `sectionResized`，而 `_width_timer` 那时还没建 → AttributeError。
-BUILD_DATE = "261101"
-BUILD_SEQ = "0129"
+# 0130：v2.0.9 四条反馈（全是像素级的「差一点点」，根因收敛成两条）——
+#       ① 「标签的 圆形里的 X 缩小到 80%」：`RoundClose.K_RATIO` 由 `0.225` 收到 `0.18`
+#          （14px 徽章半臂长 3.15px → 2.52px）。一处改，标签徽章与演员头像徽章同时生效。
+#          离屏 A/B（同一段绘制只切这个常量）：墨迹外接 8×8 → 6×6、亮像素 16 → 12（-25%），
+#          圆心仍是 (6.5, 6.5) 偏移 0.00。
+#       ② 「演员右上的 X 不在圆心」：`CastAvatar` 里那枚 `QPushButton("×")` + QSS 换成
+#          `RoundClose(18)` —— 与 ① 同一条根因（字形落点由字体 ascent/descent/侧承决定，
+#          不由控件中心决定）。实测圆心 (8.50, 8.50) = 理论值，偏移 0.00。
+#       ③ 「标签和演员信息的 + 不在图形正中央」：**两处**都是 `compact_button("＋", 28, 24)`
+#          在按钮里塞全角「＋」字形。真机截图像素实测：框几何中心 (71.5, 17.5)、
+#          字形墨迹中心 (70.0, 19.5) → **偏左 1.5px、偏下 2px**，正是用户看到的那一点。
+#          新增 `ui_hero.RoundPlus(QAbstractButton)`：框与加号**全部自绘**，两条线交点
+#          恒为 `(w/2, h/2)`。离屏实测中心 (13.50, 11.50) = 理论值、偏移 0.00，墨迹 6×6
+#          （旧的 QPushButton 版本离屏只剩 6×1 —— 竖笔被按钮内边距压掉了）。
+#          外观对齐 `#Ghost`：透明底 + `rgba(255,255,255,.14)` 细边，悬停转主题高亮色。
+#          ⚠ 必须是 `QAbstractButton` 子类，否则 `.clicked` 信号不存在，调用点要全改。
+#       ④ 「进度条上多了一行空白区域压缩」：`ui_settings._build_scraper()` 里的
+#          `sc_mode_hint` 是一枚**全工程无人赋值**的 QLabel，永远空串却照样在竖向布局里
+#          占一整行。探针 probe_v209_exec.py 实测「按钮行底 → 进度条顶」= 32px（出图环境
+#          30px —— 差 2px 是空标签行高随字体微调，区间记 30~32），拆解为
+#          `7px spacing + 19px 空标签 + 6px spacing`。改法：初始 `hide()`（隐藏后布局
+#          既不占位也不计 spacing），并新增 `_set_mode_hint(text)` 守卫 —— 有文案才
+#          `setVisible(True)`，能力不丢。实测压到 7px，组框高 286 → 265（-21px）。
+#       附：两个踩过的坑记在这里，别再犯 ——
+#          · `QWidget.render(p)` 在 PySide6 必须带 `targetOffset`，否则 TypeError；
+#          · `render()` / `grab()` 都会**先按 QPalette.Window 铺底色**，离屏下是 `#efefef`
+#            的白；`setPalette(transparent)` 改不动它，只有 `WA_NoSystemBackground`
+#            能拿到「不铺白底」的图。出预览图时这个白底会被 PIL 的 `convert("RGB")`
+#            显成纯白，图会骗人。
+# 0131：v2.0.10 一条反馈（首页筛选无法正常输入中文）—— 根因不是输入法，是**窗口类型**：
+#       `ColumnFilterPopup` 用了 `Qt.Popup`，而 Popup 窗口在 Windows 上是「菜单类窗口」
+#       （EXSTYLE = WS_EX_TOOLWINDOW|WS_EX_TOPMOST，一律 `SW_SHOWNOACTIVATE` 显示），
+#       永远不会成为前台窗口；输入法只肯把输入上下文交给前台窗口 → 中文一个都组不出来，
+#       英文却能靠键盘抓取打进去，于是表现成「只是中文不行」。
+#       这跟 v1.46.10 的 `PersonSearchDialog` 是**同一个病根**，当时也是这么修的。
+#       改法（照抄那次的成功经验）：`Qt.Popup` → `Qt.Dialog | FramelessWindowHint`，
+#       显式 `WA_InputMethodEnabled=True`、`WA_ShowWithoutActivating=False`，
+#       `showEvent` 里 `raise_() + activateWindow()`；
+#       原来 Popup 白送的「点外面关闭」由新增的 `_OutsideCloser`（装在 QApplication 上的
+#       事件过滤器）补回来，**关闭时必须摘掉**，否则过滤器会一直挂在 app 上。
+#       验收（dev/_scratch/probe_v2010_ime2.py，15/15）：窗口类型 0x03=Dialog、
+#       EXSTYLE 0x88 → 0x0、往 HWND 投 WM_IME_STARTCOMPOSITION 能收到 inputMethodEvent、
+#       中文「机器」→ spec → applied 全链路通、点外面 / Esc 都能关、关完过滤器已摘。
+#       注：脚本进程抢不到 Windows 前台（前台锁），「弹窗成为前台窗口」这条判据在
+#       真机验收里补 —— 详见 dev/_scratch/live_v2010_exe.py。
+# 注：日期段取**打包当天** —— 本轮实际打包是 2026-11-05（v2.0.9 的 261103 是 11-03 打的）。
+BUILD_DATE = "261105"
+BUILD_SEQ = "0131"
 BUILD = f"{BUILD_DATE}{BUILD_SEQ}"
 
 # 完整标识

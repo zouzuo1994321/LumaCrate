@@ -3614,6 +3614,13 @@ class SettingsDialog(QDialog):
         self.sc_mode_hint.setStyleSheet("color:#a1a1aa;font-size:11px;")
         self.sc_mode_hint.setWordWrap(True)
         g3v.addWidget(self.sc_mode_hint)
+        # ★ v2.0.9（反馈 4「进度条上多了一行空白区域」）：这个标签**全工程没有人给它赋值**，
+        #   永远是一串空字符，却照样在布局里占一行 —— 探针 `probe_v209_exec.py` 实测：
+        #     按钮行底 y=751 → 空白 7px → 空 QLabel y=758..777（**19px**）→ 空白 6px
+        #     → 进度条顶 y=783。合计「按钮底 → 进度条顶」空出 **32px**，用户红框圈的就是它。
+        #   空串时 hide() 即可：QVBoxLayout 对隐藏项**既不占位也不计间距**，一按省掉 25px。
+        #   将来真要显示模式说明，调 `_set_mode_hint("…")` 会自动显示回来。
+        self.sc_mode_hint.hide()
         self.sc_prog = QProgressBar()
         self.sc_prog.setRange(0, 100)
         self.sc_prog.setValue(0)
@@ -4093,6 +4100,17 @@ class SettingsDialog(QDialog):
                 "waf": "HTTP 正文（反爬挑战页）",
                 "http": "HTTP 应用层",
                 "ok": "无（链路与正文都正常）"}.get(stage or "", stage or "未知")
+
+    def _set_mode_hint(self, text):
+        """执行区那行「模式说明」：有文案才占位，空串直接隐藏（v2.0.9 反馈 4）。
+
+        空 QLabel 在 `QVBoxLayout` 里照样占一行（实测 19px 高 + 上下各 6/7px 间距），
+        而它全工程没人赋值 —— 用户看到的就是进度条上方那条莫名其妙的空白。
+        统一走这个入口，就不会再有人「设个空串把行撑起来」。
+        """
+        t = (text or "").strip()
+        self.sc_mode_hint.setText(t)
+        self.sc_mode_hint.setVisible(bool(t))
 
     def _scrape_opts(self):
         """当前配置好的刮削参数（含数据源、头像目录）。"""

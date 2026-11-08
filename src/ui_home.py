@@ -11,7 +11,7 @@
 import os
 import time
 
-from PySide6.QtCore import Qt, QTimer, QEvent, Signal, QPoint
+from PySide6.QtCore import Qt, QTimer, QEvent, Signal, QPoint, QObject
 from PySide6.QtGui import (QCursor, QGuiApplication, QPainter, QColor, QPen,
                            QPainterPath)
 from PySide6.QtWidgets import (
@@ -312,6 +312,29 @@ class FilterHeaderView(QHeaderView):
         super().mouseReleaseEvent(e)
 
 
+class _OutsideCloser(QObject):
+    """无边框对话框「点外面就关」（v2.0.10）。
+
+    和 `ui_hero.ClickOutsideCloser` 同一套做法（那边是 QDialog 能 `reject()`，
+    这边是 QFrame 只能 `close()`，所以没直接复用）。
+    为什么要自己实现：**`Qt.Popup` 在 Windows 上不会被激活**，输入法要靠前台窗口的
+    输入上下文才能挂上 → 面板里根本切不了中文（只能打英文）。
+    """
+
+    def __init__(self, pop):
+        super().__init__(pop)
+        self._pop = pop
+
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() == QEvent.MouseButtonPress and self._pop.isVisible():
+                if not self._pop.geometry().contains(ev.globalPosition().toPoint()):
+                    self._pop.close()
+        except (RuntimeError, AttributeError):
+            return False
+        return False
+
+
 class ColumnFilterPopup(QFrame):
     """点表头漏斗弹出的小面板（v2.0.7 反馈 3）。
 
@@ -319,15 +342,26 @@ class ColumnFilterPopup(QFrame):
       · 文本列 → 一个输入框（包含匹配，不区分大小写）；
       · 数值列（评分 / 年份 / 观看次数 / 体积 / 时长）→ 比较符「= ≥ ≤」+ 数值；
       · 枚举列（收藏、类型）→ 一排可点的胶囊，点哪个选哪个。
-    用 `Qt.Popup` 而不是普通对话框：点面板外面 / 按 Esc 自动关，和系统菜单一致。
+
+    v2.0.10（用户反馈「首页筛选无法正常输入中文」）：
+      **不能再用 `Qt.Popup`** —— 和 v1.46.10 的 `PersonSearchDialog` 是同一个病根：
+      Popup 窗口在 Windows 上不被激活 → 挂不上输入法上下文 → 中文一个字都打不出来
+      （英文靠键盘抓取能进，所以看起来「只是中文不行」）。
+      改成可激活的无边框 `Qt.Dialog`；「点外面关闭」由 `_OutsideCloser` 补回来
+      （原来是 Popup 白送的），Esc 仍走 `keyPressEvent`。
     """
 
     applied = Signal(str, object)     # (列 key, spec dict 或 None=清除)
 
     def __init__(self, key, label, spec=None, options=None, parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint)
         self.setObjectName("ColFilter")
         self.setAttribute(Qt.WA_StyledBackground, True)
+        # 输入法相关：显式打开，别让无边框链路把它关掉（见类注释）
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._outside = None
         self._key = key
         self._mode = ("eq" if options is not None
                       else ("num" if key in _NUM_COLS else "text"))
@@ -394,6 +428,10 @@ class ColumnFilterPopup(QFrame):
                 row.addStretch(1)
                 v.addLayout(row)
             self.edit = QLineEdit()
+            # 输入框本身也要显式允许输入法事件（与 PersonSearchDialog 一致）
+            self.edit.setAttribute(Qt.WA_InputMethodEnabled, True)
+            self.edit.setInputMethodHints(Qt.ImhNone)
+            self.edit.setFocusPolicy(Qt.StrongFocus)
             self.edit.setText(str(spec.get("value") or ""))
             self.edit.setPlaceholderText("数值，例如 2020 / 7.5" if self._mode == "num"
                                          else "包含这个文字即可（留空 = 不筛选）")
@@ -455,9 +493,23 @@ class ColumnFilterPopup(QFrame):
 
     def showEvent(self, e):
         super().showEvent(e)
+        # 无边框对话框必须自己抢前台，否则 Windows 不把输入法上下文交给它
+        self.raise_()
+        self.activateWindow()
         if self.edit is not None:
-            self.edit.setFocus()
+            self.edit.setFocus(Qt.OtherFocusReason)
             self.edit.selectAll()
+        app = QApplication.instance()
+        if app is not None and self._outside is None:
+            self._outside = _OutsideCloser(self)
+            app.installEventFilter(self._outside)
+
+    def closeEvent(self, e):
+        app = QApplication.instance()
+        if app is not None and self._outside is not None:
+            app.removeEventFilter(self._outside)
+            self._outside = None
+        super().closeEvent(e)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
