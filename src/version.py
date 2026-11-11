@@ -12,10 +12,10 @@
     第三位 = 小版本迭代(bug 修复 / 小改进)
 """
 
-# 外部版本号 v2.0.10
+# 外部版本号 v2.0.14
 PRODUCT_GENERATION = 2   # 产品代（v2.0.0：整代 UI 换血 —— UI 组件套件按 HeroUI 设计语言重做）
 MAJOR_ITER = 0           # 大版本迭代 -> 第二位
-MINOR_ITER = 10          # 小版本迭代 -> 第三位
+MINOR_ITER = 14          # 小版本迭代 -> 第三位
 
 VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 
@@ -1347,9 +1347,126 @@ VERSION = f"v{PRODUCT_GENERATION}.{MAJOR_ITER}.{MINOR_ITER}"
 #       中文「机器」→ spec → applied 全链路通、点外面 / Esc 都能关、关完过滤器已摘。
 #       注：脚本进程抢不到 Windows 前台（前台锁），「弹窗成为前台窗口」这条判据在
 #       真机验收里补 —— 详见 dev/_scratch/live_v2010_exe.py。
-# 注：日期段取**打包当天** —— 本轮实际打包是 2026-11-05（v2.0.9 的 261103 是 11-03 打的）。
-BUILD_DATE = "261105"
-BUILD_SEQ = "0131"
+# 0132：v2.0.11 三条反馈 ——
+#       ① **多碟分集在「演员 / 导演」里没合并**（首页 / 媒体库已合并）。根因：扫描时
+#          `group_cd_sets()` 只改 `media.parent_id` —— 影片墙靠 `parent_id IS NULL`
+#          天然只剩一部，但演员库 / 导演库走的是 **media_people 反查**，同一个 nfo 下的
+#          每个分片都单独链过一次演员 → 一部两碟的片在「全部作品」里出现 2 行、
+#          卡片「N 部作品」也虚高。冗余列 `people.works` 同理（触发器只会按
+#          「一条关联 = 一部」±1，它不知道 parent_id 事后会被改写）。
+#          改法：统一「代表条目」表达式 `_GROUP_MEDIA_ID = CASE WHEN m.parent_id IS NULL
+#          THEN m.id ELSE m.parent_id END`，`person_works()` 折到代表再 `GROUP BY rep.id`
+#          去重（顺带修掉「只挂了 cd2 的人也看不到这部片」）、`get_person()` 同口径计数、
+#          新增 `recount_people_works()` 整表重算并在「扫描归组后 / 删失效后 / 删片 / 清库」
+#          四处调用；老库靠 `PRAGMA user_version=2011` 在升级首启时自动修一次，不需要重扫。
+#          验收 dev/_scratch/probe_v2011_cd.py（10/10）：归组前 A=2 部 → 归组后 1 部、
+#          只挂 cd2 的导演也算 1 部、`get_person().works` 与「全部作品」行数一致、
+#          删掉 cd2 后仍是 1 部。
+#       ② **首页滚动条是条方头细杠**（用户截图 53×117）：「优化首页的滚轮，更符合软件
+#          风格，和圆角保持一致」。实测真因是 **Qt 的 `::handle` 一写 margin 就不画圆角** ——
+#          旧写法 `槽 width:8 + margin:2` 把滑块挤成 4px、`border-radius:4` 被裁成方头。
+#          四种写法对照（dev/_scratch/probe_v2011_scroll.py）：滑块带 margin 全部方头，
+#          只把 margin 写在**槽**上才是圆头。现在槽 12px / 槽 margin 2px / 滑块无 margin
+#          → 8px 宽 + radius 4 = 正圆胶囊，且离窗口边留 2px；另加 hover 提亮与极淡圆角槽底。
+#       ③ **输入框首字太靠右**（反馈原话「所有输入的好像前面有几px的间隙」，附 3 张图，
+#          其中两张用红框框住输入框左边那一截空白）。实测首字落在 **19px** = 1px 边框 +
+#          `padding: 7px 16px` 的 16px + 字形余隙 2px；收到 12px 后是 15px。
+#          表单里（`QDialog QLineEdit`）的 11 → 10。⚠ 别再往 10 以下收，胶囊圆角会压字。
+#          验收 dev/_scratch/probe_v2011_ui.py（0 失败）：普通页 / 列筛选弹层首字列均 19 → 15。
+# 0133：v2.0.12 一条反馈（「不少圆角外有黑框尝试修复」，附右键菜单 / 替换弹层 / 表头三张图）——
+#       根因**不是圆角画错，是圆角外没人画**：`QMenu` / 无边框 `QDialog` 都是**顶层窗口**，
+#       窗口表面不透明，QStyleSheetStyle 只把底色画进圆角路径里 → 路径外露出窗口表面 = 纯黑。
+#       ① 新增 `src/uiwin.py`：`bare(w)` = FramelessWindowHint | NoDropShadowWindowHint |
+#          WA_TranslucentBackground | autoFillBackground(False)；`menu(parent)` 建菜单。
+#          **必须在窗口创建前设**（Show 之后再设 Qt 不重建窗口，等于没设）→ 9 处 `QMenu(self)`
+#          全部改成 `uiwin.menu(self)`，「扫描」那个子菜单再套一次 `bare()`。
+#          NoDropShadowWindowHint 不能省：半透明 + 系统投影时 DWM 按**矩形**画阴影，
+#          圆角外又是一圈更深的方形晕。
+#       ② 半透明顶层窗口的**根控件不画 QSS 底色**（矩阵实测：QFrame/QDialog、类型选择器/
+#          objectName 选择器、开不开 WA_StyledBackground 都不画，grab() 整块 alpha=0）
+#          → 圆角与底色改由**内层容器**承担：`PersonSearchDialog` 套 `#PSDBody`（10px）、
+#          `ColumnFilterPopup` 套 `#ColFilterBody`（8px）、`HoverPreview` 套 `#HoverCard`（16px）。
+#          顺带去掉 `PersonSearchDialog.setAutoFillBackground(True)`（它会把整个矩形刷一遍）。
+#       ③ 全局 `QDialog{border-radius:16px}` **删掉**：原生标题栏的对话框窗口是方形，
+#          圆角只把 client 区四角削成黑洞（列设置 / 关于 / 删除媒体库 等 9 个对话框都中招）。
+#          无边框弹层自己写了圆角，不受影响。
+#       ④ 表格的 14px 圆角被方形表头压出深色楔形：`QHeaderView::section:first/:last` 补
+#          13px 顶部圆角（表头在 1px 边框内侧，13+1=14 与表格同心）。
+#       验收：dev/_scratch/probe_v2012_ui.py（0 失败，属性 + 源码级「无裸 QMenu」）、
+#       probe_v2012_bg.py（三浮层角部 alpha=0 / 内部 #18181b 不透明）、
+#       probe_v2012_live.py（真窗口 + QScreen.grabWindow：亮蓝底上量圆角外像素，
+#       修复前是 #000000，修复后是蓝底/蓝底抗锯齿混合；原生对话框客户区四角 = #18181b）。
+#       注：QToolTip 同样是「顶层 + 圆角」，但 Qt 不给我们 show 之前的时机，实测它渲染成
+#           方形深色块（黑角与自身底色几乎无差、看不出来），本轮不动。
+# 0134：v2.0.13 一条反馈（「输入框右键为英文」，附 Undo/Redo/Cut/Copy… 截图）——
+#       根因**不是我们没写中文，是这段文字根本不归我们管**：输入框右键弹出的是
+#       `QLineEdit` 的**标准上下文菜单**，文字由 Qt 自己 `translate("QLineEdit", "&Undo")`
+#       出，**没装 QTranslator 就是英文源串**。`i18n.py` 那套「词典 + 回退」只管我们的
+#       业务文案，管不到 Qt 内建控件。
+#       ① 新增 `src/qtlang.py`：`install(app, code)` 按界面语言装 Qt 自带的
+#          `qtbase_<locale>.qm`；`translations_dirs()` 找四个候选位置（QLibraryInfo 报的
+#          路径 / PySide6 包内 / `_MEIPASS/PySide6/translations` / exe 同级 translations）；
+#          `sample_texts()` 把标准菜单前几项吐出来，用于日志自证。翻译器**必须持有引用**
+#          （被 GC 掉翻译会静默失效）。
+#          19 种界面语言里 Qt 只有 15 种有 qtbase 翻译（hi / th / vi / id 没有），
+#          拿不到就静默回退英文，不报错、不影响界面；`en` 是源语言，压根不装。
+#       ② `main.py` 在建任何界面之前装（与 i18n.set_lang 同一处），并在 app.log 留一行
+#          「Qt 标准文本：已装 <qm 路径> ｜ 示例 撤消(U) / 重做(R)」—— 以后再有人说
+#          「某处还是英文」，看日志就知道是 qm 没打进 exe 还是控件不走标准菜单。
+#       ③ `ui_settings._apply_language` 里跟着重装：切换界面语言后标准文本一起换。
+#       ④ `build_exe.py` 新增 `_qtbase_data_args()` —— 按 PyInstaller 文档，`PySide6/translations/`
+#          不会被自动收集，所以显式 `--add-data`（落在 `PySide6/translations`，与 qtlang 的
+#          第 3 个候选位置对齐）。**但实测：本地这个 PyInstaller 版本的 PySide6 hook 其实
+#          早就把这个目录整个收进去了** —— `pyi-archive_viewer -l` 查 v2.0.12 的 exe，
+#          里面已有 `PySide6/translations/qtbase_zh_CN.qm`（147222 字节，32 个 qtbase 齐全），
+#          所以两版 exe 都是 59.7 MB（只差 5 KB），`--add-data` 只作版本间保险。
+#          **缺的从来不是文件，是那一行 installTranslator** —— 这是本轮最值钱的一句。
+#       注：实测这类内建菜单**圆角外本来就是透明的**（亮蓝底上量到 #356ead，不是黑），
+#           所以没有给它加 `uiwin.bare()`，只修语言。
+#       验收：dev/_scratch/probe_v2013_ctx.py（英文可复现 → 装 qm 后变中文，四角蓝底）、
+#       dev/_scratch/live_v2013_exe.py（exe 真机：日志带 qm 路径 + 菜单弹得出 + 四角不黑）。
+# 0135：v2.0.14 两条反馈 ——
+#       ① 「圆角外有黑色的小角」（附图正是输入框右键菜单）。**v2.0.13 那句「这类内建菜单
+#          圆角外本来就是透明的」是判错了**：上一轮只量了一个角，量到的 #356ead 正好是
+#          「阴影压在亮蓝底上」的混合色，看着像蓝、其实是变暗的蓝。
+#          实测两层根因：窗口类是 `QWindowPopupDropShadowSaveBits`（有投影），
+#          `uiwin.bare()` 后变 `QWindowPopupSaveBits`（窗口级投影没了），**但四角仍是
+#          #0f0f11** —— Qt 还会把阴影画进菜单表面，加旗标去不掉。结论：**不能用标准菜单**。
+#          新增 `src/editfix.py`：应用级事件过滤器拦 `QEvent.ContextMenu`，把
+#          `createStandardContextMenu()` 的 actions 搬进 `uiwin.menu()` 再弹（文本仍由
+#          qtlang 中文化、启用态仍按选区算），所以「语言」与「圆角」两条都保住了。
+#          ⚠ action 的父对象是那份临时菜单，必须 `setParent(我们的菜单)` 转交所有权，
+#            否则临时菜单一析构就把 action 带走（弹出瞬间正常、点下去没反应）。
+#       ② 「输入框输入内容后靠右出现小 X，可以删除输入的内容」—— 走
+#          `setClearButtonEnabled(True)`，但内建图标是 `SP_LineEditClearButton` 的深色叉，
+#          压在 #18181b 上几乎看不见（亮像素只有 16）。改由 style.qss 换图标：
+#          ⚠ **只能用 `qproperty-icon`，`image:` 无效** —— 那颗按钮是 QLineEdit 内部的
+#            **无名 QToolButton**（Qt 6.11 连 `qt_clear_button` 这个 objectName 都没了），
+#            图标是 `setIcon(style()->standardIcon(...))` 直接塞的 QIcon，`image:` 被它盖掉
+#            （三条选择器各存一张图，哈希与默认逐字节相同）。换 qproperty-icon 后亮像素 16 → 48。
+#          剔除 QSpinBox / QComboBox 内部自带的 QLineEdit，否则会「数字框里塞个叉」。
+#       ③ `load_style()` 里装（不是 main.py）：所有入口（main.py / 工具窗 / dev 下几十个
+#          出图脚本）都会先调它，挂主入口会让冒烟与真机验的不是同一套行为。幂等。
+#       验收：dev/_scratch/probe_v2014_clear3.py（对照组证死「不是挂 QSS 就变亮」）、
+#       dev/_scratch/probe_v2014_verify.py（清空真清空 / 菜单类名 SaveBits / action 点击有效）、
+#       dev/_scratch/live_v2014_exe.py（exe 真机）。
+# 0136：v2.0.14 重打 —— 起因是 0135 的真机验收里出现「键盘把字打进搜索框，清空小叉
+#       不出现，按一次回车才出现」，于是把显隐改成**自管**：`editfix._arm()` 拿到那颗
+#       QToolButton 后自己接 `textChanged`，`_sync_clear_btn()` 按 `text()` 定 `setVisible()`，
+#       另加 `LMC_DEBUG_EDITFIX=1` 开关把每次显隐判断写进 app.log。
+# 0137：v2.0.14 再重打 —— **0136 的病因判断是错的，真凶查明**：
+#       带调试重跑后 app.log 里只有启动时那 3 行 `text='' → visible=False`，
+#       打字之后**一条都没有**；而截图里框内确实有三个「Z」，只是每个 Z 底下各有一条
+#       **点线下划线** —— 那是输入法的**组字串（preedit）**，根本没提交。
+#       所以 `text()` 是空的、`textChanged` 不该响、叉不该出现，**行为本来就是对的**；
+#       0135 那次「按回车才出现」其实是**回车提交了组字**。**功能自始至终没有 bug，
+#       是验收脚本被输入法骗了**（本机中文输入法在活动状态，注入的 VK_Z 进了组字）。
+#       处理：① 验收脚本改用 Ctrl+V 粘贴（不经输入法）再断言，并保留「组字串不算提交」
+#       这条说明；② 自管的显隐**保留**（无害且让判据只认 `text()` 一个事实），但去掉
+#       里面 `echoMode == Normal` 这条 —— 密码框恰恰最需要这颗叉，加了反而会藏掉 Qt
+#       想显示的按钮；③ `_sync_clear_btn` 的 docstring 把这段误判与被推翻的过程写清楚。
+BUILD_DATE = "261111"
+BUILD_SEQ = "0137"
 BUILD = f"{BUILD_DATE}{BUILD_SEQ}"
 
 # 完整标识

@@ -49,6 +49,7 @@ import ui_manualedit               # v1.30.0 反馈 3：手动修改
 import ui_actorcheck               # v1.31.0 反馈 3：演员检测
 import i18n                        # v1.32.0 反馈 3：界面语言（19 种）
 from scan_ring import ScanRing     # v1.39.0（需求 3）：导航项「进行中」转圈
+import uiwin                       # v2.0.12：右键菜单圆角外要真透明（否则一圈黑框）
 
 # v1.40.11：执行日志框（sc_log）与「运行日志（实时）」框（_log_view）统一为同一套样式。
 # 等宽字体 + 半透明深色底 + 浅色字，复制运行日志的观感（仅样式复刻，不做实时文件 tail）。
@@ -3206,6 +3207,15 @@ class SettingsDialog(QDialog):
         code = self.ap_lang.currentData() or i18n.DEFAULT_LANG
         self.s.set_appearance(language=code)
         i18n.set_lang(code)
+        # v2.0.13：Qt **内建控件**的标准文本（输入框右键菜单 / QMessageBox 按钮 /
+        # 文件对话框）跟着一起换 —— 它走 QTranslator，不在 i18n 词典里。
+        try:
+            import qtlang
+            _ok, _p = qtlang.install(QApplication.instance(), code)
+            applog.log("[设置] Qt 标准文本：%s%s"
+                       % ("已装 " if _ok else "未装（该语言无 qtbase 翻译）", _p or ""))
+        except Exception as e:
+            applog.log("[设置] 换 Qt 标准文本翻译失败：%s" % e)
         applog.log("[设置] 界面语言切换为 %s（%s）" % (code, i18n.cn_name(code)))
         if self.on_changed:
             self.on_changed()
@@ -5601,7 +5611,7 @@ class SettingsDialog(QDialog):
         path = self._dd_current_path()
         if not path:
             return
-        m = QMenu(self)
+        m = uiwin.menu(self)
         a1 = m.addAction("打开影片（播放）")
         a1.setEnabled(os.path.exists(path))
         a1.triggered.connect(self._dedupe_play)
@@ -5621,7 +5631,7 @@ class SettingsDialog(QDialog):
         path = self._dd_current_path()
         if not path:
             return
-        m = QMenu(self)
+        m = uiwin.menu(self)
         a1 = m.addAction("删除影片文件…")
         a1.triggered.connect(self._dedupe_delete_file)
         a2 = m.addAction("删除影片文件夹…")

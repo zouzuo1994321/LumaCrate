@@ -246,6 +246,10 @@ def _scan_root(root: str, progress: Callable[[str], None] = None,
     # v1.15.0：把 cd1…cdN 连续序号的视频归组为「一部 + 选集」（不动磁盘）
     try:
         counts["grouped"] = group_cd_sets(root)
+        # v2.0.11（用户反馈 1）：归组刚改写了 parent_id —— 而 person.works 是按
+        # 「一部片算一部」折算计数的，必须在归组**之后**重算，否则演员库 / 导演库里
+        # 同一部多碟片会被数成 N 部（首页与媒体库已经合并，只有人物反查没合并）。
+        db.recount_people_works()
     except Exception as e:
         if progress:
             progress(f"[归组出错] {e}")
@@ -701,6 +705,12 @@ def prune_missing(library_name: Optional[str] = None, roots: Optional[list] = No
     for p in (roots or []):
         if p and os.path.isdir(p):
             group_cd_sets(p)
+    # v2.0.11（反馈 1）：删了记录 + 重新归组 → person.works 必须整表重算一次
+    # （触发器只会按「一条关联 = 一部」±1，多碟分集的口径它对不上）。
+    try:
+        db.recount_people_works()
+    except Exception:
+        pass
     return {"removed": removed}
 
 

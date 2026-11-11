@@ -38,6 +38,8 @@ import sysmon                    # v1.27.0：侧栏「实时状态」面板（�
 from scan_ring import ScanRing   # v1.39.0（需求 3）：抽出到独立模块，工具窗导航复用
 import i18n                      # v1.32.0：界面语言（叶子模块，无循环导入；查不到原样返回中文）
 import glyphs                    # v2.0.1：QSS 用的 PNG 小图标（箭头 / 对勾），启动时现生成
+import uiwin                     # v2.0.12：顶层浮层（菜单/弹层）圆角外要真透明，否则一圈黑框
+import editfix                   # v2.0.14：输入框右键菜单走圆角壳 + 右侧清空小叉
 from ui_hero import HeroView, circle_pixmap, cover_pixmap, placeholder_pixmap, compact_button
 import ui_hero as uhero            # v2.0.3（反馈 8）：卡片小字的身份配色与详情页共用真源
 from ui_home import HomeListView
@@ -557,7 +559,9 @@ def render_style(appearance: dict = None) -> str:
     # 生成失败时 url() 返回 "none"，声明仍合法（界面只是少一个小图形）。
     for token, key in (("__GLYPH_UP__", "arrow_up"),
                        ("__GLYPH_DOWN__", "arrow_down"),
-                       ("__GLYPH_CHECK__", "check")):
+                       ("__GLYPH_CHECK__", "check"),
+                       # v2.0.14：输入框右侧的清空小叉（QSS 只能用 qproperty-icon 换它）
+                       ("__GLYPH_CLOSE__", "close")):
         try:
             qss = qss.replace(token, glyphs.url(key))
         except Exception:
@@ -567,6 +571,14 @@ def render_style(appearance: dict = None) -> str:
 
 def load_style(app, appearance: dict = None):
     app.setStyleSheet(render_style(appearance))
+    # v2.0.14：输入框的收尾（右键菜单换圆角壳、右侧清空小叉）挂在这里是因为
+    # **所有入口**（main.py / 工具窗 / dev 下几十个出图脚本）都会先调它 ——
+    # 挂到 main.py 就只覆盖正式启动那条路，冒烟与真机验的不是同一套行为。
+    # 幂等，主题/强调色切换时重复调用无副作用。
+    try:
+        editfix.install(app)
+    except Exception as e:
+        applog.log("输入框收尾安装失败：%s" % e, "warning")
 
 
 # ---------- 删除媒体库确认对话框 ----------
@@ -805,7 +817,7 @@ class FilterSortBar(QWidget):
         self.sort_btn.setText(self._sort_label())
 
     def _open_sort_menu(self):
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         for key, label, _expr in self._sorts:
             act = menu.addAction(("✓ " if key == self._sort else "   ") + label)
             act.triggered.connect(lambda _c, k=key: self._set_sort(k))
@@ -1088,7 +1100,7 @@ class FacetBar(QWidget):
         self.sort_btn.setText(self._sort_label())
 
     def _open_sort_menu(self):
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         for key, label, _expr in self._sorts:
             act = menu.addAction(("✓ " if key == self._sort else "   ") + label)
             act.triggered.connect(lambda _c, k=key: self._set_sort(k))
@@ -4059,10 +4071,10 @@ class MainWindow(QMainWindow):
         return b
 
     def _lib_menu(self, lib, btn, pos):
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         act_edit = menu.addAction("编辑")
         act_rename = menu.addAction("重命名")
-        scan_menu = menu.addMenu("扫描")
+        scan_menu = uiwin.bare(menu.addMenu("扫描"))
         a_new = scan_menu.addAction("扫描新添加和修改的")
         a_fill = scan_menu.addAction("扫描全部补充缺失")
         a_over = scan_menu.addAction("扫描全部并覆盖")
@@ -4795,7 +4807,7 @@ class MainWindow(QMainWindow):
 
     def _folder_menu(self, name, btn, pos):
         """文件夹（媒体库）右键菜单：三种扫描模式。"""
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         a_new = menu.addAction(SCAN_MODE_CN["new"])
         a_fill = menu.addAction(SCAN_MODE_CN["fill"])
         a_over = menu.addAction(SCAN_MODE_CN["overwrite"])

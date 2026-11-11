@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 import database as db
 import media_meta as mm
 import config as cfg
+import uiwin                    # v2.0.12：浮层（菜单/筛选面板/悬停卡）圆角外要真透明
 from ui_hero import HeroView, cover_pixmap, placeholder_pixmap
 
 
@@ -355,6 +356,9 @@ class ColumnFilterPopup(QFrame):
 
     def __init__(self, key, label, spec=None, options=None, parent=None):
         super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint)
+        # v2.0.12（用户反馈「圆角外有黑框」）：无边框 + QSS 圆角之外还得让**窗口本身**
+        # 半透明，否则圆角外画不到的地方就是窗口表面的纯黑。见 uiwin.py 顶部注释。
+        uiwin.bare(self)
         self.setObjectName("ColFilter")
         self.setAttribute(Qt.WA_StyledBackground, True)
         # 输入法相关：显式打开，别让无边框链路把它关掉（见类注释）
@@ -370,7 +374,9 @@ class ColumnFilterPopup(QFrame):
         self._op = str(spec.get("op") or ">=")
         self._eq = str(spec.get("value") or "")
         self.setStyleSheet(
-            "QFrame#ColFilter{background:#18181b;border:1px solid #3f3f46;"
+            # v2.0.12：圆角 + 底色画在**内层容器** #ColFilterBody 上 —— 半透明顶层窗口的
+            # 根控件不画 QSS 底色（实测 grab() 整块 alpha=0），见 uiwin.py 顶部注释。
+            "QFrame#ColFilterBody{background:#18181b;border:1px solid #3f3f46;"
             "border-radius:8px;}"
             "QLabel{background:transparent;color:#ecedee;font-size:12px;}"
             "QLabel#ColFilterHint{color:#8b8b93;font-size:11px;}"
@@ -389,7 +395,13 @@ class ColumnFilterPopup(QFrame):
             "QPushButton#MiniGo:hover{background:#ef6f92;}")
         self.setMinimumWidth(248)
 
-        v = QVBoxLayout(self)
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _outer.setSpacing(0)
+        self._body = QFrame()
+        self._body.setObjectName("ColFilterBody")
+        _outer.addWidget(self._body)
+        v = QVBoxLayout(self._body)
         v.setContentsMargins(12, 10, 12, 10)
         v.setSpacing(7)
         head = QLabel("筛选 · %s" % label)
@@ -526,12 +538,22 @@ class HoverPreview(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
-        self.setObjectName("HoverCard")
+        # v2.0.12：悬停卡也是顶层窗口（16px 圆角）→ 同样要半透明 + 内层容器画底色
+        uiwin.bare(self)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFixedWidth(self.CARD_W)
 
-        v = QVBoxLayout(self)
+        # 圆角 + 底色必须落在内层容器上（半透明窗口的根控件不画 QSS 底色）。
+        # 全局样式里那条规则的选择器就是 `QFrame#HoverCard`，所以 objectName 挂在这里。
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _outer.setSpacing(0)
+        self._body = QFrame()
+        self._body.setObjectName("HoverCard")
+        _outer.addWidget(self._body)
+
+        v = QVBoxLayout(self._body)
         v.setContentsMargins(9, 9, 9, 9)
         v.setSpacing(6)
         self.img = QLabel()
@@ -1535,7 +1557,7 @@ class HomeListView(QWidget):
         """按选中数量构建菜单。**独立成方法**，离屏冒烟可直接断言条目与文案。"""
         n = len(medias or [])
         suffix = "" if n <= 1 else f"（{n} 项）"
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         menu.setObjectName("BulkMenu")
         actions = {}
         for spec in self.BULK_ITEMS:

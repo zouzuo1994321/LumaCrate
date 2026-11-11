@@ -95,11 +95,44 @@ def _chevron(path, size, up=True, color="#a1a1aa", thick=1.9):
     return pm.save(path)
 
 
+def _close(path, size, color="#a1a1aa", thick=1.9):
+    """圆头叉号（输入框右侧的清空按钮，v2.0.14）。
+
+    为什么自己画：`QLineEdit` 内建的清除图标来自 `QStyle::SP_LineEditClearButton`，
+    暗色主题下是**深色叉**，压在 `#18181b` 的输入框上几乎看不见（真机实测亮像素 0）。
+    两笔对角线，交点恒为画布中心 —— 与 `RoundClose` 同一个绘制口径。
+    """
+    from PySide6.QtGui import QColor, QPen, QImage
+    from PySide6.QtCore import Qt, QPointF
+
+    pm = QImage(size, size, QImage.Format_ARGB32)
+    pm.fill(Qt.transparent)
+    p = _painter(pm)
+    pen = QPen(QColor(color))
+    pen.setWidthF(thick)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    m = thick / 2.0 + 1.1
+    p.drawLine(QPointF(m, m), QPointF(size - m, size - m))
+    p.drawLine(QPointF(size - m, m), QPointF(m, size - m))
+    p.end()
+    return pm.save(path)
+
+
+#: key → 绘制函数（缺省走 `_chevron`）
+_HANDLERS = {"check": _check, "close": _close}
+
+
 #: key → (文件名主干, 尺寸, 画笔参数)
 _SPECS = {
     "check":      ("check_%s" % _VER, 12, dict(thick=2.1)),
     "arrow_up":   ("arrow_up_%s" % _VER, 11, dict(up=True, thick=1.8)),
     "arrow_down": ("arrow_down_%s" % _VER, 11, dict(up=False, thick=1.8)),
+    # v2.0.14：输入框右侧的清空按钮（QLineEdit 的清除图标在暗色主题下是系统黑叉，
+    # 换个底就看不见，所以自己画一个）。
+    "close":      ("close_%s" % _VER, 12, dict(thick=1.9)),
 }
 
 #: 写盘格式候选。PNG 走 Qt 的 imageformats 插件，BMP 是内置的 ——
@@ -139,7 +172,7 @@ def ensure(force: bool = False) -> dict:
         return out
     for key, (base, size, kw) in _SPECS.items():
         try:
-            handler = _check if key == "check" else _chevron
+            handler = _HANDLERS.get(key, _chevron)
             path = _draw(handler, d, base, size, kw, force=force)
             if path:
                 out[key] = path

@@ -97,6 +97,27 @@ res["table"] = {"x": int(tp.x()), "y": int(tp.y()),
 res["cast_cols"] = list(getattr(hlv, "_cols", []))
 res["split"] = [int(x) for x in hlv.split.sizes()]
 
+# v2.0.13：首页搜索框（QLineEdit）的中心点 —— 输入框右键菜单就是它的**标准上下文菜单**。
+# 取「可见 + 宽度 > 200 + y 最小」的那一个（首页顶部那条；设置页/侧栏里另有可能出现）。
+from PySide6.QtWidgets import QLineEdit                      # noqa: E402
+_cands = [w for w in win.findChildren(QLineEdit)
+          if w.isVisible() and w.width() > 200 and w.height() > 20]
+if _cands:
+    _se = min(_cands, key=lambda w: w.mapTo(win, QPoint(0, 0)).y())
+    _p = _se.mapTo(win, QPoint(_se.width() // 2, _se.height() // 2))
+    res["search"] = [int(_p.x()), int(_p.y()), int(_se.width()), int(_se.height())]
+
+# v2.0.14：首页列表自带的「在列表中搜索片名…」输入框。
+# 为什么还要这一个：真机上主窗客户区 1920x1080，而屏幕也是 1920x1080 → 窗口比屏幕还大，
+# 顶栏搜索框的**右端正好骑在屏幕边缘**（被裁掉 ~15px）。验「清空小叉」要一个
+# 完全落在屏内的普通输入框，否则量到的永远是半截像素。
+_ls = [w for w in win.findChildren(QLineEdit)
+       if w.isVisible() and "列表中搜索" in (w.placeholderText() or "")]
+if _ls:
+    _w = _ls[0]
+    _p = _w.mapTo(win, QPoint(_w.width() // 2, _w.height() // 2))
+    res["list_search"] = [int(_p.x()), int(_p.y()), int(_w.width()), int(_w.height())]
+
 with open(OUT, "w", encoding="utf-8") as f:
     json.dump(res, f, ensure_ascii=False, indent=2)
 print("COORDS_OK", OUT, flush=True)

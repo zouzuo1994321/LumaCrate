@@ -64,8 +64,8 @@ import main_window as mw
 from ui_hero import HeroView
 
 print("== 版本 ==")
-check("VERSION == v2.0.10", VER.VERSION == "v2.0.10", VER.VERSION)
-check("BUILD == 2611050131", VER.BUILD == "2611050131", VER.BUILD)
+check("VERSION == v2.0.14", VER.VERSION == "v2.0.14", VER.VERSION)
+check("BUILD == 2611110137", VER.BUILD == "2611110137", VER.BUILD)
 
 # ============================================================
 print("== ① 导航名：数据与日志（v1.43.1 回改） ==")
@@ -2205,9 +2205,9 @@ check("滑块比圆球至少高 6px（上下各留 3px）", GAP_OP >= 6, GAP_OP)
 # QSS 画不了矢量图形：`::up-arrow` 的 color 无效、`::indicator:checked` 只能换底色。
 # 唯一的路是 image: url(...)，图片由 glyphs.py 在渲染样式表时现画成 PNG。
 _gl = glyphs.ensure(force=True)
-check("glyphs 生成 3 个小图标（箭头 ×2 + 对勾）",
-      set(_gl) == {"arrow_up", "arrow_down", "check"}, str(sorted(_gl)))
-check("三个 PNG 都真落盘且非空",
+check("glyphs 生成 4 个小图标（箭头 ×2 + 对勾 + 清空小叉）",
+      set(_gl) == {"arrow_up", "arrow_down", "check", "close"}, str(sorted(_gl)))
+check("四个 PNG 都真落盘且非空",
       all(os.path.exists(p) and os.path.getsize(p) > 100 for p in _gl.values()),
       str({k: os.path.getsize(p) for k, p in _gl.items() if os.path.exists(p)}))
 
@@ -3959,6 +3959,463 @@ finally:
 
 check("㊱ 枚举列 / 数值列形态没被改坏（仍是三种形态）",
       "self._mode == \"eq\"" in _CODE36 and "self._mode == \"num\"" in _CODE36)
+
+# ============================================================
+print("== ㊲ v2.0.11：多碟分集在人物反查里合并 + 滚动条圆角 + 输入框内边距 ==")
+# 三条反馈：① cd1/cd2 在演员/导演里还是分开 ② 首页滚轮要圆角 ③ 输入框首字靠右
+import scanner as _sc37                                            # noqa: E402
+import re as _re37                                                 # noqa: E402
+from PySide6.QtWidgets import QLineEdit as _QLineEdit37            # noqa: E402
+
+_QSS37 = mw.render_style(cfg.get_settings().appearance)
+
+
+def _block37(qss, selector):
+    """取 QSS 里某条规则的 `{...}` 内容 —— **只认「行首就是选择器」的那一条**。
+
+    ⚠ 不能用 `qss.find(selector)`：源码注释里为了讲清历史，会原样写出被否掉的旧规则
+      （例如「旧版 QScrollBar:vertical{width:8px;margin:2px}」），find 会先命中注释，
+      取回来的是**旧值**，断言就假红了（本轮第一次跑冒烟就踩了这一个）。
+    """
+    m = _re37.search(r"(?m)^\s*" + _re37.escape(selector.rstrip("{ ")) + r"\s*\{", qss)
+    if not m:
+        return ""
+    j = qss.find("{", m.start())
+    k = qss.find("}", j + 1)
+    return qss[j + 1:k] if j > 0 and k > j else ""
+
+
+_HANDLE37 = _block37(_QSS37, "QScrollBar::handle:vertical")
+_TRACK37 = _block37(_QSS37, "QScrollBar:vertical")
+check("㊲ 滚动条槽加宽到 12px（滑块才有 8px 可用）",
+      "width: 12px" in _TRACK37, _TRACK37.strip())
+check("㊲ 槽保留 2px 余量（滑块不贴死窗口边）", "margin: 2px" in _TRACK37)
+check("㊲ 滑块本身**不写** margin —— Qt 一看到 margin 就不画圆角",
+      "margin" not in _HANDLE37, _HANDLE37.strip())
+check("㊲ 滑块是 4px 圆角（8px 宽的一半 = 正圆胶囊）",
+      "border-radius: 4px" in _HANDLE37)
+check("㊲ 滑块有 hover / pressed 两级反馈",
+      "QScrollBar::handle:vertical:hover" in _QSS37
+      and "QScrollBar::handle:vertical:pressed" in _QSS37)
+check("㊲ 设置页数据源列表的滚动条同样去掉了 margin（否则还是方头）",
+      "margin" not in _block37(_QSS37, "QListWidget#SrcSourceList QScrollBar::handle:vertical"))
+check("㊲ 输入框左右内边距 16 → 12（首字 19px → 15px）",
+      "padding: 7px 12px" in _block37(_QSS37, "QLineEdit {"))
+check("㊲ 表单内输入框 11 → 10，与上面同一节奏",
+      "padding: 6px 10px" in _block37(_QSS37, "QDialog QLineEdit"))
+
+# ---- 像素：滑块必须「顶端比中间窄」（= 圆角真的画出来了） ----
+_sa37 = QScrollArea()
+_sa37.setWidgetResizable(True)
+_sa37.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+_sa37.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+_body37 = QWidget()
+_body37.setMinimumHeight(1400)
+_sa37.setWidget(_body37)
+_sa37.resize(300, 220)
+_sa37.show()
+for _ in range(4):
+    app.processEvents()
+_sb37 = _sa37.verticalScrollBar()
+_im37 = _sb37.grab().toImage()
+_W37, _H37 = _im37.width(), _im37.height()
+
+
+def _l37(x, y):
+    _c = _im37.pixelColor(x, y)
+    return (_c.red() + _c.green() + _c.blue()) / 3.0
+
+
+_vals37 = [_l37(_W37 // 2, y) for y in range(_H37)]
+_lit37 = [y for y, v in enumerate(_vals37) if v > 12]
+check("㊲ 滚动条里量到了滑块", bool(_lit37), "%dx%d" % (_W37, _H37))
+if _lit37:
+    _y0, _y1 = _lit37[0], _lit37[-1]
+    _thr37 = (max(_vals37[_y0:_y1 + 1]) + min(_vals37)) / 2.0
+    _w37 = [len([x for x in range(_W37) if _l37(x, y) > _thr37])
+            for y in range(_y0, _y0 + 4)]
+    _wm37 = len([x for x in range(_W37)
+                 if _l37(x, (_y0 + _y1) // 2) > _thr37])
+    check("㊲ 滑块宽 8px（原来是 4px 方头）", _wm37 >= 7, "宽=%d" % _wm37)
+    check("㊲ 滑块顶端逐行变窄 = 圆角生效", _w37[0] < _wm37,
+          "顶端 %s / 中间 %d" % (_w37, _wm37))
+_sa37.close()
+_sa37.deleteLater()
+app.processEvents()
+
+# ---- 像素：输入框首字列 ----
+_e37 = _QLineEdit37()
+_e37.setPlaceholderText("汉")
+_e37.resize(200, _e37.sizeHint().height())
+_e37.show()
+for _ in range(4):
+    app.processEvents()
+_ie37 = _e37.grab().toImage()
+_ink37 = None
+for _x in range(2, _ie37.width()):
+    if len([y for y in range(3, _ie37.height() - 3)
+            if (_ie37.pixelColor(_x, y).red() + _ie37.pixelColor(_x, y).green()
+                + _ie37.pixelColor(_x, y).blue()) / 3.0 > 95]) >= 2:
+        _ink37 = _x
+        break
+check("㊲ 输入框首字落在 13~17px（原 19px，用户截图里红框框的就是这一截）",
+      _ink37 is not None and 13 <= _ink37 <= 17, "首字列=%s" % _ink37)
+_e37.close()
+_e37.deleteLater()
+app.processEvents()
+
+# ---- 数据层：多碟分集折叠 ----
+_DB_SRC37 = open(os.path.join(ROOT, "src", "database.py"), encoding="utf-8").read()
+_DB_CODE37 = _code31(_DB_SRC37)
+check("㊲ database 有统一的「代表条目 id」表达式 _GROUP_MEDIA_ID",
+      "_GROUP_MEDIA_ID = " in _DB_CODE37)
+_SRC_PW37 = _code31(_insp31.getsource(db.person_works))
+check("㊲ person_works 折到代表条目、再按代表去重",
+      "_GROUP_MEDIA_ID" in _SRC_PW37 and "GROUP BY rep.id" in _SRC_PW37)
+check("㊲ get_person 的 works 同口径（COUNT DISTINCT 代表 id）",
+      "COUNT(DISTINCT" in _code31(_insp31.getsource(db.get_person)))
+check("㊲ 有整表重算入口 recount_people_works",
+      callable(getattr(db, "recount_people_works", None)))
+check("㊲ 扫描归组之后会重算（否则 parent_id 改了、列还是旧口径）",
+      "db.recount_people_works()" in _code31(_insp31.getsource(_sc37._scan_root)))
+check("㊲ 删失效记录后也重算",
+      "db.recount_people_works()" in _code31(_insp31.getsource(_sc37.prune_missing)))
+check("㊲ 删片 / 清库两条写路径都重算（触发器只按「一条关联=一部」±1）",
+      "_recount_people_works(conn)" in _code31(_insp31.getsource(db.delete_media))
+      and "_recount_people_works(conn)" in _code31(_insp31.getsource(db.clear_media)))
+check("㊲ 老库靠 user_version=2011 升级首启自动修一次（不必重扫）",
+      "user_version=2011" in _code31(_insp31.getsource(db._migrate)))
+
+print("== ㊳ v2.0.12：圆角外那圈黑框 ==")
+# 用户反馈：「不少圆角外有黑框尝试修复」（右键菜单 / 替换弹层 / 表头三张图）。
+# 根因：QMenu / 无边框 QDialog 都是**顶层窗口**，窗口表面不透明，QSS 只把底色画进圆角
+# 路径里 → 路径外没人画 = 纯黑。修法是 uiwin.bare() 开半透明 + 内层容器画底色。
+import uiwin as _uiwin38                                           # noqa: E402
+import ui_home as _uh38                                            # noqa: E402
+import inspect as _inspect38                                       # noqa: E402
+from PySide6.QtWidgets import (QFrame as _QFrame38,                # noqa: E402
+                               QTableWidget as _QTable38,
+                               QTableWidgetItem as _QItem38,
+                               QVBoxLayout as _QVB38)
+
+# ---- 1) uiwin 自身的语义 ----
+_m38 = _uiwin38.menu()
+_f38 = int(_m38.windowFlags())
+check("㊳ uiwin.menu() 开了 WA_TranslucentBackground",
+      _m38.testAttribute(Qt.WA_TranslucentBackground))
+check("㊳ 带 FramelessWindowHint（有系统边框时圆角会被压住）",
+      bool(_f38 & int(Qt.FramelessWindowHint)))
+check("㊳ 带 NoDropShadowWindowHint（否则 DWM 按矩形投影，圆角外又是一圈深色晕）",
+      bool(_f38 & int(Qt.NoDropShadowWindowHint)))
+check("㊳ 仍是 Popup（点菜单外面能关）", bool(_f38 & int(Qt.Popup)))
+check("㊳ 关掉了 autoFillBackground（它会按调色板把整个矩形刷成黑角）",
+      not _m38.autoFillBackground())
+_m38.deleteLater()
+
+_src38 = _inspect38.getsource(_uiwin38.bare)
+check("㊳ bare() 里三条设置都在（WA_Translucent / NoDropShadow / autoFill）",
+      "WA_TranslucentBackground" in _src38 and "NoDropShadowWindowHint" in _src38
+      and "setAutoFillBackground(False)" in _src38)
+
+# ---- 2) 源码级：不允许再有人裸建 QMenu ----
+_SRC38 = r"E:\【01】自研软件\【26-19】本地影视中心\src"
+for _fn38 in ("main_window.py", "ui_hero.py", "ui_home.py", "ui_settings.py"):
+    _s38 = open(os.path.join(_SRC38, _fn38), encoding="utf-8").read()
+    _code38 = "\n".join(_l38 for _l38 in _s38.splitlines()
+                        if not _l38.lstrip().startswith("#"))
+    check("㊳ %s 里没有裸 QMenu(（必须走 uiwin.menu）" % _fn38,
+          "QMenu(" not in _code38, _code38.count("uiwin.menu("))
+
+# ---- 3) 三个浮层：半透明 + 内层容器承担圆角 ----
+_p38 = uhero.PersonSearchDialog(initial="", old_name="测试")
+check("㊳ 替换弹层开了半透明", _p38.testAttribute(Qt.WA_TranslucentBackground))
+check("㊳ 替换弹层不再 autoFillBackground（会把圆角填成黑角）",
+      not _p38.autoFillBackground())
+_body38 = _p38.findChild(_QFrame38, "PSDBody")
+check("㊳ 替换弹层有内层容器 #PSDBody（半透明窗口的根控件不画 QSS 底色）",
+      _body38 is not None)
+check("㊳ 替换弹层的圆角写在 #PSDBody 上（10px）",
+      "QFrame#PSDBody" in _p38.styleSheet() and "border-radius:10px" in _p38.styleSheet())
+
+_pop38 = _uh38.ColumnFilterPopup("favorite", "收藏", None, [("是", "1"), ("否", "0")])
+check("㊳ 表头筛选浮层开了半透明",
+      _pop38.testAttribute(Qt.WA_TranslucentBackground))
+check("㊳ 筛选浮层有内层容器 #ColFilterBody 且圆角 8px",
+      _pop38.findChild(_QFrame38, "ColFilterBody") is not None
+      and "QFrame#ColFilterBody" in _pop38.styleSheet()
+      and "border-radius:8px" in _pop38.styleSheet())
+
+_hov38 = _uh38.HoverPreview()
+check("㊳ 悬停卡开了半透明", _hov38.testAttribute(Qt.WA_TranslucentBackground))
+check("㊳ 悬停卡的 #HoverCard（16px 圆角）挂在内层容器上",
+      _hov38.findChild(_QFrame38, "HoverCard") is not None)
+
+# ---- 4) 像素：浮层「角透明、内部不透明」（grab 的 alpha 是硬判据） ----
+for _w38, _tag38 in ((_p38, "替换弹层"), (_pop38, "筛选浮层"), (_hov38, "悬停卡")):
+    _w38.show()
+    for _ in range(4):
+        app.processEvents()
+    _im38 = _w38.grab().toImage()
+    _ca38 = _im38.pixelColor(0, 0).alpha()
+    _ci38 = _im38.pixelColor(_im38.width() // 2, _im38.height() - 6).alpha()
+    check("㊳ %s 的圆角外 alpha=0（真透明，不是画成黑的）" % _tag38, _ca38 == 0,
+          "alpha=%d" % _ca38)
+    check("㊳ %s 的面板内部不透明（内层容器真的画了底色）" % _tag38, _ci38 >= 200,
+          "alpha=%d" % _ci38)
+    _w38.close()
+
+# ---- 5) QSS：全局 QDialog 不再有圆角；表头首/末列补顶部圆角 ----
+_dlg38 = _block37(_QSS37, "QDialog {")
+check("㊳ 全局 QDialog 规则里没有 border-radius（原生标题栏是方的，圆角只会削出黑洞）",
+      "border-radius" not in _dlg38, _dlg38.strip()[:80])
+check("㊳ 表头首列有 13px 顶部左圆角（与表格 14px 同心：13+1px 边框）",
+      "border-top-left-radius: 13px" in _block37(_QSS37, "QHeaderView::section:first"))
+check("㊳ 表头末列有 13px 顶部右圆角",
+      "border-top-right-radius: 13px" in _block37(_QSS37, "QHeaderView::section:last"))
+
+# ---- 6) 像素：表头圆角缺口是「页面底色」，不是被表头压暗的深色 ----
+_host38 = QWidget()
+_host38.setObjectName("Host38")
+_host38.setAttribute(Qt.WA_StyledBackground, True)
+_host38.setStyleSheet("QWidget#Host38{background:#101014;}")
+_vb38 = _QVB38(_host38)
+_vb38.setContentsMargins(0, 0, 0, 0)
+_tbl38 = _QTable38(3, 3)
+_tbl38.setHorizontalHeaderLabels(["片名", "评分", "年份"])
+for _r38 in range(3):
+    for _c38 in range(3):
+        _tbl38.setItem(_r38, _c38, _QItem38("x"))
+_tbl38.setShowGrid(False)
+_tbl38.verticalHeader().setVisible(False)
+_vb38.addWidget(_tbl38)
+_host38.resize(420, 170)
+_host38.show()
+for _ in range(4):
+    app.processEvents()
+_hdr38 = _tbl38.horizontalHeader()
+_pt38 = _hdr38.mapTo(_host38, _hdr38.rect().topLeft())
+_img38 = _host38.grab().toImage()
+# 采样点必须在「半径 13 的弧外」：圆心 (13,13)，(2,2) 到圆心 15.6 > 13 ✔
+_gap38 = _img38.pixelColor(_pt38.x() + 2, _pt38.y() + 2)
+_hd38 = _img38.pixelColor(_pt38.x() + 60, _pt38.y() + 12)
+check("㊳ 表头圆角缺口 = 页面底色 #101014（不再被表头 4.5% 白压成深色楔形）",
+      abs(_gap38.red() - 0x10) <= 4 and abs(_gap38.blue() - 0x14) <= 4, _gap38.name())
+check("㊳ 表头正文比缺口亮（取样点确实一个在弧内、一个在弧外）",
+      _hd38.lightness() > _gap38.lightness(), "%d > %d" % (_hd38.lightness(), _gap38.lightness()))
+_host38.close()
+_host38.deleteLater()
+app.processEvents()
+
+print("== ㊴ v2.0.13：Qt 内建控件的标准文本（输入框右键菜单）==")
+# 用户反馈「输入框右键为英文」：那段文字是 Qt 自己 `translate("QLineEdit", "&Undo")`
+# 出来的，只有装 QTranslator 才有中文。这里量的是**真实菜单文本**，不是属性自证。
+import qtlang as _qtl39                                        # noqa: E402
+from PySide6.QtCore import QTranslator as _QT39                # noqa: E402
+from PySide6.QtWidgets import QLineEdit as _QLE39              # noqa: E402
+
+
+def _ctx39():
+    """真实的标准右键菜单文本。
+
+    ⚠ 必须去掉 `\tCtrl+Z` 和 `&`：Qt 的原文是 `撤消(&U)`，`&U` 是**加速键标记**，
+    菜单上渲染成「撤消(U)」（U 带下划线）。按原文比会一路假红（首轮实测）。
+    """
+    _le = _QLE39()
+    _m = _le.createStandardContextMenu()
+    _out = [a.text().split("\t")[0].replace("&", "")
+            for a in _m.actions() if not a.isSeparator()]
+    _m.deleteLater()
+    _le.deleteLater()
+    return _out
+
+
+_SRC39 = os.path.dirname(os.path.abspath(VER.__file__))
+_ROWS39 = ["撤消(U)", "重做(R)", "剪切(T)", "复制(C)", "粘贴(P)", "删除", "全选"]
+
+_dirs39 = _qtl39.translations_dirs()
+check("㊴ 找得到 PySide6 的 translations 目录", any(os.path.isdir(d) for d in _dirs39), _dirs39[:2])
+check("㊴ 候选目录覆盖 `_MEIPASS/PySide6/translations`（onefile 打包后的落点）",
+      any(d.replace("\\", "/").endswith("PySide6/translations") for d in _dirs39), _dirs39)
+check("㊴ en 是 Qt 的源语言 → 不装翻译（nil 才对）", _qtl39.locale_for("en") is None)
+check("㊴ zh_CN 能解析出 QLocale", _qtl39.locale_for("zh_CN") is not None)
+check("㊴ 装之前是英文源串（复现用户截图）", _ctx39()[:1] == ["Undo"], _ctx39()[:2])
+
+_ok39, _p39 = _qtl39.install(app, "zh_CN")
+check("㊴ 装上 qtbase_zh_CN.qm", _ok39 and _p39.endswith("qtbase_zh_CN.qm"), _p39)
+check("㊴ 翻译器被模块**持有引用**（被 GC 掉会静默失效）",
+      bool(_qtl39._installed) and isinstance(_qtl39._installed[0], _QT39), len(_qtl39._installed))
+
+_txt39 = _ctx39()
+check("㊴ 输入框右键菜单变中文（撤消/重做/剪切/复制/粘贴/删除/全选）", _txt39 == _ROWS39, _txt39)
+_smp39 = _qtl39.sample_texts(2)
+check("㊴ sample_texts() 吐出中文（写进 app.log 的那一行靠它）",
+      len(_smp39) == 2 and "撤消" in _smp39[0], _smp39)
+
+_qtl39.install(app, "en")
+check("㊴ 切到 en 后回到英文源串（没有中文残留）", _ctx39()[:1] == ["Undo"], _ctx39()[:2])
+_qtl39.install(app, "zh_CN")
+check("㊴ 再切回 zh_CN 又变中文（install 是幂等的）", _ctx39() == _ROWS39, _ctx39()[:2])
+
+for _fn39 in ("main.py", "ui_settings.py"):
+    _src39 = open(os.path.join(_SRC39, _fn39), encoding="utf-8").read()
+    check("㊴ %s 里接了 qtlang.install()" % _fn39, "qtlang.install(" in _src39)
+_srcbe39 = open(os.path.join(os.path.dirname(_SRC39), "build_exe.py"), encoding="utf-8").read()
+check("㊴ build_exe.py 有 _qtbase_data_args()", "_qtbase_data_args" in _srcbe39)
+check("㊴ build_exe.py 的 qm 落到 `PySide6/translations`（与 qtlang 第 3 个候选对齐）",
+      "PySide6/translations" in _srcbe39)
+
+print("== ㊵ v2.0.14：输入框右键菜单无黑角 + 右侧清空小叉 ==")
+# 两条反馈的判据都必须是**行为/像素**，不能只看「代码里有这句」：
+#   ① 右键菜单换了壳 → 菜单窗口带 NoDropShadowWindowHint + 圆角外 alpha=0；
+#   ② 小叉 → 真能清空文本、且 QSpinBox / QComboBox 内部不长叉。
+import editfix as _ef40                                          # noqa: E402
+import glyphs as _gl40                                          # noqa: E402
+from PySide6.QtCore import QPoint as _QP40                      # noqa: E402
+from PySide6.QtGui import QContextMenuEvent as _QCME40          # noqa: E402
+from PySide6.QtWidgets import (QComboBox as _QCB40, QLineEdit as _QLE40,  # noqa: E402
+                               QMenu as _QM40, QPlainTextEdit as _QPT40,
+                               QSpinBox as _QSB40, QToolButton as _QTB40)
+
+# ---- 1) 图标与样式表接线 ----
+_gly40 = _gl40.ensure(force=True)
+check("㊵ glyphs 生成了 close 小叉", "close" in _gly40 and os.path.getsize(_gly40["close"]) > 64,
+      _gly40.get("close"))
+_qssraw40 = open(os.path.join(ROOT, "src", "style.qss"), encoding="utf-8").read()
+_qss40 = mw.render_style()
+check("㊵ style.qss 用 qproperty-icon 换清空按钮图标（image: 无效）",
+      "QLineEdit QToolButton" in _qssraw40 and "qproperty-icon: __GLYPH_CLOSE__" in _qssraw40)
+check("㊵ 渲染后没有残留 __GLYPH_CLOSE__", "__GLYPH_CLOSE__" not in _qss40)
+check("㊵ 渲染后 qproperty-icon 指向真实 PNG",
+      any(ln.strip().startswith("qproperty-icon: url(") and "close_" in ln
+          for ln in _qss40.splitlines()),
+      [ln.strip() for ln in _qss40.splitlines() if ln.strip().startswith("qproperty-icon")][:1])
+_srcmw40 = open(os.path.join(ROOT, "src", "main_window.py"), encoding="utf-8").read()
+check("㊵ main_window 里 import 了 editfix", "import editfix" in _srcmw40)
+check("㊵ load_style() 里调了 editfix.install()（所有入口共用同一套行为）",
+      "editfix.install(app)" in _srcmw40)
+_srcbe40 = open(os.path.join(ROOT, "build_exe.py"), encoding="utf-8").read()
+check("㊵ build_exe.py 带 --hidden-import editfix", '"--hidden-import", "editfix"' in _srcbe40
+      or '"editfix"' in _srcbe40)
+
+# ---- 2) 清空按钮：该有的有、不该有的没有 ----
+check("㊵ editfix.install() 幂等（重复调用返回同一个过滤器）",
+      _ef40.install(app) is _ef40._inst)
+
+_host40 = QWidget()
+_host40.resize(620, 260)
+_le40 = _QLE40(_host40)
+_le40.setGeometry(40, 30, 320, 36)
+_le40.setText("机器猫 剧场版")
+_sb40 = _QSB40(_host40)
+_sb40.setGeometry(40, 90, 120, 32)
+_sb40.setValue(7)
+_cb40 = _QCB40(_host40)
+_cb40.setGeometry(180, 90, 150, 32)
+_cb40.setEditable(True)
+_cb40.addItems(["全部", "已看"])
+_pt40 = _QPT40(_host40)
+_pt40.setGeometry(40, 140, 320, 80)
+_pt40.setPlainText("一段用来验证右键菜单的文字")
+_host40.show()
+
+
+def _pump40(times=8):
+    """㊵ 专用：清空按钮的显隐是 Qt 在 `textChanged` 里转手设的，
+    离屏只 processEvents 几圈不够（实测 3 圈时 isVisible 还是 True），
+    必须让出真实时间片。"""
+    for _ in range(times):
+        app.processEvents()
+        time.sleep(0.02)
+
+
+def _wait40(pred, ms=1200):
+    """轮询等一个状态，别死等固定时长。
+
+    ⚠ 离屏平台下 `QLineEdit` 清空按钮的显隐是**延迟**更新的：实测文本清空后
+    120ms 时 `isVisible()` 仍为 True，约 600ms 后才变 False（真窗口 200ms 内就隐藏）。
+    死等一个固定值会一路假红，所以这里等「状态达成」。
+    """
+    end = time.time() + ms / 1000.0
+    while time.time() < end:
+        if pred():
+            return True
+        app.processEvents()
+        time.sleep(0.02)
+    return pred()
+
+
+_pump40()
+
+_btns40 = _le40.findChildren(_QTB40)
+check("㊵ 普通输入框装上了清空按钮", len(_btns40) == 1, len(_btns40))
+check("㊵ 有内容时按钮可见", _btns40 and _btns40[0].isVisible())
+_spin_le40 = _sb40.findChildren(_QLE40)[0]
+check("㊵ QSpinBox 内部不长叉（否则数字框里塞个叉）",
+      len(_spin_le40.findChildren(_QTB40)) == 0)
+_combo_le40 = _cb40.lineEdit()
+check("㊵ 可编辑 QComboBox 内部不长叉",
+      _combo_le40 is not None and len(_combo_le40.findChildren(_QTB40)) == 0)
+if _btns40:
+    _btns40[0].click()
+    _pump40()
+    check("㊵ 点叉真的清空文本", _le40.text() == "", repr(_le40.text()))
+    check("㊵ 空文本时按钮自己隐藏", _wait40(lambda: not _btns40[0].isVisible()),
+          "visible=%s" % _btns40[0].isVisible())
+    _le40.setText("机器猫 剧场版")
+    check("㊵ 重新有内容时按钮又出现", _wait40(lambda: _btns40[0].isVisible()),
+          "visible=%s" % _btns40[0].isVisible())
+
+# ---- 3) 右键菜单：换壳了没有 ----
+def _menu40(widget, tag):
+    _gp40 = widget.mapToGlobal(_QP40(24, 16))
+    _ev40 = _QCME40(_QCME40.Mouse, _QP40(24, 16), _gp40)
+    app.sendEvent(widget, _ev40)
+    _pump40(5)
+    _ms40 = [w for w in app.topLevelWidgets() if isinstance(w, _QM40) and w.isVisible()]
+    check("㊵ %s 弹出了接管后的菜单" % tag, len(_ms40) == 1, len(_ms40))
+    return _ms40[0] if _ms40 else None
+
+
+_m40 = _menu40(_le40, "输入框")
+if _m40 is not None:
+    check("㊵ 菜单带 NoDropShadowWindowHint（窗口级投影关掉了）",
+          bool(_m40.windowFlags() & Qt.NoDropShadowWindowHint),
+          hex(int(_m40.windowFlags())))
+    check("㊵ 菜单是半透明窗口（圆角外才能真透明）",
+          _m40.testAttribute(Qt.WA_TranslucentBackground))
+    _img40 = _m40.grab().toImage()
+    check("㊵ 菜单四角 alpha=0（不是画成黑的）",
+          _img40.pixelColor(0, 0).alpha() == 0,
+          "alpha=%d" % _img40.pixelColor(0, 0).alpha())
+    check("㊵ 菜单内部不透明（面板真的画了底色）",
+          _img40.pixelColor(_img40.width() // 2, _img40.height() // 2).alpha() >= 200)
+    _acts40 = _m40.actions()
+    check("㊵ 条目 9 项（7 条 + 2 条分隔线）", len(_acts40) == 9, len(_acts40))
+    _txt40 = [a.text().split("\t")[0].replace("&", "")
+              for a in _acts40 if not a.isSeparator()]
+    check("㊵ 文本仍是中文（与 ㊴ 同一份标准菜单）", _txt40 == _ROWS39, _txt40)
+    check("㊵ action 的所有权已转交我们的菜单（临时菜单析构不会带走）",
+          all(a.parent() is _m40 for a in _acts40))
+    _sel40 = [a for a in _acts40 if "全选" in a.text()]
+    if _sel40:
+        _sel40[0].trigger()          # ⚠ 必须在菜单还开着时点（WA_DeleteOnClose）
+        _pump40(4)
+        check("㊵ 搬过来的 action 点了有反应（全选生效）",
+              _le40.selectedText() == _le40.text(), repr(_le40.selectedText()))
+    _m40.close()
+    _pump40(4)
+    check("㊵ 菜单关闭后自己被回收（不泄漏）", _m40 not in app.topLevelWidgets())
+
+_m40b = _menu40(_pt40, "多行文本框")
+if _m40b is not None:
+    check("㊵ 多行文本框的菜单同样无投影",
+          bool(_m40b.windowFlags() & Qt.NoDropShadowWindowHint))
+    _m40b.close()
+    _pump40(4)
+
+_host40.close()
+_host40.deleteLater()
+app.processEvents()
 
 print("通过 %d/%d" % (TOTAL[0] - len(FAILS), TOTAL[0]))
 if FAILS:

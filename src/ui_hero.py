@@ -32,6 +32,7 @@ import player as player_mod
 import nfo_parser as nfo_mod
 import scanner as scanner_mod
 import config as cfg            # v2.0.2：数值框最小宽度统一走 cfg.SPIN_MIN_W（叶子模块，不成环）
+import uiwin                    # v2.0.12：右键菜单圆角外要真透明（否则一圈黑框）
 
 
 # ---------- 图像辅助 ----------
@@ -853,7 +854,9 @@ class PersonSearchDialog(QDialog):
         # 输入法挂不上，弹层里切不了中文（用户截图里的「输入框打不出中文」就是这个）。
         # 改成一个**能激活的无边框对话框**：输入法正常、Esc 照旧关闭；
         # 「点面板外面关闭」由 `ClickOutsideCloser` 补回来（原来 Popup 是白送的）。
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        # v2.0.12（用户反馈「圆角外有黑框」）：无边框 + QSS 圆角还不够 —— 顶层窗口的
+        # 表面不透明，圆角外没人绘制就是纯黑。交给 `uiwin.bare()` 开半透明 + 去系统投影。
+        uiwin.bare(self)
         self._outside = None
         # 输入法相关：显式打开输入法事件，别让自绘/无边框链路把它关掉
         self.setAttribute(Qt.WA_InputMethodEnabled, True)
@@ -865,13 +868,21 @@ class PersonSearchDialog(QDialog):
         self.setWindowTitle(_tt)
         self.setMinimumWidth(380)
         self.setMaximumHeight(470)
-        # 弹层自身不透明底色（避免离屏/真机透明），不走全局 QWidget 背景规则
+        # 弹层自身不透明底色（避免离屏/真机透明），不走全局 QWidget 背景规则。
+        # v2.0.12（用户反馈「圆角外有黑框」）：**半透明顶层窗口的根控件不画 QSS 底色**
+        # —— 实测 `self.grab()` 整块 alpha=0（只有子控件在画）。所以圆角 + 底色必须交给
+        # 一个**内层容器**（#PSDBody），根控件只留 0 margin 的外层布局。
         self.setStyleSheet(
-            "PersonSearchDialog{background:#18181b;border:1px solid #3f3f46;"
+            "QFrame#PSDBody{background:#18181b;border:1px solid #3f3f46;"
             "border-radius:10px;}"
         )
-        self.setAutoFillBackground(True)
-        lay = QVBoxLayout(self)
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _outer.setSpacing(0)
+        self._body = QFrame()
+        self._body.setObjectName("PSDBody")
+        _outer.addWidget(self._body)
+        lay = QVBoxLayout(self._body)
         lay.setContentsMargins(12, 10, 12, 12)
         lay.setSpacing(8)
 
@@ -1505,7 +1516,7 @@ class HeroView(QScrollArea):
 
     def _remove_tag_menu(self, anchor):
         cur = self._tag_values()
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         if not cur:
             a = QAction("（暂无标签）", self)
             a.setEnabled(False)
@@ -1659,7 +1670,7 @@ class HeroView(QScrollArea):
         return row
 
     def _more_menu(self, anchor):
-        menu = QMenu(self)
+        menu = uiwin.menu(self)
         a1 = QAction("在资源管理器中显示", self)
         a1.triggered.connect(lambda: player_mod.reveal_in_explorer(self.media.get("file_path", "")))
         a2 = QAction("复制文件路径", self)

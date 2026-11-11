@@ -142,6 +142,21 @@ def main():
         _lang = _cfg.get_settings().language()
         _i18n.set_lang(_lang)
         applog.log("界面语言：%s（%s）" % (_lang, _i18n.cn_name(_lang)))
+        # v2.0.13：Qt **内建控件**的标准文本（输入框右键菜单、QMessageBox 按钮、
+        # 文件对话框…）在 Qt 自己的 .qm 里，i18n 词典管不到 —— 必须装 QTranslator，
+        # 否则就是英文（用户反馈「输入框右键为英文」）。同样要在建界面之前装。
+        try:
+            import qtlang as _qtlang
+            _qt_ok, _qt_path = _qtlang.install(app, _lang)
+            _qt_sample = _qtlang.sample_texts(3) if _qt_ok else []
+            if _qt_ok:
+                applog.log("Qt 标准文本：已装 %s ｜ 示例 %s"
+                           % (_qt_path, " / ".join(_qt_sample) or "-"))
+            else:
+                applog.log("Qt 标准文本：未装（该语言无 qtbase 翻译）｜ 示例 %s"
+                           % (" / ".join(_qt_sample) or "-"))
+        except Exception as e:
+            applog.log("装 Qt 标准文本翻译失败：%s" % e)
     except Exception as e:
         applog.log("读取界面语言失败，按基准语言启动：%s" % e)
 

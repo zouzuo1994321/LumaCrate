@@ -374,6 +374,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "last_year" in _added:
         conn.execute("UPDATE people SET last_year=(SELECT MAX(m.year) FROM media_people mp "
                      "JOIN media m ON m.id=mp.media_id WHERE mp.person_id=people.id)")
+    # v2.0.11（用户反馈 1）：**一次性**按「一部片算一部」重算 works。
+    # 老库里 works 的口径是「一条 media_people = 一部作品」，而多碟分集（cd1/cd2…）
+    # 每个分片都单独链过演员 → 同一部片被算成 2 部；`group_cd_sets` 事后改写
+    # parent_id 时也不会回头修正这个冗余列。升级后首启（不需要用户重扫）修一次。
+    if _uv < 2011:
+        try:
+            _recount_people_works(conn)
+            conn.execute("PRAGMA user_version=2011")
+        except sqlite3.Error:
+            pass
 
 
 def upsert_person(name: str, role_type: str = "Actor", thumb: Optional[str] = None) -> int:
@@ -450,6 +460,9 @@ def clear_media() -> None:
         try:
             conn.execute("DELETE FROM media")
             conn.execute("DELETE FROM media_people")
+            # v2.0.11：people.works 必须一起归零 —— 触发器只在删 media_people 时
+            # 逐行 -1，删整表还是同一套 ±1，历史脏数据（多碟分集曾经被多计）会留在列里。
+            _recount_people_works(conn)
             conn.commit()
         finally:
             conn.close()
@@ -927,13 +940,20 @@ def replace_media_person(media_id: int, old_person_id: int, new_person_id: int) 
 
 def get_person(pid: int):
     """取单个演员。附带 works / last_year —— 详情页的「状态」推断也需要它们
-    （v1.11.0：原先只有 all_people_ordered 带这两个字段，详情页永远判成「未知」）。"""
+    （v1.11.0：原先只有 all_people_ordered 带这两个字段，详情页永远判成「未知」）。
+
+    v2.0.11（反馈 1）：works 改成**按一部片折叠**再计数 —— 与 `person_works()` 同口径。
+    原来这里是无脑 `COUNT(*) FROM media_people`，多碟分集（cd1/cd2）会被数成 2 部，
+    与详情页「全部作品」网格里实际显示的条数对不上。
+    """
+    works_sql = ("(SELECT COUNT(DISTINCT " + _GROUP_MEDIA_ID + ") "
+                 " FROM media_people mp JOIN media m ON m.id = mp.media_id "
+                 " WHERE mp.person_id = p.id) AS works")
     with _LOCK:
         conn = get_conn()
         try:
             row = conn.execute(
-                "SELECT p.*, "
-                "(SELECT COUNT(*) FROM media_people mp WHERE mp.person_id=p.id) AS works, "
+                "SELECT p.*, " + works_sql + ", "
                 "(SELECT MAX(m.year) FROM media_people mp JOIN media m ON m.id=mp.media_id "
                 " WHERE mp.person_id=p.id) AS last_year "
                 "FROM people p WHERE p.id=?", (pid,)).fetchone()
@@ -1014,15 +1034,68 @@ def actors_map(limit_names: int = 0, ids=None):
     return out
 
 
+#: v2.0.11（用户反馈 1）：「一部片」的**代表条目 id** 表达式。
+#: 背景：扫描时 `scanner.group_cd_sets()` 会把同目录的 `-cd1/-cd2/...` 归组成
+#: 「代表分片 + 其余分片挂 parent_id」。影片墙 / 媒体库靠 `parent_id IS NULL`
+#: 天然只剩一部，**但演员库 / 导演库走的是 media_people 反查** —— 每个分片都被
+#: 单独链了一次演员，于是同一部片在「全部作品」里出现 N 次、卡片上「N 部作品」
+#: 也虚高（用户原话：「首页和媒体库中 cd1 cd2 合并在一起，但演员和导演中还是分开」）。
+#: 统一用这个表达式把任意分片折到它的代表条目，再按代表去重。
+_GROUP_MEDIA_ID = "CASE WHEN m.parent_id IS NULL THEN m.id ELSE m.parent_id END"
+
+
 def person_works(pid: int):
+    """某人的作品列表 —— **同一部片的多碟分集只算一部**（v2.0.11，反馈 1）。
+
+    返回的每一行都是**代表条目**（parent_id 为空的那条）的完整 media 记录，
+    字段口径与 `search_media` 一致，可直接喂给影片卡片。
+
+    折叠规则见 `_GROUP_MEDIA_ID`：`cd2`/`cd3`… 折到 `cd1`（代表分片）。
+    用 `GROUP BY rep.id` 去重：一个人在同一部片里可能同时挂在 cd1 与 cd2 上
+    （同目录多分片共用一份 nfo → 每个分片都 `_link_actors` 了一遍），
+    不去重就会重复出行。`char_role` 取 MIN 只是为了让聚合列有个确定值。
+    """
+    sql = ("SELECT rep.*, MIN(mp.char_role) AS char_role "
+           "FROM media_people mp "
+           "JOIN media m ON m.id = mp.media_id "
+           "JOIN media rep ON rep.id = " + _GROUP_MEDIA_ID + " "
+           "WHERE mp.person_id = ? "
+           "GROUP BY rep.id "
+           "ORDER BY rep.year DESC, rep.id")
     with _LOCK:
         conn = get_conn()
         try:
-            return [dict(r) for r in conn.execute(
-                "SELECT m.*, mp.char_role FROM media_people mp "
-                "JOIN media m ON m.id=mp.media_id WHERE mp.person_id=? "
-                "ORDER BY m.year DESC", (pid,)
-            ).fetchall()]
+            return [dict(r) for r in conn.execute(sql, (pid,)).fetchall()]
+        finally:
+            conn.close()
+
+
+def _recount_people_works(conn) -> None:
+    """在**已持有连接**的前提下重算 `people.works`（调用方负责 `_LOCK` / commit）。
+
+    口径：一个人有效作品数 = 他挂过的、**去重到代表条目**之后的影片数。
+    触发器（`trg_mp_ins` / `trg_mp_del`）只会 ±1 —— 它不知道 parent_id 事后会被
+    `group_cd_sets` 改写，所以只要有「归组 / 删除」发生，就必须整表重算一次。
+    """
+    conn.execute(
+        "UPDATE people SET works = ("
+        "  SELECT COUNT(DISTINCT CASE WHEN m.parent_id IS NULL THEN m.id "
+        "                            ELSE m.parent_id END) "
+        "  FROM media_people mp JOIN media m ON m.id = mp.media_id "
+        "  WHERE mp.person_id = people.id)")
+
+
+def recount_people_works() -> None:
+    """按「一部片算一部」重算所有 `people.works`（v2.0.11，反馈 1）。
+
+    调用时机：扫描结束（归组改写了 parent_id）、删除失效记录、删片、清空索引。
+    只影响**统计列**，不动 media / media_people。
+    """
+    with _LOCK:
+        conn = get_conn()
+        try:
+            _recount_people_works(conn)
+            conn.commit()
         finally:
             conn.close()
 
@@ -2193,7 +2266,11 @@ def parts_counts(ids):
 
 
 def delete_media(media_id: int) -> int:
-    """删除一条媒体记录（含其关联演员）。**不动磁盘文件。** 返回删掉的关联行数。"""
+    """删除一条媒体记录（含其关联演员）。**不动磁盘文件。** 返回删掉的关联行数。
+
+    v2.0.11（反馈 1）：删完顺带重算 people.works —— 删掉的可能正是某个分片
+    （parent_id 非空），触发器却按「一条关联 = 一部作品」给它 -1，会越删越偏。
+    """
     with _LOCK:
         conn = get_conn()
         try:
@@ -2201,6 +2278,7 @@ def delete_media(media_id: int) -> int:
                              (media_id,)).fetchone()["c"]
             conn.execute("DELETE FROM media_people WHERE media_id=?", (media_id,))
             conn.execute("DELETE FROM media WHERE id=?", (media_id,))
+            _recount_people_works(conn)
             conn.commit()
             return n
         finally:

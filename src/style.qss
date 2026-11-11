@@ -37,8 +37,12 @@ QWidget#CentralVeil { background: transparent; }
 QDialog {
     background: rgba(24, 24, 27, __DLG__);
     border: 1px solid rgba(255, 255, 255, 0.10);
-    border-radius: 16px;
 }
+/* v2.0.12（用户反馈「圆角外有黑框」）：**这里曾经有 border-radius: 16px，现已删掉**。
+   原生标题栏的对话框窗口表面是不透明的方形，QSS 只把底色画进圆角里 →
+   圆角外那四个小三角没人画 = 纯黑，用户看到的就是「四角各一个黑方块」。
+   无边框弹层（PersonSearchDialog / ColumnFilterPopup）**自己**在局部样式里写了圆角，
+   而且都走 uiwin.bare() 开了半透明窗口，不受这条影响。 */
 QToolTip {
     background: rgba(39, 39, 42, __DLG__); color: #ecedee;
     border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; padding: 6px 10px;
@@ -242,18 +246,39 @@ QPushButton#Seg:checked {
 }
 QPushButton#Seg:checked:hover { background: __ACCENT_LIGHT__; }
 
-/* ---------- 输入（HeroUI field：content1 底 + 大圆角 + 聚焦强调） ---------- */
+/* ---------- 输入（HeroUI field：content1 底 + 大圆角 + 聚焦强调） ----------
+   v2.0.11（用户反馈 3：「所有输入的好像前面有几px的间隙」）：
+   原来左右 16px 内边距 + 1px 边框 → 首字实际落在 **19px**（离屏实测，与用户截图
+   578Z / 579Z 上量的 18px 一致）。截图里红框框的就是这一截空白。
+   收到 12px 后首字落在 15px：胶囊圆角（35px 高 → radius 17.5）内仍然宽松，
+   但不再有「文字被推得很靠里」的观感。⚠ 不要再往下收到 10 以下 —— 圆角弧线上
+   会开始压字。 */
 QLineEdit {
     background: rgba(39, 39, 42, 0.72); color: #ecedee;
-    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 7px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 20px; padding: 7px 12px;
     selection-background-color: rgba(__ACCENT__, 0.55); selection-color: #ffffff;
 }
 QLineEdit:hover { border-color: rgba(255, 255, 255, 0.16); }
 QLineEdit:focus {
     border-color: __ACCENT__; background: rgba(39, 39, 42, 0.92);
 }
-/* 表单里的输入框与下拉框保持同款圆角（顶栏搜索框才是胶囊形） */
-QDialog QLineEdit { border-radius: 10px; padding: 6px 11px; }
+/* 表单里的输入框与下拉框保持同款圆角（顶栏搜索框才是胶囊形）
+   v2.0.11：左右 11 → 10，跟上面一起把首字往左挪，两种输入框不再差 5px 的观感 */
+QDialog QLineEdit { border-radius: 10px; padding: 6px 10px; }
+
+/* 输入框有内容时，右侧那颗「清空」小叉（v2.0.14 反馈 2）。
+   ⚠ 换图标只能用 qproperty-icon，**image: 无效** —— Qt 6.11 的清空按钮是
+     `QLineEdit` 内部的无名 QToolButton，图标由
+     `setIcon(style()->standardIcon(SP_LineEditClearButton))` 直接塞进去，
+     QSS 的 image 被它盖掉（实测三张图逐字节相同）。
+   ⚠ 只能用后代选择器：那颗按钮没有 objectName，选不中更精确的目标；
+     但 QSpinBox / QComboBox 内部的 QLineEdit 已在 editfix.py 里排除，
+     不会出现「数字框里塞了个叉」。
+   实测：挂上后叉号亮像素 16 → 48；只改 padding 的对照组仍是 16。 */
+QLineEdit QToolButton {
+    qproperty-icon: __GLYPH_CLOSE__;
+    background: transparent; border: none; padding: 0px; margin: 0px;
+}
 
 QComboBox, QTimeEdit, QSpinBox, QDoubleSpinBox {
     background: rgba(39, 39, 42, 0.72); color: #ecedee;
@@ -393,6 +418,12 @@ QHeaderView::section {
     padding: 9px 10px; font-weight: 600;
 }
 QHeaderView::section:hover { color: #fafafa; background: rgba(255, 255, 255, 0.08); }
+/* v2.0.12（用户反馈「圆角外有黑框」）：表格自己有 14px 圆角，但表头是**方形子控件**、
+   底色又只有 4.5% 白 —— 它压在表格的圆角缺口上，缺口里就只剩「页面色 + 4.5% 白」，
+   比表头正文暗一截，看着就是「圆角外一圈黑框」。给首/末列补同样的顶部圆角即可。
+   半径取 13：表头位于表格 1px 边框内侧，13 + 1 = 14 与表格同心。 */
+QHeaderView::section:first { border-top-left-radius: 13px; }
+QHeaderView::section:last { border-top-right-radius: 13px; }
 QTableCornerButton::section { background: rgba(255, 255, 255, 0.045); border: none; }
 
 /* ---------- 分组框 ---------- */
@@ -451,31 +482,51 @@ QProgressBar {
 }
 QProgressBar::chunk { background: __ACCENT__; border-radius: 999px; }
 
-/* ---------- 滚动（HeroUI thin：8px、全圆、低对比） ---------- */
+/* ---------- 滚动（v2.0.11：真·胶囊滑块，与卡片/输入框同一套圆角语言） ----------
+   ⚠ 硬坑（本轮实测得出，别再踩）：**给 `QScrollBar::handle` 写 margin，圆角就不再画**。
+     旧版 `QScrollBar:vertical{width:8px;margin:2px}` ＋ `::handle{border-radius:4px}`
+     → 槽被 margin 挤成 4px、滑块顶端逐行宽度 4/4/4/4（方头），真机截图里就是那条方杠。
+     四种写法对照实测（dev/_scratch/probe_v2011_scroll.py）：
+       槽 margin + 滑块 margin + r4  → 滑块 4px 方头 ✗
+       槽 margin + 滑块 margin 0 3px → 滑块 6px 方头 ✗
+       槽 margin + 滑块**无** margin → 滑块 8px 圆头 ✓（本轮采用）
+       槽无 margin + 滑块无 margin  → 滑块 8px 圆头 ✓（但贴死窗口边，不要）
+     结论：margin 只能写在**槽**（QScrollBar 自身）上，滑块的圆角才生效。
+     现在槽 12px、margin 2px → 滑块 8px 宽 + radius 4 = 正圆头，且离窗口边留 2px 余量。 */
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; }
-QScrollBar:vertical { background: transparent; width: 8px; margin: 2px; }
+QScrollBar:vertical { background: transparent; width: 12px; margin: 2px; }
 QScrollBar::handle:vertical {
-    background: rgba(255, 255, 255, 0.18); border-radius: 4px; min-height: 32px;
+    background: rgba(255, 255, 255, 0.20); border-radius: 4px; min-height: 36px;
 }
-QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.34); }
-QScrollBar:horizontal { background: transparent; height: 8px; margin: 2px; }
+QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.42); }
+QScrollBar::handle:vertical:pressed { background: rgba(255, 255, 255, 0.58); }
+/* 悬停时给槽一条极淡的圆角底衬，让「这里能滚」看得出来（VS Code 同款做法） */
+QScrollBar:vertical:hover {
+    background: rgba(255, 255, 255, 0.045); border-radius: 4px;
+}
+QScrollBar:horizontal { background: transparent; height: 12px; margin: 2px; }
 QScrollBar::handle:horizontal {
-    background: rgba(255, 255, 255, 0.18); border-radius: 4px; min-width: 32px;
+    background: rgba(255, 255, 255, 0.20); border-radius: 4px; min-width: 36px;
 }
-QScrollBar::handle:horizontal:hover { background: rgba(255, 255, 255, 0.34); }
+QScrollBar::handle:horizontal:hover { background: rgba(255, 255, 255, 0.42); }
+QScrollBar::handle:horizontal:pressed { background: rgba(255, 255, 255, 0.58); }
+QScrollBar:horizontal:hover {
+    background: rgba(255, 255, 255, 0.045); border-radius: 4px;
+}
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QScrollBar:disabled { background: transparent; }
 
-/* 数据源列表固定只露三行，必须看得见滚轴 —— 单独加粗并给极淡槽底 */
+/* 数据源列表固定只露三行，必须看得见滚轴 —— 单独加粗并给极淡槽底。
+   v2.0.11：同步去掉滑块上的 margin（见上），否则同样是方头。 */
 QListWidget#SrcSourceList QScrollBar:vertical {
     background: rgba(255, 255, 255, 0.04);
-    width: 9px; margin: 2px; border-radius: 5px;
+    width: 12px; margin: 2px; border-radius: 4px;
 }
 QListWidget#SrcSourceList QScrollBar::handle:vertical {
     background: rgba(255, 255, 255, 0.30);
-    border-radius: 5px; min-height: 28px;
+    border-radius: 4px; min-height: 28px;
 }
 QListWidget#SrcSourceList QScrollBar::handle:vertical:hover {
     background: rgba(255, 255, 255, 0.48);

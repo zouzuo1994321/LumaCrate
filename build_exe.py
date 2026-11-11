@@ -29,6 +29,53 @@ EXE_NAME = f"{ver.APP_NAME}-{ver.VERSION}-{ver.BUILD}"
 LEGACY_PREFIXES = ("本地影视中心-",)
 
 
+def _qtbase_data_args():
+    """v2.0.13：把 PySide6 的 `qtbase_*.qm` 显式带进 onefile（保险）。
+
+    ## 先记一条实测结论，别再绕
+    用户在 v2.0.12 看到输入框右键是英文，**不是因为 exe 里没有 qm** ——
+    `pyi-archive_viewer -l` 查 v2.0.12 的 exe，`PySide6/translations/` 早在里面
+    （32 个 `qtbase_*.qm` 一个不少，`qtbase_zh_CN.qm` 连原始 147222 字节都一致，
+    PyInstaller 的 PySide6 hook 把这个目录整个收了）。
+    **真正缺的是运行时那一行 `QTranslator.installTranslator()`**（见 `src/qtlang.py`）。
+    所以这里的 `--add-data` 只是「不同 PyInstaller / PySide6 版本 hook 行为可能变」的保险，
+    加了也不会让 exe 变大（同名文件去重：两版都是 59.7 MB，差 5 KB）。
+
+    只挑我们 19 种界面语言里 Qt 真有翻译的（实测 15 个有，hi/th/vi/id 没有），
+    目标目录固定 `PySide6/translations`，与 `qtlang.translations_dirs()` 的候选位置对齐。
+    """
+    try:
+        import PySide6
+    except Exception:
+        return []
+    src = os.path.join(os.path.dirname(PySide6.__file__), "translations")
+    if not os.path.isdir(src):
+        print("[i18n] 未找到 PySide6/translations，Qt 标准文本将保持英文")
+        return []
+
+    try:
+        import i18n
+        codes = [c for c, *_ in i18n.LANGUAGES]
+    except Exception:
+        codes = ["zh_CN", "ja", "ko", "es", "ar", "pt", "ru", "de", "fr",
+                 "it", "tr", "nl", "pl", "sv"]
+
+    args, picked = [], []
+    for code in codes:
+        if code.split("_")[0] == "en":       # Qt 的源语言，没有也不需要 qm
+            continue
+        c = {"pt": "pt_BR", "zh": "zh_CN"}.get(code, code)
+        for stem in (c, c.split("_")[0]):
+            f = os.path.join(src, "qtbase_%s.qm" % stem)
+            if os.path.exists(f) and f not in picked:
+                picked.append(f)
+                args += ["--add-data", f"{f};PySide6/translations"]
+                break
+    print("[i18n] 打入 %d 个 qtbase 翻译：%s"
+          % (len(picked), ", ".join(os.path.basename(p) for p in picked)))
+    return args
+
+
 def _ensure_logo_ico():
     """确保 logo.ico 存在且不旧于 logo-4.png（PyInstaller --icon 用，v1.23.0 反馈 2）。
 
@@ -114,6 +161,11 @@ def main():
         "--clean",
         "--add-data", f"{os.path.join(SRC, 'style.qss')};.",
         "--add-data", f"{os.path.join(ROOT, 'logo-4.png')};.",    # v1.35.1：新品牌图标（运行时窗口 / 任务栏）
+        # v2.0.13：Qt 自带的 `qtbase_*.qm`（输入框右键菜单等标准文本的中文/日文…）。
+        # 纯数据文件，`--hidden-import` 收不到它们，必须 --add-data。
+        *_qtbase_data_args(),
+        "--hidden-import", "qtlang",          # v2.0.13：Qt 标准文本翻译（QTranslator）
+        "--hidden-import", "editfix",         # v2.0.14：输入框右键菜单圆角壳 + 清空小叉
         "--hidden-import", "PySide6.QtXml",
         "--hidden-import", "backdrop",
         "--hidden-import", "scraper",
